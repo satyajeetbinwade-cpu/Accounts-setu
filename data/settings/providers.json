@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "lastUsedProvider": "cline",
+  "modes": {},
+  "providers": {
+    "cline": {
+      "settings": {
+        "provider": "cline",
+        "auth": {
+          "accessToken": "workos:eyJhbGciOiJSUzI1NiIsImtpZCI6InNzb19vaWRjX2tleV9wYWlyXzAxSzNBNTQxREZLR1FaRjE1R0Y4UkZNUDBWIn0.eyJleHRlcm5hbF9pZCI6InVzci0wMU0wWk1GVlFRV0U0WkY2VEhZNlIxOFhISyIsImxhc3ROYW1lIjoiYmlud2FkZSIsImZpcnN0TmFtZSI6InNhdHlhamVldCIsImVtYWlsIjoic2F0eWFqZWV0Ymlud2FkZUBnbWFpbC5jb20iLCJpc3MiOiJodHRwczovL2FwaS53b3Jrb3MuY29tL3VzZXJfbWFuYWdlbWVudC9jbGllbnRfMDFLM0E1NDFGTjhUQTNFUFBIVEQyMzI1QVIiLCJzdWIiOiJ1c2VyXzAxTTBaTUZUWUhCN1dQUVJBTkFES0o5Wko0Iiwic2lkIjoic2Vzc2lvbl8wMU0wWk1GVk5YQzFaNjNOMjhWREdRVzNIWCIsImp0aSI6IjAxTTFQRUpHWjk4MUc4WEFHWFI2NEtQMFFCIiwiYXV0aF90aW1lIjoxNzg3NzY4MDczLCJjbGllbnRfaWQiOiJjbGllbnRfMDFLM0E1NDFGTjhUQTNFUFBIVEQyMzI1QVIiLCJleHAiOjE3ODg1MzcyMjEsImlhdCI6MTc4ODUzMzYyMX0.OLZBiiGpbjMQcarQoVH60ZcY66VURT1DAO6du_fUtiS4e6c9PPBiejnDfZUr2-hIucUb-KZjP8lI21qt6FyeAXkgLU9vEW1ZzEJ0p40Kk2s5KBr4tehHQDd4SI1VkGF-91XX23FlYeqrNjqUQyh9gbef3jhRjnFCD66pxiqcbPMqDDFSgH7sNTb_m0HphYtFT8dkOiha1-jbhWHEpW1ho2JHcNTuXW88ZaCIlkLVzWMZ-vCn8Zy-gGCL7GHybvka_QmxphkjkwcYGdpOhv61Z9uFJ_yjwdjRAUg3eJgyhBdIYZ3tq5jNM6xUpHHSNvGMPg7qemn1baMjLjd_akxLjg",
+          "refreshToken": "asM82ejNC6XWc8gJcH7Cl1nuB",
+          "expiresAt": 1788537221000,
+          "accountId": "usr-01M0ZMFVQQWE4ZF6THY6R18XHK",
+          "metadata": {
+            "tokenType": "Bearer",
+            "userInfo": {
+              "subject": "user_01M0ZMFTYHB7WPQRANADKJ9ZJ4",
+              "clineUserId": "usr-01M0ZMFVQQWE4ZF6THY6R18XHK",
+              "email": "satyajeetbinwade@gmail.com",
+              "firstName": "satyajeet",
+              "lastName": "binwade",
+              "accounts": null,
+              "name": "satyajeet binwade"
+            }
+          }
+        },
+        "model": "zai/glm-5.2"
+      },
+      "updatedAt": "2026-09-04T14:53:42.294Z",
+      "tokenSource": "oauth"
+    },
+    "sapaicore": {
+      "settings": {
+        "provider": "sapaicore",
+        "model": "anthropic--claude-3.5-sonnet",
+        "sap": {
+          "useOrchestrationMode": true
+        }
+      },
+      "updatedAt": "2026-08-26T18:23:13.639Z",
+      "tokenSource": "migration"
+    },
+    "openai-compatible": {
+      "settings": {
+        "provider": "openai-compatible",
+        "apiKey": "sk_1gdorru7****",
+        "model": "sarvam-105b",
+        "baseUrl": "https://api.sarvam.ai/v1"
+      },
+      "updatedAt": "2026-08-27T15:03:34.646Z",
+      "tokenSource": "manual"
+    }
+  }
+}

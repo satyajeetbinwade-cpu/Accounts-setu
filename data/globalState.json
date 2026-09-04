@@ -1,0 +1,140 @@
+{
+  "welcomeViewCompleted": true,
+  "__vscodeMigrationVersion": 3,
+  "clineVersion": "4.1.16",
+  "remoteRulesToggles": {},
+  "remoteWorkflowToggles": {},
+  "remoteSkillsToggles": {},
+  "openAiHeaders": {},
+  "sapAiCoreUseOrchestrationMode": true,
+  "ocaMode": "internal",
+  "planModeApiProvider": "cline",
+  "actModeApiProvider": "cline",
+  "planModeOpenRouterModelId": "z-ai/glm-5.3-flash",
+  "actModeOpenRouterModelId": "z-ai/glm-5.3-flash",
+  "planModeOpenRouterModelInfo": {
+    "name": "GLM-5.3-Flash",
+    "contextWindow": 1310720,
+    "maxTokens": 131072,
+    "supportsPromptCache": true,
+    "inputPrice": 0.075,
+    "outputPrice": 0.25,
+    "maxInputTokens": 1310720,
+    "capabilities": [
+      "images",
+      "video",
+      "tools",
+      "reasoning",
+      "structured_output",
+      "temperature",
+      "prompt-cache"
+    ],
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "cacheReadsPrice": 0.015,
+    "cacheWritesPrice": 0
+  },
+  "actModeOpenRouterModelInfo": {
+    "name": "GLM-5.3-Flash",
+    "contextWindow": 1310720,
+    "maxTokens": 131072,
+    "supportsPromptCache": true,
+    "inputPrice": 0.075,
+    "outputPrice": 0.25,
+    "maxInputTokens": 1310720,
+    "capabilities": [
+      "images",
+      "video",
+      "tools",
+      "reasoning",
+      "structured_output",
+      "temperature",
+      "prompt-cache"
+    ],
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "cacheReadsPrice": 0.015,
+    "cacheWritesPrice": 0
+  },
+  "lastShownAnnouncementId": "4.1",
+  "enableParallelToolCalling": true,
+  "autoApprovalSettings": {
+    "version": 4,
+    "enabled": true,
+    "favorites": [],
+    "maxRequests": 20,
+    "actions": {
+      "readFiles": true,
+      "readFilesExternally": false,
+      "editFiles": true,
+      "editFilesExternally": false,
+      "executeSafeCommands": true,
+      "executeAllCommands": false,
+      "useBrowser": true,
+      "useMcp": true
+    },
+    "enableNotifications": false
+  },
+  "workspaceRoots": [
+    {
+      "path": "/Users/satyajeetbinwade/Desktop",
+      "name": "Desktop",
+      "vcs": "none"
+    }
+  ],
+  "primaryRootIndex": 0,
+  "globalWorkflowToggles": {},
+  "globalClineRulesToggles": {},
+  "__vscodeLegacyMcpSettingsMigration": {
+    "sources": {
+      "vscodeGlobalStorage": {
+        "path": "/Users/satyajeetbinwade/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/settings/cline_mcp_settings.json",
+        "migratedAt": 1787768593520
+      }
+    }
+  },
+  "telemetrySetting": "enabled",
+  "mode": "act",
+  "planModeClineModelId": "zai/glm-5.2",
+  "actModeClineModelId": "zai/glm-5.2",
+  "planActSeparateModelsSetting": false,
+  "openAiBaseUrl": "https://api.sarvam.ai/v1",
+  "planModeOpenAiModelId": "sarvam-105b",
+  "actModeOpenAiModelId": "sarvam-105b",
+  "planModeOpenAiModelInfo": {
+    "contextWindow": 128000,
+    "supportsImages": true,
+    "supportsPromptCache": false,
+    "inputPrice": 0,
+    "outputPrice": 0,
+    "temperature": 0
+  },
+  "actModeOpenAiModelInfo": {
+    "contextWindow": 128000,
+    "supportsImages": true,
+    "supportsPromptCache": false,
+    "inputPrice": 0,
+    "outputPrice": 0,
+    "temperature": 0
+  },
+  "planModeClineModelInfo": {
+    "maxTokens": 128000,
+    "contextWindow": 1000000,
+    "supportsImages": false,
+    "supportsPromptCache": true,
+    "inputPrice": 0.8,
+    "outputPrice": 2.55,
+    "cacheWritesPrice": 0,
+    "cacheReadsPrice": 0.16
+  },
+  "actModeClineModelInfo": {
+    "maxTokens": 128000,
+    "contextWindow": 1000000,
+    "supportsImages": false,
+    "supportsPromptCache": true,
+    "inputPrice": 0.8,
+    "outputPrice": 2.55,
+    "cacheWritesPrice": 0,
+    "cacheReadsPrice": 0.16
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "session_id": "1787843611507_t3wg2",
+  "source": "vscode",
+  "pid": 97522,
+  "started_at": "2026-08-27T15:13:32.052Z",
+  "ended_at": "2026-09-01T14:48:02.300Z",
+  "exit_code": 1,
+  "status": "failed",
+  "interactive": true,
+  "provider": "openai-compatible",
+  "model": "zai/glm-5.2",
+  "cwd": "/Users/satyajeetbinwade/.cline/data/workspaces/chat",
+  "workspace_root": "/Users/satyajeetbinwade/.cline/data/workspaces/chat",
+  "enable_tools": true,
+  "enable_spawn": false,
+  "enable_teams": false,
+  "prompt": "Go through this document , it is the reference for the problem that we are trying to solve using Sarvam and helping mode",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "4.1.16"
+    },
+    "title": "Go through this document , it is the reference for the problem that we are trying to solve using Sarvam and helping mode",
+    "totalCost": 0.38964318000000003,
+    "aggregatedAgentsCost": 0.38964318000000003,
+    "usage": {
+      "inputTokens": 1026700,
+      "outputTokens": 35874,
+      "cacheReadTokens": 817493,
+      "cacheWriteTokens": 0,
+      "totalCost": 0.38964318000000003
+    },
+    "aggregateUsage": {
+      "inputTokens": 1026700,
+      "outputTokens": 35874,
+      "cacheReadTokens": 817493,
+      "cacheWriteTokens": 0,
+      "totalCost": 0.38964318000000003
+    },
+    "isFavorited": false,
+    "size": 83701,
+    "tokensIn": 77874,
+    "tokensOut": 12661,
+    "cacheWrites": 0,
+    "cacheReads": 301038,
+    "modelId": "zai/glm-5.2",
+    "legacyTask": false
+  },
+  "messages_path": "/Users/satyajeetbinwade/.cline/data/sessions/1787843611507_t3wg2/1787843611507_t3wg2.messages.json"
+}
