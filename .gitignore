@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtualenv
+.venv/
+
+# Test cache
+.pytest_cache/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets — never commit API keys
+.env
+.env.*
+
+# Generated outputs — client runs must not be committed
+reports/
+output_packet.json
+
+# Local client data
+data/
+
+# Scratch files
+*.log
+
+# Local client data (real GST returns - never publish)
+real_data/

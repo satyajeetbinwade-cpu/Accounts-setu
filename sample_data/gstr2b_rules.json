@@ -1,0 +1,114 @@
+{
+  "docdata": {
+    "doclist": [
+      {
+        "supplierGstin": "29AAFCB5236K1ZL",
+        "docnum": "INV-24001",
+        "docdt": "2024-08-02",
+        "taxableValue": 120000,
+        "cgst": 10800,
+        "sgst": 10800,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": "true"
+      },
+      {
+        "supplierGstin": "29AAFCB5236K1ZL",
+        "docnum": "INV-24002 ",
+        "docdt": "2024-08-07",
+        "taxableValue": 45000,
+        "cgst": 4050,
+        "sgst": 4050,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "07AAACH7409R1ZK",
+        "docnum": "BL/2024/0811",
+        "docdt": "2024-08-04",
+        "taxableValue": 65000,
+        "cgst": 5850,
+        "sgst": 5850,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "07AAACH7409R1ZK",
+        "docnum": "BL/2024/0815",
+        "docdt": "2024-08-10",
+        "taxableValue": 28000,
+        "cgst": 2520,
+        "sgst": 2520,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "27AABCT1332L1ZV",
+        "docnum": "CN-8841",
+        "docdt": "2024-08-06",
+        "taxableValue": 95000,
+        "cgst": 0,
+        "sgst": 0,
+        "igst": 17100,
+        "status": "active",
+        "rcm": "Y",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "24AAACJ7417J1ZY",
+        "docnum": "DT/0821",
+        "docdt": "2024-08-12",
+        "taxableValue": 42000,
+        "cgst": 3780,
+        "sgst": 3780,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "06AABCS5309Q1ZW",
+        "docnum": "EP-INV-9033",
+        "docdt": "2024-08-15",
+        "taxableValue": 50000,
+        "cgst": 0,
+        "sgst": 0,
+        "igst": 9000,
+        "status": "non_filer",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "29BGTFS2754Q1ZL",
+        "docnum": "ITF-2024-08-112",
+        "docdt": "2024-08-18",
+        "taxableValue": 31000,
+        "cgst": 2790,
+        "sgst": 2790,
+        "igst": 0,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      },
+      {
+        "supplierGstin": "27AABCT1332L1ZV",
+        "docnum": "CN-8850",
+        "docdt": "2024-08-21",
+        "taxableValue": 24000,
+        "cgst": 0,
+        "sgst": 0,
+        "igst": 4320,
+        "status": "active",
+        "rcm": "N",
+        "isBlocked": ""
+      }
+    ]
+  }
+}

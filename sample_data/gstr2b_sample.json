@@ -1,0 +1,46 @@
+{
+  "docdata": {
+    "doclist": [
+      {
+        "supplierGstin": "29ABCDE1234F1Z5",
+        "docnum": "INV-1001",
+        "docdt": "2026-08-03",
+        "taxableValue": 100000.00,
+        "cgst": 9000.00,
+        "sgst": 9000.00,
+        "igst": 0.00,
+        "status": "active"
+      },
+      {
+        "supplierGstin": "29ABCDE1234F1Z5",
+        "docnum": "INV-1002 ",
+        "docdt": "2026-08-11",
+        "taxableValue": 50000.00,
+        "cgst": 4500.00,
+        "sgst": 4500.00,
+        "igst": 0.00,
+        "status": "active"
+      },
+      {
+        "supplierGstin": "27PQRST5678G1Z3",
+        "docnum": "BIL/2026/0045",
+        "docdt": "05-08-2026",
+        "taxableValue": 75000.00,
+        "cgst": 0.00,
+        "sgst": 0.00,
+        "igst": 13500.00,
+        "status": "non_filer"
+      },
+      {
+        "supplierGstin": "33LMNOP9012K1Z8",
+        "docnum": "INV009999",
+        "docdt": "2026-08-20",
+        "taxableValue": 20000.00,
+        "cgst": 1800.00,
+        "sgst": 1800.00,
+        "igst": 0.00,
+        "status": "active"
+      }
+    ]
+  }
+}
