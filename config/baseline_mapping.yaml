@@ -1,0 +1,106 @@
+# Baseline mapping — configuration for ingesting the firm's manual
+# reconciliation output as the verification baseline.
+#
+# IMPORTANT: The column names, sheet names, verdict values and skip rules
+# below are PLACEHOLDERS. They MUST be replaced after inspecting the real
+# baseline file. The harness will fail loudly if the real file does not
+# match this configuration, which is by design — silent misreading of the
+# baseline would invalidate every metric.
+
+# --- GST baseline -----------------------------------------------------------
+
+gst:
+  # File format: the firm's manual GST reconciliation export
+  sheet_name: "Reconciliation"    # PLACEHOLDER — replace with actual sheet name
+  header_row: 0                    # 0-indexed; set to the actual header row
+  baseline_is_exhaustive: false    # true = baseline lists ALL transactions including matches
+                                   # false = baseline lists exceptions only
+                                   # MUST be confirmed with the firm after inspecting the real file
+
+  # Identifying fields — map column headers in the baseline to canonical names
+  columns:
+    gstin: "GSTIN"                 # PLACEHOLDER
+    party_name: "Party Name"       # PLACEHOLDER
+    invoice_number: "Invoice No"   # PLACEHOLDER
+    invoice_date: "Invoice Date"   # PLACEHOLDER
+    invoice_value: "Invoice Value" # PLACEHOLDER
+    taxable_value: "Taxable Value" # PLACEHOLDER — may not be present
+    total_tax: "Total Tax"         # PLACEHOLDER — may not be present
+
+  # The column carrying the firm's manual verdict
+  verdict_column: "Status"         # PLACEHOLDER — replace with actual column name
+
+  # verdict_map: maps the firm's terminology to the four canonical classifications.
+  # EVERY value that appears in the verdict column must have an entry here.
+  # Any value encountered that is NOT in this map causes a loud named failure.
+  #
+  # THESE ARE PLACEHOLDERS — replace with the firm's actual vocabulary after
+  # inspecting the real baseline file. Do NOT guess.
+  verdict_map:
+    "Matched": "Matched"
+    "Match": "Matched"
+    "OK": "Matched"
+    "Mismatch": "Amount Difference"
+    "Difference": "Amount Difference"
+    "Not in Books": "Not in Books"
+    "Missing in Books": "Not in Books"
+    "Not in Portal": "Not in Portal"
+    "Missing in Portal": "Not in Portal"
+    "Not in 2B": "Not in Portal"
+    # ADD ALL firm-specific verdict values here
+
+  # Optional: difference_type column in the baseline (may not exist)
+  difference_type_column: null     # Set to column name if the baseline sub-classifies differences
+
+  # Skip rules — rows matching these are excluded before alignment
+  skip_rules:
+    # Blank rows: skip if the identifier column is empty
+    skip_blank_identifier: true
+    # Total rows: skip rows where a configured column contains these values
+    total_row_markers:
+      column: "GSTIN"              # PLACEHOLDER
+      values: ["Total", "Grand Total", "Sub Total", "TOTAL"]
+    # Section heading rows: skip rows where a configured column matches patterns
+    section_heading_markers:
+      column: "GSTIN"              # PLACEHOLDER
+      patterns: ["^B2B$", "^CDN$", "^ISD$", "^Imports?$", "^Reverse Charge$"]
+
+
+# --- TDS baseline -----------------------------------------------------------
+
+tds:
+  sheet_name: "TDS Reconciliation" # PLACEHOLDER
+  header_row: 0
+  baseline_is_exhaustive: false
+
+  columns:
+    pan: "PAN"                     # PLACEHOLDER
+    deductee_name: "Deductee Name" # PLACEHOLDER
+    section: "Section"             # PLACEHOLDER
+    amount_paid_credited: "Amount Paid" # PLACEHOLDER
+    tax_deducted: "Tax Deducted"   # PLACEHOLDER
+    deposit_date: "Deposit Date"   # PLACEHOLDER — may not be present
+    period: "Period"               # PLACEHOLDER — may not be present
+
+  verdict_column: "Status"         # PLACEHOLDER
+  verdict_map:
+    "Matched": "Matched"
+    "Match": "Matched"
+    "Short Deduction": "Amount Difference"
+    "Excess Deduction": "Amount Difference"
+    "Mismatch": "Amount Difference"
+    "Not in Books": "Not in Books"
+    "Not in 26AS": "Not in Portal"
+    "Not in Portal": "Not in Portal"
+    # ADD ALL firm-specific verdict values here
+
+  difference_type_column: null
+
+  skip_rules:
+    skip_blank_identifier: true
+    total_row_markers:
+      column: "PAN"
+      values: ["Total", "Grand Total", "Sub Total", "TOTAL"]
+    section_heading_markers:
+      column: "PAN"
+      patterns: ["^Section", "^194", "^192"]

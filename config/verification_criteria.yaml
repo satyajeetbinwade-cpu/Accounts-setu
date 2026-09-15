@@ -1,0 +1,57 @@
+# Verification exit criteria — the thresholds that determine pass/fail.
+#
+# IMPORTANT: All numeric values below are UNSET (null). They MUST be set
+# by the firm after the first verification run produces real distributions.
+# Setting them BEFORE seeing results risks choosing thresholds that happen
+# to be easy to clear; setting them AFTER seeing whether the run would pass
+# is equally invalid. The correct sequence:
+#
+#   1. Run verification once with all criteria unset → report shows distributions
+#   2. Firm decides acceptable thresholds based on their risk tolerance
+#   3. Set the values here
+#   4. Re-run verification → report shows pass/fail against deliberate criteria
+#
+# Any criterion left null causes the report to show "NOT YET ASSESSABLE"
+# for that criterion rather than a pass or fail.
+
+gst:
+  # Maximum acceptable false-positive RATE (fraction, not percentage)
+  # e.g. 0.02 means at most 2% of engine "Matched" results may be baseline exceptions
+  false_positive_rate_max: null     # UNSET — firm must decide after first run
+
+  # Maximum acceptable false-positive COUNT
+  false_positive_count_max: null    # UNSET
+
+  # Maximum acceptable false-positive VALUE (total rupee value of false positives)
+  false_positive_value_max: null    # UNSET
+
+  # Maximum acceptable false-negative rate
+  false_negative_rate_max: null     # UNSET
+
+  # Minimum alignment coverage (fraction of baseline rows successfully aligned)
+  min_alignment_coverage: null      # UNSET
+
+  # Minimum calibration quality: High-band agreement rate must exceed this
+  min_high_band_agreement: null     # UNSET
+
+  # Maximum share of disagreements that remain unadjudicated (fraction)
+  max_unadjudicated_share: null     # UNSET
+
+tds:
+  false_positive_rate_max: null
+  false_positive_count_max: null
+  false_positive_value_max: null
+  false_negative_rate_max: null
+  min_alignment_coverage: null
+  min_high_band_agreement: null
+  max_unadjudicated_share: null
+
+# Alignment tolerance for Tier 2 (amount-based fallback)
+alignment:
+  amount_tolerance_absolute: 10.0
+  amount_tolerance_percent: 1.0
+  date_tolerance_days: 7
+  fuzzy_name_threshold: 80
+  # Minimum alignment coverage below which the report opens with a warning
+  # that accuracy figures are not yet meaningful
+  coverage_warning_floor: 0.80

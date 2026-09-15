@@ -1,0 +1,49 @@
+# AI analysis config — disposable PoC values.
+# Post-matching AI analysis layer. On-demand triggering only; fingerprint
+# caching reuses the review carry-forward fingerprint (see src/fingerprint.py).
+# No value below may appear hardcoded in Python source.
+
+openrouter:
+  base_url: "https://openrouter.ai/api/v1/chat/completions"
+  api_key_env: "OPENROUTER_API_KEY"   # name of the env var, not the key itself
+  timeout_seconds: 120                 # R1 is slow; do not lower without testing
+  max_tokens: 1500
+  temperature: 0.1                     # near-deterministic; this is analysis, not generation
+
+models:
+  complex: "deepseek/deepseek-r1"
+  simple: "qwen/qwen-2.5-72b-instruct"
+  # Unified AI ingestion layer (column mapping + document classification).
+  # This layer feeds the reconciliation engine directly, so a wrong column
+  # mapping here silently corrupts every downstream match — it therefore
+  # runs at the same tier as the engine itself, NOT a cheaper model.
+  # Overridable at runtime from Settings -> AI Ingestion.
+  extraction: "anthropic/claude-opus-4.1"
+
+# Routing by classification, with optional difference_type override.
+# Rationale: Amount Difference involves computed tax variances and
+# multi-component arithmetic; presence/absence checks do not.
+routing:
+  default: simple
+  by_classification:
+    "Amount Difference": complex
+    "Not in Books": simple
+    "Not in Portal": simple
+  by_difference_type:        # overrides by_classification where matched
+    "Tax Split Mismatch": complex
+    "Short Deduction": complex
+    "Excess Deduction": complex
+    "Rate Mismatch": complex
+    "Threshold Breach": complex
+    "Rounding": simple
+    "Timing Difference": simple
+
+scope:
+  analyzable_classifications:
+    - "Amount Difference"
+    - "Not in Books"
+    - "Not in Portal"
+  # "Matched" is deliberately absent and must never be added here.
+
+limits:
+  max_items_per_group_call: 25   # safety ceiling on a single group-level trigger

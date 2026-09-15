@@ -1,0 +1,14 @@
+[theme]
+base = "light"
+primaryColor = "#3B6FDB"
+backgroundColor = "#EEF0F2"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#16181D"
+font = "sans serif"
+
+[server]
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false

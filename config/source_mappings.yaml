@@ -1,0 +1,110 @@
+# Column-mapping config for raw source exports -> canonical fields.
+#
+# IMPORTANT: The raw column headers below are PLACEHOLDERS based on common
+# Tally / GSTN export conventions. They have NOT been verified against real
+# sample files yet. When real exports are available, correct the
+# "raw_column" values here — do not touch src/ingestion.py.
+#
+# Structure per source_type:
+#   columns:
+#     <raw_column_header>: <canonical_field_name>
+#   date_columns:
+#     <canonical_field_name>: <strptime format string for that column>
+
+tally:
+  # Tally export used as "books" side for BOTH GST and TDS recon.
+  # Columns relevant to GST matching AND TDS matching are both listed here;
+  # ingestion only pulls the canonical fields relevant to the recon type
+  # being run, missing-column checks apply only to those relevant fields.
+  #
+  # GST books (purchase register) use the GST columns; TDS books (deductor
+  # return/ledger) use the TDS columns. Both live under the same "tally"
+  # source_type since ingestion resolves which fields it needs from the
+  # recon_type.
+  columns:
+    "GSTIN/UIN": gstin
+    "Party Name": party_name
+    "Invoice No.": invoice_number
+    "Invoice Date": invoice_date
+    "Taxable Value": taxable_value
+    "CGST": cgst
+    "SGST": sgst
+    "IGST": igst
+    "Cess": cess
+    "Invoice Value": invoice_value
+    "PAN": pan
+    "Deductee Name": deductee_name
+    "Section": section
+    "Amount Paid/Credited": amount_paid_credited
+    "Tax Deducted": tax_deducted
+    "Challan No.": challan_number
+    "Deposit Date": deposit_date
+  date_columns:
+    invoice_date: "%Y-%m-%d"
+    deposit_date: "%Y-%m-%d"
+
+gstr2b:
+  # GSTR-2B portal export (GST recon, portal side).
+  columns:
+    "GSTIN of Supplier": gstin
+    "Trade/Legal Name": party_name
+    "Invoice Number": invoice_number
+    "Invoice Date": invoice_date
+    "Taxable Value": taxable_value
+    "Integrated Tax": igst
+    "Central Tax": cgst
+    "State/UT Tax": sgst
+    "Cess": cess
+    "Invoice Value": invoice_value
+  date_columns:
+    invoice_date: "%Y-%m-%d"
+
+ims:
+  # Invoice Management System export (alternate GST portal source).
+  # IMS exports observed in practice use the same column layout as GSTR-2B
+  # (plus IMS-specific action columns, which aren't part of the canonical
+  # schema and are ignored here).
+  columns:
+    "GSTIN of Supplier": gstin
+    "Trade/Legal Name": party_name
+    "Invoice Number": invoice_number
+    "Invoice Date": invoice_date
+    "Taxable Value": taxable_value
+    "Integrated Tax": igst
+    "Central Tax": cgst
+    "State/UT Tax": sgst
+    "Cess": cess
+    "Invoice Value": invoice_value
+  date_columns:
+    invoice_date: "%Y-%m-%d"
+
+form26as:
+  # Form 26AS portal export (TDS recon, deductee/portal side).
+  # This is the "deductor" view: a bank/deductor reports what it deposited
+  # on the deductee's behalf, so the party name is "Deductor Name" and the
+  # PAN is the deductor's PAN. Fields absent from this export (tax_deposited,
+  # challan_number, certificate_number) are left unmapped — ingestion fills
+  # them with None for the canonical frame.
+  columns:
+    "Deductor PAN": pan
+    "Deductor Name": deductee_name
+    "Section": section
+    "Amount Paid/Credited": amount_paid_credited
+    "Tax Deducted": tax_deducted
+    "Date of Deposit": deposit_date
+  date_columns:
+    deposit_date: "%Y-%m-%d"
+
+tds:
+  # TDS return/challan export (TDS recon, deductor/portal side).
+  # Same layout as the deductor books file (Deductee Name + PAN).
+  columns:
+    "PAN": pan
+    "Deductee Name": deductee_name
+    "Section": section
+    "Amount Paid/Credited": amount_paid_credited
+    "Tax Deducted": tax_deducted
+    "Challan No.": challan_number
+    "Deposit Date": deposit_date
+  date_columns:
+    deposit_date: "%Y-%m-%d"
