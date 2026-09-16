@@ -149,21 +149,33 @@ def catalog_fetched_at(conn: sqlite3.Connection) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Change log — LOCAL stub, retrofit to F4 later
+# Change log — RETROFITTED to F4 (the local table is retained but no longer
+# written; F4 is the real, immutable Edit History sink).
 # ---------------------------------------------------------------------------
 
 
 def log_change(
     conn: sqlite3.Connection, *, touchpoint_key: Optional[str], action: str, detail: str, actor: str,
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO ai_model_change_log (touchpoint_key, action, detail, actor, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (touchpoint_key, action, detail, actor, _now()),
+    """Record a model-routing change as a REAL F4 Edit History entry.
+
+    The signature is kept identical so every existing call site is
+    unchanged; the local ``ai_model_change_log`` table is retained (empty)
+    for backward compatibility but is no longer written. F4's record_type is
+    ``ai_model_assignment`` and record_id is the touchpoint key, so one View
+    History trigger per touchpoint shows its full routing history.
+    """
+    from src.f4 import service as f4  # local import avoids a hard circular dep
+
+    f4.record_edit(
+        record_type="ai_model_assignment",
+        record_id=touchpoint_key or "catalog",
+        field=action,
+        old_value=None,
+        new_value=detail,
+        reason=None,
+        actor=actor,
     )
-    conn.commit()
 
 
 def list_change_log(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[str, Any]]:
