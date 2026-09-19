@@ -126,4 +126,21 @@ CREATE INDEX IF NOT EXISTS idx_doc_edit_log_document ON document_edit_log(docume
 def init_documents_schema(conn: sqlite3.Connection) -> None:
     """Create F3 document tables if missing. Idempotent."""
     conn.executescript(DOCUMENTS_SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for pre-existing DBs.
+
+    ``CREATE TABLE IF NOT EXISTS`` never adds a column to a table that
+    already exists, so new columns must be added explicitly here (the same
+    pattern src/db.py and src/ingestion_ai/schema.py use).
+    """
+    _add_column(conn, "documents", "notes", "TEXT")
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")

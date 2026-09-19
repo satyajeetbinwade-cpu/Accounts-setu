@@ -577,6 +577,443 @@ def divider() -> rx.Component:
 
 
 # ---------------------------------------------------------------------------
+# Shared upload / preview / viewer (F3 + F3-B — the one implementation)
+# ---------------------------------------------------------------------------
+
+
+def file_preview_chip(
+    pf,
+    *,
+    on_remove=None,
+) -> rx.Component:
+    """FilePreviewChip — a staged file in the drop zone before upload.
+
+    Shows an image/PDF-first-page thumbnail (or a file-type icon) plus the
+    filename, human-readable size and a remove (x). Consumed identically by
+    F3's Upload document zone and F3-B's Upload invoices zone.
+
+    ``pf`` is a ``PendingFile`` instance (filename / size / thumb_kind /
+    thumb_src / ext).
+    """
+    thumb = rx.cond(
+        pf.thumb_kind == "image",
+        rx.image(src=pf.thumb_src, width="42px", height="42px", object_fit="cover", border_radius="8px"),
+        rx.cond(
+            pf.thumb_kind == "pdf",
+            rx.image(src=pf.thumb_src, width="42px", height="42px", object_fit="cover", border_radius="8px"),
+            rx.box(
+                rx.icon("file", size=20, color=t.Color.TEXT_SECONDARY.value),
+                width="42px",
+                height="42px",
+                border_radius="8px",
+                background=t.Color.NEUTRAL_BG.value,
+                display="flex",
+                align_items="center",
+                justify_content="center",
+            ),
+        ),
+    )
+    return rx.hstack(
+        thumb,
+        rx.vstack(
+            rx.text(pf.filename, font_size="13px", font_weight="600", color=t.Color.TEXT_PRIMARY.value),
+            rx.text(pf.size_label, style=t.TEXT["micro"]),
+            spacing="1",
+            align="start",
+            flex="1",
+            min_width="0",
+        ),
+        rx.button(
+            rx.icon("x", size=14),
+            on_click=on_remove,
+            size="1",
+            variant="soft",
+            background="transparent",
+            color=t.Color.TEXT_MUTED.value,
+            border="none",
+            _hover={"color": t.Color.DANGER.value},
+            flex_shrink="0",
+        ),
+        width="100%",
+        align="center",
+        spacing="3",
+        padding="8px 10px",
+        border=f"1px solid {t.Color.BORDER.value}",
+        border_radius="10px",
+        background=t.Color.SURFACE.value,
+    )
+
+
+def upload_progress_row(
+    row,
+) -> rx.Component:
+    """One per-file upload stage (UploadProgressState): Queued → Uploading
+    (%) → Processing (spinner) → Done / Needs review / Failed. Every stage is
+    a distinct icon + label (never a colour-only swap)."""
+    stage_icon = rx.match(
+        row.stage,
+        ("queued", rx.icon("circle-dot", size=15, color=t.Color.TEXT_MUTED.value)),
+        ("uploading", rx.icon("arrow-up-from-line", size=15, color=t.Color.ACCENT.value)),
+        ("processing", rx.spinner(size="1")),
+        ("done", rx.icon("circle-check", size=15, color=t.Color.RULE.value)),
+        ("needs_review", rx.icon("triangle-alert", size=15, color=t.Color.AI_ON.value)),
+        ("failed", rx.icon("circle-slash", size=15, color=t.Color.DANGER.value)),
+        rx.icon("circle-dot", size=15, color=t.Color.TEXT_MUTED.value),
+    )
+    label_color = rx.match(
+        row.stage,
+        ("failed", t.Color.DANGER.value),
+        ("needs_review", t.Color.AI_ON.value),
+        t.Color.TEXT_PRIMARY.value,
+    )
+    return rx.vstack(
+        rx.hstack(
+            rx.vstack(
+                rx.text(row.filename, font_size="12px", font_weight="600", color=label_color),
+                rx.cond(
+                    row.stage == "uploading",
+                    rx.progress(value=row.pct, width="100%", size="1"),
+                    rx.fragment(),
+                ),
+                spacing="1",
+                align="start",
+                flex="1",
+                min_width="0",
+            ),
+            stage_icon,
+            width="100%",
+            align="center",
+            spacing="2",
+        ),
+        rx.cond(
+            row.label != "",
+            rx.text(row.label, style=t.TEXT["micro"]),
+            rx.fragment(),
+        ),
+        spacing="1",
+        align="start",
+        width="100%",
+        padding="6px 8px",
+        border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def file_viewer_panel(
+    *,
+    title_var,
+    kind_var,
+    image_src_var,
+    page_var,
+    page_count_var,
+    table_headers_var,
+    table_rows_var,
+    text_var,
+    download_name_var,
+    download_href_var,
+    on_close,
+    on_page_prev,
+    on_page_next,
+    zoom_var=1.0,
+    on_zoom_in=None,
+    on_zoom_out=None,
+    on_zoom_reset=None,
+    highlight_active_var=False,
+    highlight_x_var=0.0,
+    highlight_y_var=0.0,
+    highlight_w_var=0.0,
+    highlight_h_var=0.0,
+    highlight_page_var=1,
+    highlight_row_index_var=-1,
+    highlight_snippet_var="",
+) -> rx.Component:
+    """FileViewerPanel — the embedded in-app viewer for images and PDFs
+    (page controls for multi-page), with a "download to view" fallback for
+    formats that can't render inline (xlsx/docx/csv are shown as a table or
+    plain text here; genuinely non-renderable bytes fall through to the
+    download state).
+
+    Highest-priority fix: no screen previously let a user see a document's
+    actual content — this is the one place that does. Shared by F3 and F3-B.
+
+    Zoom/pan: ``zoom_var`` scales the image (pan is native scroll on the
+    overflow container). Zoom controls render only when the handlers are
+    supplied, so callers that don't want them are unaffected.
+
+    Click-to-highlight (F3-B only): ``highlight_*`` params draw a box over
+    the source image (visual touchpoint), tint the matching table row
+    (structured/Excel), or show a highlighted text excerpt (structured
+    PDF/Word). All default to "off" so F3's call site is unchanged.
+    """
+    # Coerce the highlight/zoom defaults to Vars — callers that don't pass
+    # them (F3 Documents) supply plain Python literals, which have no
+    # ``.to_string()`` / arithmetic Var behaviour.
+    highlight_active_var = rx.Var.create(highlight_active_var)
+    highlight_x_var = rx.Var.create(highlight_x_var)
+    highlight_y_var = rx.Var.create(highlight_y_var)
+    highlight_w_var = rx.Var.create(highlight_w_var)
+    highlight_h_var = rx.Var.create(highlight_h_var)
+    highlight_page_var = rx.Var.create(highlight_page_var)
+    highlight_row_index_var = rx.Var.create(highlight_row_index_var)
+    highlight_snippet_var = rx.Var.create(highlight_snippet_var)
+    zoom_var = rx.Var.create(zoom_var)
+
+    header = rx.hstack(
+        rx.icon("file-text", size=16, color=t.Color.ACCENT.value),
+        rx.text(title_var, font_size="14px", font_weight="700", flex="1", min_width="0"),
+        rx.button(
+            rx.icon("x", size=16),
+            on_click=on_close,
+            variant="ghost",
+            color_scheme="gray",
+            background="transparent",
+            color=t.Color.TEXT_MUTED.value,
+        ),
+        width="100%",
+        align="center",
+        spacing="2",
+    )
+
+    # Zoom controls — only rendered when the caller wires handlers.
+    zoom_controls = rx.fragment()
+    if on_zoom_in is not None:
+        zoom_controls = rx.hstack(
+            rx.button(
+                rx.icon("zoom-out", size=14),
+                on_click=on_zoom_out,
+                size="1",
+                variant="soft",
+                color_scheme="gray",
+                disabled=zoom_var <= 0.5,
+            ),
+            rx.button(
+                (zoom_var * 100).to(int).to_string() + "%",
+                on_click=on_zoom_reset,
+                size="1",
+                variant="ghost",
+                color_scheme="gray",
+                background="transparent",
+                color=t.Color.TEXT_SECONDARY.value,
+            ),
+            rx.button(
+                rx.icon("zoom-in", size=14),
+                on_click=on_zoom_in,
+                size="1",
+                variant="soft",
+                color_scheme="gray",
+                disabled=zoom_var >= 3.0,
+            ),
+            spacing="1",
+            align="center",
+        )
+
+    # The image, scaled by zoom, with an optional highlight box overlaid.
+    # The overlay is positioned in percentages of the (unscaled) image box,
+    # so it tracks the image as it scales.
+    image_body = rx.box(
+        rx.box(
+            rx.image(src=image_src_var, width="100%", border_radius="8px", alt=title_var),
+            rx.cond(
+                highlight_active_var & (highlight_page_var == page_var),
+                rx.box(
+                    style={
+                        "position": "absolute",
+                        "left": (highlight_x_var * 100).to_string() + "%",
+                        "top": (highlight_y_var * 100).to_string() + "%",
+                        "width": (highlight_w_var * 100).to_string() + "%",
+                        "height": (highlight_h_var * 100).to_string() + "%",
+                        "border": f"2px solid {t.Color.ACCENT.value}",
+                        "background": "rgba(59, 111, 219, 0.18)",
+                        "border_radius": "4px",
+                        "pointer_events": "none",
+                    },
+                ),
+                rx.fragment(),
+            ),
+            position="relative",
+            width="100%",
+            style={
+                "transform": "scale(" + zoom_var.to_string() + ")",
+                "transform_origin": "top left",
+                "transition": "transform 0.15s ease",
+            },
+        ),
+        width="100%",
+        overflow="auto",
+        max_height="640px",
+    )
+
+    body = rx.match(
+        kind_var,
+        (
+            "image",
+            rx.vstack(
+                image_body,
+                rx.cond(zoom_var != 1.0, zoom_controls, rx.fragment()),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+        ),
+        (
+            "pdf",
+            rx.vstack(
+                image_body,
+                rx.hstack(
+                    rx.cond(
+                        page_count_var.to(int) > 1,
+                        rx.hstack(
+                            rx.button(rx.icon("chevron-left", size=14), on_click=on_page_prev, size="1", variant="soft", color_scheme="gray", disabled=page_var.to(int) <= 1),
+                            rx.text(f"Page {page_var} of {page_count_var}", style=t.TEXT["micro"]),
+                            rx.button(rx.icon("chevron-right", size=14), on_click=on_page_next, size="1", variant="soft", color_scheme="gray", disabled=page_var.to(int) >= page_count_var.to(int)),
+                            spacing="2",
+                            align="center",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.spacer(),
+                    zoom_controls,
+                    width="100%",
+                    align="center",
+                ),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+        ),
+        (
+            "table",
+            rx.el.div(
+                rx.el.table(
+                    rx.el.thead(
+                        rx.el.tr(
+                            rx.foreach(
+                                table_headers_var,
+                                lambda h: rx.el.th(
+                                    h,
+                                    style={
+                                        "text_align": "left",
+                                        "font_size": "11px",
+                                        "padding": "4px 8px",
+                                        "border_bottom": f"1px solid {t.Color.BORDER.value}",
+                                        "color": t.Color.TEXT_SECONDARY.value,
+                                        "white_space": "nowrap",
+                                    },
+                                ),
+                            ),
+                        ),
+                    ),
+                    rx.el.tbody(
+                        rx.foreach(
+                            table_rows_var,
+                            lambda row, idx: rx.el.tr(
+                                rx.foreach(
+                                    row,
+                                    lambda cell: rx.el.td(
+                                        cell,
+                                        style={
+                                            "font_size": "12px",
+                                            "padding": "4px 8px",
+                                            "white_space": "nowrap",
+                                            "color": t.Color.TEXT_PRIMARY.value,
+                                        },
+                                    ),
+                                ),
+                                id="setu-hl-row-" + idx.to_string(),
+                                style=rx.cond(
+                                    idx == highlight_row_index_var,
+                                    {
+                                        "background": "rgba(59, 111, 219, 0.16)",
+                                        "outline": f"1px solid {t.Color.ACCENT.value}",
+                                    },
+                                    {},
+                                ),
+                            ),
+                        ),
+                    ),
+                    style={"border_collapse": "collapse", "width": "100%"},
+                ),
+                width="100%",
+                overflow="auto",
+                max_height="440px",
+            ),
+        ),
+        (
+            "text",
+            rx.vstack(
+                rx.cond(
+                    highlight_snippet_var != "",
+                    rx.box(
+                        rx.text("Located in the document:", style=t.TEXT["micro"]),
+                        rx.text(
+                            highlight_snippet_var,
+                            style=t.TEXT["body"],
+                            font_family="monospace",
+                            font_size="12px",
+                        ),
+                        background="rgba(59, 111, 219, 0.12)",
+                        border=f"1px solid {t.Color.ACCENT.value}",
+                        border_radius="8px",
+                        padding="8px 10px",
+                        width="100%",
+                    ),
+                    rx.fragment(),
+                ),
+                rx.scroll_area(
+                    rx.el.pre(
+                        text_var,
+                        style={
+                            "font_size": "12px",
+                            "font_family": "monospace",
+                            "white_space": "pre-wrap",
+                            "color": t.Color.TEXT_PRIMARY.value,
+                            "padding": "12px",
+                        },
+                    ),
+                    height="360px",
+                    width="100%",
+                ),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+        ),
+        (
+            "download",
+            rx.vstack(
+                rx.icon("download", size=22, color=t.Color.NEUTRAL.value),
+                rx.text("This format can't be previewed inline.", style=t.TEXT["label"]),
+                rx.link(
+                    rx.button("Download to view", variant="soft", background="transparent", color=t.Color.ACCENT.value, border=f"1px solid {t.Color.ACCENT.value}", border_radius="9px"),
+                    href=download_href_var,
+                    download=download_name_var,
+                ),
+                spacing="2",
+                align="center",
+                width="100%",
+                padding="28px 16px",
+            ),
+        ),
+        rx.text("No preview available.", style=t.TEXT["micro"]),
+    )
+
+    return rx.box(
+        rx.vstack(
+            header,
+            rx.box(height="1px", width="100%", background=t.Color.BORDER.value),
+            body,
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+        border=f"1px solid {t.Color.BORDER.value}",
+        border_radius="12px",
+        background=t.Color.SURFACE.value,
+        padding="14px",
+    )
+
+
+# ---------------------------------------------------------------------------
 # F4 — the single reusable "View History" affordance
 # ---------------------------------------------------------------------------
 

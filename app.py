@@ -32,6 +32,7 @@ from src.module2 import service as module2
 from src.action_center import service as action_center
 from src.f4 import service as f4
 from src.ai_models import service as ai_models
+from src.f6 import service as f6
 from src.ui import state
 from src.ui.auth_ui import (
     render_admin_tab,
@@ -82,6 +83,7 @@ filing.init_filing()
 module2.init_module2()
 f4.init_f4()
 ai_models.init_ai_models()
+f6.init_f6()
 state.init_state()
 
 # F1 login gate — renders the sign-in form and halts the script (st.stop())

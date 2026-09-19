@@ -12,7 +12,29 @@ import reflex as rx
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.action_center_state import Module8State
-from setu.views import shell
+from setu.views import report_page, shell
+
+
+def _section_switch() -> rx.Component:
+    """Switch between the working queue and the visual reconciliation report."""
+    return rx.hstack(
+        *[
+            rx.button(
+                label,
+                on_click=Module8State.set_section(label),
+                size="2",
+                variant="soft",
+                background=rx.cond(Module8State.section == label, t.Color.ACCENT.value, "transparent"),
+                color=rx.cond(Module8State.section == label, "#FFFFFF", t.Color.TEXT_SECONDARY.value),
+                font_weight=rx.cond(Module8State.section == label, "600", "500"),
+                border_radius="9px",
+                _hover={"background": rx.cond(Module8State.section == label, t.Color.ACCENT.value, "#EEF2F8")},
+            )
+            for label in ["Queue", "Report"]
+        ],
+        spacing="2",
+        align="center",
+    )
 
 
 def _priority_pill(variant, label) -> rx.Component:
@@ -424,22 +446,32 @@ def action_center_page() -> rx.Component:
                 "Action Center",
                 "The single working queue — every open Flagged Item, from every source module, in one place.",
             ),
-            rx.cond(Module8State.flash != "", c.info_banner(Module8State.flash), rx.fragment()),
-            rx.cond(Module8State.error != "", c.inline_reason(Module8State.error), rx.fragment()),
-            _headline(),
-            _grouped(),
-            _filters(),
-            _batch_bar(),
+            _section_switch(),
             rx.cond(
-                Module8State.filtered_count > 0,
+                Module8State.section == "Report",
+                report_page.report_section(),
                 rx.vstack(
-                    rx.foreach(Module8State.items, _item_row),
-                    spacing="3",
+                    rx.cond(Module8State.flash != "", c.info_banner(Module8State.flash), rx.fragment()),
+                    rx.cond(Module8State.error != "", c.inline_reason(Module8State.error), rx.fragment()),
+                    _headline(),
+                    _grouped(),
+                    _filters(),
+                    _batch_bar(),
+                    rx.cond(
+                        Module8State.filtered_count > 0,
+                        rx.vstack(
+                            rx.foreach(Module8State.items, _item_row),
+                            spacing="3",
+                            width="100%",
+                        ),
+                        c.empty_state("No items match these filters.", icon="inbox"),
+                    ),
+                    _future_sources(),
+                    spacing="4",
                     width="100%",
+                    align="start",
                 ),
-                c.empty_state("No items match these filters.", icon="inbox"),
             ),
-            _future_sources(),
             spacing="4",
             width="100%",
             align="start",

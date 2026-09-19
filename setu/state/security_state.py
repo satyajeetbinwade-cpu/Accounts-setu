@@ -67,6 +67,8 @@ class SecurityState(AuthState):
     def load(self):
         # Partner or Admin only — the standalone screen is Partner-visible,
         # Admin sees the same list inside the console. Gated server-side.
+        if not self.is_authenticated:
+            return rx.redirect("/login")
         if self.role_name not in ("Admin", "Partner"):
             return rx.redirect("/")
         self.allowed = True

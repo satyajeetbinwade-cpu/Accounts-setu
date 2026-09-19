@@ -29,6 +29,7 @@ from setu.state import (
     DashboardState,
     DocumentsState,
     F5State,
+    F6State,
     FilingState,
     IngestionAiState,
     InvoiceExtractState,
@@ -36,6 +37,7 @@ from setu.state import (
     Module8State,
     Phase1State,
     ReconcileState,
+    ReportState,
     RulesState,
     SecurityState,
     SettingsState,
@@ -50,6 +52,12 @@ from setu.views.login import login_page
 # db/poc.db is safe. Modules are added here as they're migrated.
 db.init_db()
 auth.init_auth()
+
+from src.f6 import service as f6  # noqa: E402
+from src.invoice_extract import service as invoice_extract  # noqa: E402
+
+f6.init_f6()
+invoice_extract.init_invoice_extract()
 
 
 def _boot() -> None:
@@ -86,13 +94,15 @@ app.add_page(
     pages.dashboard_page,
     route="/",
     title="Setu",
-    on_load=[AuthState.check_session, DashboardState.load],
+    on_load=[AuthState.check_session, AuthState.require_auth, DashboardState.load],
 )
 
 for _route, _renderer in pages.all_routes():
     if _route == "/":
         continue
-    _on_load = [AuthState.check_session]
+    # Every protected route runs the gate first so a deep link from a signed
+    # out browser is sent to /login (not silently dropped on the dashboard).
+    _on_load = [AuthState.check_session, AuthState.require_auth]
     if _route == "/admin":
         _on_load.append(AdminState.load)
     if _route == "/clients":
@@ -111,6 +121,8 @@ for _route, _renderer in pages.all_routes():
         _on_load.append(DocumentsState.load)
     if _route == "/smart-ingestion":
         _on_load.append(IngestionAiState.load)
+    if _route == "/format-registry":
+        _on_load.append(F6State.load)
     if _route == "/data-integrity":
         _on_load.append(F5State.load)
     if _route == "/filing":
@@ -119,6 +131,7 @@ for _route, _renderer in pages.all_routes():
         _on_load.append(Module2State.load)
     if _route == "/action-center":
         _on_load.append(Module8State.load)
+        _on_load.append(ReportState.load)
     if _route == "/invoice-extraction":
         _on_load.append(InvoiceExtractState.load)
     if _route in ("/run", "/review", "/compare", "/config", "/export"):

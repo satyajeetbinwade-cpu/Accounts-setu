@@ -37,6 +37,7 @@ AREAS: dict[str, list[Screen]] = {
         Screen("Compare", "/compare", "git-compare"),
         Screen("Export", "/export", "download"),
         Screen("Smart Ingestion", "/smart-ingestion", "sparkles", "ingestion_ai.upload"),
+        Screen("Format Registry", "/format-registry", "database", "f6.view"),
         Screen("Invoice Extraction", "/invoice-extraction", "scan-line", "invoice_extract.upload"),
         Screen("Reconciliation", "/reconciliation", "scale", "module2.view"),
         Screen("Action Center", "/action-center", "list-checks", "action_center.view"),

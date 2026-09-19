@@ -97,6 +97,18 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
         "qwen/qwen-2.5-72b-instruct",
         7,
     ),
+    (
+        "f6_mapping_proposal",
+        "F6 — mapping proposal (unrecognised source layout)",
+        "Ingestion",
+        "Proposes a field mapping + sheet classification for an unrecognised source file "
+        "layout (Path B). Long structured-context reading, strict JSON output, no arithmetic "
+        "— the model never computes a value, only proposes which columns mean what. Every "
+        "proposal requires human confirmation before a format is promoted.",
+        "anthropic/claude-sonnet-4",
+        "deepseek/deepseek-chat",
+        8,
+    ),
 ]
 
 # The touchpoint whose model the ingestion layer actually reads at runtime.

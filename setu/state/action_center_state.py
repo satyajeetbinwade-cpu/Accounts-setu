@@ -85,6 +85,9 @@ _PRIORITY_VARIANT = {
 class Module8State(AuthState):
     """Action Center state."""
 
+    # section switch: the working queue vs the visual reconciliation report
+    section: str = "Queue"
+
     # headline
     total_open: int = 0
     source_count: int = 0
@@ -137,11 +140,19 @@ class Module8State(AuthState):
         user = auth.current_user(self.session_token or None)
         return auth.effective_permissions(user) if user else set()
 
+    @rx.event
+    def set_section(self, label: str):
+        self.section = label
+        if label == "Report":
+            from setu.state.report_state import ReportState
+
+            return ReportState.load
+
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "action_center.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("action_center.view")):
+            return rx.redirect(deny)
         # Ageing/escalation runs idempotently on load so a past-threshold item
         # visibly escalates without a separate cron.
         try:

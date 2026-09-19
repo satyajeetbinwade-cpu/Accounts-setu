@@ -121,8 +121,8 @@ class C5State(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "c5.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("c5.view")):
+            return rx.redirect(deny)
         self.touchpoints = [
             TouchpointOption(key=t["key"], label=t["label"]) for t in c5.list_touchpoints()
         ]

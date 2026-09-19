@@ -20,32 +20,65 @@ import sqlite3
 
 # ---------------------------------------------------------------------------
 # Locked canonical field set (F3-B build prompt, "Canonical field set").
-# (key, label, tally_column, source_hint)
+# (key, label, tally_column, source_hint, section)
+#
+# ``section`` is the review screen's grouping key — where on a real invoice
+# this field lives. It is a CODE constant (like the field set itself), not a
+# table: the review screen groups by it and nothing else consumes it.
 # ---------------------------------------------------------------------------
-CANONICAL_FIELDS: list[tuple[str, str, str, str]] = [
-    ("invoice_number", "Invoice Number", "Voucher Number", "page/cell"),
-    ("invoice_date", "Invoice Date", "Date", "page/cell"),
-    ("vendor_name", "Vendor/Supplier Name", "Party Ledger Name", "page/cell"),
-    ("vendor_gstin", "Vendor GSTIN", "Party GSTIN", "page/cell"),
-    ("hsn_sac", "HSN/SAC Code", "HSN/SAC", "row"),
-    ("item_description", "Item/Line Description", "Particulars", "row"),
-    ("quantity", "Quantity", "Quantity", "row"),
-    ("rate", "Rate", "Rate", "row"),
-    ("taxable_value", "Taxable Value", "Taxable Value", "row"),
-    ("cgst_amount", "CGST Amount", "CGST", "row"),
-    ("sgst_amount", "SGST Amount", "SGST", "row"),
-    ("igst_amount", "IGST Amount", "IGST", "row"),
-    ("total_tax", "Total Tax", "Total Tax", "row"),
-    ("invoice_total", "Invoice Total", "Voucher Total", "page/cell"),
-    ("place_of_supply", "Place of Supply", "Place of Supply", "page/cell"),
-    ("reference_po", "Reference/PO Number", "Reference", "page/cell"),
+SECTION_HEADER = "header"
+SECTION_LINE_ITEMS = "line_items"
+SECTION_TOTALS = "totals"
+
+# Display order + human labels for the three review-screen groups.
+SECTION_ORDER: list[str] = [SECTION_HEADER, SECTION_LINE_ITEMS, SECTION_TOTALS]
+SECTION_LABELS: dict[str, str] = {
+    SECTION_HEADER: "Header",
+    SECTION_LINE_ITEMS: "Line items",
+    SECTION_TOTALS: "Totals block",
+}
+
+CANONICAL_FIELDS: list[tuple[str, str, str, str, str]] = [
+    ("invoice_number", "Invoice Number", "Voucher Number", "page/cell", SECTION_HEADER),
+    ("invoice_date", "Invoice Date", "Date", "page/cell", SECTION_HEADER),
+    ("vendor_name", "Vendor/Supplier Name", "Party Ledger Name", "page/cell", SECTION_HEADER),
+    ("vendor_gstin", "Vendor GSTIN", "Party GSTIN", "page/cell", SECTION_HEADER),
+    ("place_of_supply", "Place of Supply", "Place of Supply", "page/cell", SECTION_HEADER),
+    ("reference_po", "Reference/PO Number", "Reference", "page/cell", SECTION_HEADER),
+    ("hsn_sac", "HSN/SAC Code", "HSN/SAC", "row", SECTION_LINE_ITEMS),
+    ("item_description", "Item/Line Description", "Particulars", "row", SECTION_LINE_ITEMS),
+    ("quantity", "Quantity", "Quantity", "row", SECTION_LINE_ITEMS),
+    ("rate", "Rate", "Rate", "row", SECTION_LINE_ITEMS),
+    ("taxable_value", "Taxable Value", "Taxable Value", "row", SECTION_TOTALS),
+    ("cgst_amount", "CGST Amount", "CGST", "row", SECTION_TOTALS),
+    ("sgst_amount", "SGST Amount", "SGST", "row", SECTION_TOTALS),
+    ("igst_amount", "IGST Amount", "IGST", "row", SECTION_TOTALS),
+    ("total_tax", "Total Tax", "Total Tax", "row", SECTION_TOTALS),
+    ("invoice_total", "Invoice Total", "Voucher Total", "page/cell", SECTION_TOTALS),
 ]
 
 CANONICAL_FIELD_KEYS: list[str] = [k for k, *_ in CANONICAL_FIELDS]
 
 # key -> (label, tally_column)
-FIELD_LABELS: dict[str, str] = {k: label for k, label, _, _ in CANONICAL_FIELDS}
-FIELD_TALLY_COLUMNS: dict[str, str] = {k: col for k, _, col, _ in CANONICAL_FIELDS}
+FIELD_LABELS: dict[str, str] = {k: label for k, label, _, _, _ in CANONICAL_FIELDS}
+FIELD_TALLY_COLUMNS: dict[str, str] = {k: col for k, _, col, _, _ in CANONICAL_FIELDS}
+FIELD_SECTIONS: dict[str, str] = {k: section for k, _, _, _, section in CANONICAL_FIELDS}
+
+# ---------------------------------------------------------------------------
+# Math-derivable fields (review-screen suggestions only).
+#
+# key -> (dependency keys, human formula label). A flagged/not-present field
+# whose dependencies are ALL auto-accepted (or already resolved) gets its
+# input PRE-FILLED with the computed value, clearly labelled as a suggestion.
+# It is NEVER auto-confirmed — the reviewer still clicks Resolve, per the
+# platform's standing no-silent-posting principle. If any dependency is
+# itself flagged/missing, no suggestion is offered (the arithmetic would be
+# unreliable) and the field stays a manual entry.
+# ---------------------------------------------------------------------------
+DERIVATIONS: dict[str, tuple[list[str], str]] = {
+    "total_tax": (["cgst_amount", "sgst_amount", "igst_amount"], "CGST + SGST + IGST"),
+    "invoice_total": (["taxable_value", "total_tax"], "Taxable Value + Total Tax"),
+}
 
 # ---------------------------------------------------------------------------
 # The two new C3-ext AITouchpoint rows (seeded ACTIVE). See the build

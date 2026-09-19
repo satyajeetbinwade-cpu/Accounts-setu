@@ -43,17 +43,20 @@ def _row_to_dict(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Opti
 def create_upload(
     conn: sqlite3.Connection, *, client_id: int, filename: str, file_ext: str, source_format: str,
     extraction_path: str, batch_id: Optional[str], status: str, duplicate_warning: bool, actor: str,
-    file_bytes: Optional[bytes] = None,
+    file_bytes: Optional[bytes] = None, ai_used: bool = False, ai_model: Optional[str] = None,
+    ai_latency_ms: Optional[int] = None, ai_error: Optional[str] = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO invoice_uploads
             (document_id, client_id, filename, file_ext, file_bytes, source_format, extraction_path,
-             batch_id, status, duplicate_warning, created_at, created_by)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             batch_id, status, duplicate_warning, created_at, created_by,
+             ai_used, ai_model, ai_latency_ms, ai_error)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (client_id, filename, file_ext, file_bytes, source_format, extraction_path, batch_id,
-         status, int(duplicate_warning), _now(), actor),
+         status, int(duplicate_warning), _now(), actor,
+         int(ai_used), ai_model, ai_latency_ms, ai_error),
     )
     conn.commit()
     return cur.lastrowid
@@ -142,11 +145,14 @@ def insert_field(conn: sqlite3.Connection, *, upload_id: int, result: dict[str, 
     cur = conn.execute(
         """
         INSERT INTO extracted_invoice_fields
-            (upload_id, field_name, extracted_value, confidence, source_location, is_present)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (upload_id, field_name, extracted_value, confidence, source_location, is_present,
+             bbox_x, bbox_y, bbox_w, bbox_h, bbox_page)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (upload_id, result["field_name"], result.get("extracted_value"), result.get("confidence"),
-         result.get("source_location"), int(result.get("is_present", True))),
+         result.get("source_location"), int(result.get("is_present", True)),
+         result.get("bbox_x"), result.get("bbox_y"), result.get("bbox_w"),
+         result.get("bbox_h"), result.get("bbox_page")),
     )
     conn.commit()
     return cur.lastrowid

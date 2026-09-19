@@ -84,7 +84,11 @@ _COLUMN_FLOOR = 45
 # Fields whose values are inherently free-text (vendor name, description)
 # carry a deliberately lower confidence — see the module docstring.
 _GSTIN_RE = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d])\b")
-_DATE_RE = re.compile(r"\b(\d{1,4}[\-/\.]\d{1,2}[\-/\.]\d{1,4})\b")
+_MONTH_NAME = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*"
+_DATE_RE = re.compile(
+    rf"\b(\d{{1,4}}[\-/\.]\d{{1,2}}[\-/\.]\d{{1,4}}|\d{{1,2}}[\-/\s]{_MONTH_NAME}[\-/\s]\d{{2,4}})\b",
+    re.IGNORECASE,
+)
 _AMOUNT = r"([\d][\d,]*(?:\.\d{1,2})?)"
 
 # (field, regex, confidence_when_matched, source_location_label)
@@ -93,7 +97,7 @@ _AMOUNT = r"([\d][\d,]*(?:\.\d{1,2})?)"
 _NEXT_LABEL = (
     r"(?=\s+(?:GSTIN|GST\s*No|Invoice|Inv\b|Date|HSN|SAC|Description|Particulars|"
     r"Item|Qty|Quantity|Rate|Taxable|Sub\s*Total|Subtotal|CGST|SGST|IGST|Total|"
-    r"Place\s*of\s*Supply|P\.?\s*O\.?|Reference|Ref)\b|$)"
+    r"Place\s*of\s*Supply|P\.?\s*O\.?|Reference|Ref|Bill\s*To|Bank|Terms|Signatory)\b|$)"
 )
 _TEXT_LABEL_RULES: list[tuple[str, str, int, str]] = [
     ("invoice_number", rf"(?:invoice|inv|bill|voucher)\s*(?:no|number|#)\.?\s*[:\-]?\s*([A-Za-z0-9\-/]+)", 95, "text match"),
@@ -109,9 +113,9 @@ _TEXT_LABEL_RULES: list[tuple[str, str, int, str]] = [
     ("sgst_amount", rf"sgst(?:\s*(?:amount|@\s*[\d.]+%))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
     ("igst_amount", rf"igst(?:\s*(?:amount|@\s*[\d.]+%))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
     ("total_tax", rf"total\s*tax\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
-    ("invoice_total", rf"(?:invoice\s*total|grand\s*total|total\s*amount|amount\s*payable)\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 94, "text match"),
-    ("place_of_supply", rf"place\s*of\s*supply\s*[:\-]\s*([A-Za-z][A-Za-z ]{{1,40}}?){_NEXT_LABEL}", 90, "text match"),
-    ("reference_po", r"(?:p\.?\s*o\.?|purchase\s*order|reference|ref)\s*(?:no|number|#)?\.?\s*[:\-]?\s*([A-Za-z0-9\-/]{2,30})", 92, "text match"),
+    ("invoice_total", rf"(?:invoice\s*total|grand\s*total|total\s*amount|amount\s*payable)\s*(?:\([^)]*\))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 94, "text match"),
+    ("place_of_supply", rf"place\s*of\s*supply\s*[:\-]\s*([A-Za-z][A-Za-z0-9 ()]{{1,40}}?){_NEXT_LABEL}", 90, "text match"),
+    ("reference_po", r"(?:ref(?:erence)?\s*/\s*p\.?\s*o\.?|p\.?\s*o\.?|purchase\s*order|reference|ref)\s*(?:no\.?|number|#)?\s*[:\-]\s*([A-Za-z0-9\-/]{2,30})", 92, "text match"),
 ]
 
 # Fallback rules applied ONLY when the labelled rule above found nothing —
@@ -155,6 +159,75 @@ def extraction_path_for(source_format: str, *, has_text_layer: bool = True) -> s
     if source_format in ("excel", "word"):
         return "structured"
     return "structured"
+
+
+def probe_file(filename: str, file_bytes: bytes, source_format: str) -> dict[str, Any]:
+    """Cheap structural probe run BEFORE extraction, so a genuinely broken
+    file is reported as an extraction FAILURE rather than silently becoming
+    "every field not present" (which the UI would otherwise show as a
+    sub-threshold review item).
+
+    Returns ``{"ok": bool, "reason": str | None, "page_count": int | None}``.
+    A file is only failed when it is unreadable/unsupported — a readable file
+    that simply lacks fields is NOT a failure (that is a review case).
+    """
+    if not file_bytes:
+        return {"ok": False, "reason": "The file is empty (0 bytes).", "page_count": None}
+
+    if source_format == "pdf":
+        try:
+            import fitz  # PyMuPDF
+
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            try:
+                pages = doc.page_count
+            finally:
+                doc.close()
+            if pages <= 0:
+                return {"ok": False, "reason": "The PDF has no readable pages.", "page_count": 0}
+            return {"ok": True, "reason": None, "page_count": pages}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"The PDF could not be opened ({exc}).", "page_count": None}
+
+    if source_format == "image":
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(file_bytes)) as img:
+                img.verify()
+            return {"ok": True, "reason": None, "page_count": None}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"The image could not be decoded ({exc}).", "page_count": None}
+
+    if source_format == "excel":
+        try:
+            df = _read_table(file_bytes)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"The spreadsheet could not be read ({exc}).", "page_count": None}
+        if df is None:
+            return {"ok": False, "reason": "The spreadsheet could not be parsed.", "page_count": None}
+        sheets = None
+        try:
+            if file_bytes[:4] == b"PK\x03\x04":
+                import openpyxl
+
+                wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True)
+                sheets = len(wb.sheetnames)
+                wb.close()
+        except Exception:  # noqa: BLE001
+            sheets = None
+        return {"ok": True, "reason": None, "page_count": sheets}
+
+    if source_format == "word":
+        try:
+            text = _docx_text(file_bytes, filename)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "reason": f"The document could not be read ({exc}).", "page_count": None}
+        if not text.strip():
+            return {"ok": False, "reason": "The document contains no readable text.", "page_count": None}
+        return {"ok": True, "reason": None, "page_count": None}
+
+    return {"ok": False, "reason": f"Unsupported file type for '{filename}'.", "page_count": None}
 
 
 def extract(
@@ -243,7 +316,118 @@ def _extract_structured_excel(file_bytes: bytes) -> list[dict[str, Any]]:
             "source_location": f"column '{best_header}'",
             "is_present": True,
         })
-    return results
+
+    by_name = {r["field_name"]: r for r in results}
+
+    # FALLBACK 1: a form-style invoice often embeds its REAL line-item table
+    # header a few rows down (row 0 is the letterhead, not the table header)
+    # — e.g. "# HSN/SAC Description Qty Rate Taxable Value" appears mid-sheet.
+    # Scan every row for one that alias-matches several line-item fields at
+    # once, and read the row(s) directly below it by column position.
+    _fill_from_embedded_table(df, by_name)
+
+    # FALLBACK 2: not every Excel/CSV invoice is a clean tabular export with a
+    # real header row at all. A common shape is a printed invoice pasted
+    # cell-by-cell (letterhead rows, then "Invoice No.: <value>" label/value
+    # pairs) — column-header matching above finds almost nothing for that
+    # shape (df.columns are garbage like "Unnamed: 1"). For every field still
+    # absent, flatten the whole sheet to text and run the SAME label/pattern
+    # rules used for PDF/Word text extraction. Never overrides a genuine
+    # match — only fills in what's still missing.
+    if any(not r["is_present"] for r in by_name.values()):
+        flat_text = _flatten_sheet_to_text(df)
+        text_results = {r["field_name"]: r for r in _extract_from_text(flat_text)}
+        for field, r in by_name.items():
+            if (not r["is_present"]) and text_results.get(field, {}).get("is_present"):
+                by_name[field] = text_results[field]
+
+    # FALLBACK 3: vendor_name has no reliable label on a printed invoice
+    # (it's simply the letterhead) — the letterhead text is whatever the
+    # ORIGINAL (pre-header-consumption) top row/column headers held. Only
+    # applied when nothing else has already found a vendor name.
+    if not by_name["vendor_name"]["is_present"]:
+        candidate = _letterhead_candidate(headers)
+        if candidate:
+            by_name["vendor_name"] = {
+                "field_name": "vendor_name",
+                "extracted_value": candidate,
+                "confidence": 78,
+                "source_location": "letterhead",
+                "is_present": True,
+            }
+
+    return [by_name[f] for f in CANONICAL_FIELD_KEYS]
+
+
+def _fill_from_embedded_table(df: pd.DataFrame, by_name: dict[str, dict[str, Any]]) -> None:
+    """Detect a line-item header row embedded mid-sheet (not row 0) and
+    read the values directly below it by column position. Only fills
+    fields that are still absent; never overrides an existing match."""
+    line_item_fields = ["hsn_sac", "item_description", "quantity", "rate", "taxable_value"]
+    if all(by_name[f]["is_present"] for f in line_item_fields):
+        return
+
+    for r_idx in range(len(df.index)):
+        row_cells = [_clean_cell(v) for v in df.iloc[r_idx].tolist()]
+        col_field: dict[int, tuple[str, int]] = {}
+        for c_idx, cell in enumerate(row_cells):
+            if not cell:
+                continue
+            for field in line_item_fields:
+                if by_name[field]["is_present"]:
+                    continue
+                best_score = max(
+                    (fuzz.token_sort_ratio(_norm(cell), _norm(alias)) for alias in _COLUMN_ALIASES.get(field, [])),
+                    default=0,
+                )
+                if best_score >= 65 and (c_idx not in col_field or best_score > col_field[c_idx][1]):
+                    col_field[c_idx] = (field, best_score)
+        if len(col_field) < 2:
+            continue
+        # Found a plausible embedded header row — read the next non-empty row.
+        for data_r in range(r_idx + 1, len(df.index)):
+            data_cells = [_clean_cell(v) for v in df.iloc[data_r].tolist()]
+            if not any(data_cells):
+                continue
+            for c_idx, (field, _score) in col_field.items():
+                if c_idx >= len(data_cells) or by_name[field]["is_present"]:
+                    continue
+                val = data_cells[c_idx]
+                if val is None:
+                    continue
+                by_name[field] = {
+                    "field_name": field,
+                    "extracted_value": val,
+                    "confidence": 90,
+                    "source_location": f"row {data_r + 2}",
+                    "is_present": True,
+                }
+            break
+        return  # only use the first embedded header row found
+
+
+def _letterhead_candidate(headers: list[str]) -> Optional[str]:
+    """The first header cell that looks like a company name (letters, not
+    a generic 'Unnamed: N' placeholder pandas invents for a blank cell)."""
+    for h in headers:
+        h = h.strip()
+        if not h or h.lower().startswith("unnamed"):
+            continue
+        if re.search(r"[A-Za-z]{2,}", h):
+            return h
+    return None
+
+
+def _flatten_sheet_to_text(df: pd.DataFrame) -> str:
+    """Render every cell (including the header row, which for a form-style
+    invoice often holds real letterhead text rather than column names) as
+    space-joined text, one line per row, so the PDF/Word label-pattern
+    rules can run against it."""
+    lines: list[str] = [" ".join(str(h) for h in df.columns)]
+    for _, row in df.iterrows():
+        cells = [_clean_cell(v) for v in row.tolist()]
+        lines.append(" ".join(c for c in cells if c))
+    return "\n".join(lines)
 
 
 def _read_table(file_bytes: bytes) -> Optional[pd.DataFrame]:
@@ -251,12 +435,160 @@ def _read_table(file_bytes: bytes) -> Optional[pd.DataFrame]:
     try:
         if ext == "csv":
             return pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
-        return pd.read_excel(BytesIO(file_bytes), dtype=str)
+        df = pd.read_excel(BytesIO(file_bytes), dtype=str)
+        return _resolve_excel_formulas(file_bytes, df)
     except Exception:  # noqa: BLE001
         try:
             return pd.read_csv(BytesIO(file_bytes), dtype=str, keep_default_na=False)
         except Exception:  # noqa: BLE001
             return None
+
+
+# Only these characters may appear in a formula after cell references are
+# substituted with their numeric values — enforced BEFORE eval() so this can
+# never execute arbitrary code, only basic arithmetic (+ - * / parentheses).
+_SAFE_ARITHMETIC_RE = re.compile(r"^[0-9+\-*/().\s]+$")
+_CELL_REF_RE = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+)")
+_RANGE_RE = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+):\$?([A-Za-z]{1,3})\$?(\d+)")
+
+
+def _resolve_excel_formulas(file_bytes: bytes, df: pd.DataFrame) -> pd.DataFrame:
+    """Fill in xlsx formula cells (e.g. ``=SUM(F16:F18)``, ``=F20*0.09``)
+    that have no cached value because the sheet was generated
+    programmatically and never opened in a real spreadsheet app —
+    openpyxl/pandas then return None for those cells even though the value
+    is perfectly computable. Only a real invoice-relevant subset of Excel
+    (cell refs, ranges, SUM, + - * /) is evaluated; anything unsupported is
+    left as-is (absent), never guessed."""
+    try:
+        import openpyxl
+    except Exception:  # noqa: BLE001
+        return df
+    try:
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=False)
+        ws = wb.active
+    except Exception:  # noqa: BLE001
+        return df
+
+    def cell_value(col_letter: str, row_num: int) -> Optional[float]:
+        # openpyxl row 1 = the header row pandas consumed; pandas df row 0
+        # corresponds to openpyxl row 2 (default header=0, one header row).
+        df_row = row_num - 2
+        col_idx = openpyxl.utils.column_index_from_string(col_letter.upper()) - 1
+        if df_row < 0 or df_row >= len(df.index) or col_idx >= len(df.columns):
+            # Falls in the (already-consumed) header row or out of range —
+            # read straight from the worksheet instead.
+            try:
+                raw = ws.cell(row=row_num, column=col_idx + 1).value
+            except Exception:  # noqa: BLE001
+                return None
+            return _to_number(raw)
+        raw = df.iat[df_row, col_idx]
+        num = _to_number(raw)
+        if num is not None:
+            return num
+        # The cell itself might be an unresolved formula — recurse once.
+        try:
+            f = ws.cell(row=row_num, column=col_idx + 1).value
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(f, str) and f.startswith("="):
+            return _eval_formula(f, cell_value)
+        return None
+
+    changed = False
+    for r_idx, row in enumerate(ws.iter_rows(min_row=2), start=2):
+        df_row = r_idx - 2
+        if df_row < 0 or df_row >= len(df.index):
+            continue
+        for cell in row:
+            col_idx = cell.column - 1
+            if col_idx >= len(df.columns):
+                continue
+            if not (isinstance(cell.value, str) and cell.value.startswith("=")):
+                continue
+            existing = df.iat[df_row, col_idx]
+            if _to_number(existing) is not None:
+                continue  # already has a cached numeric value
+            result = _eval_formula(cell.value, cell_value)
+            if result is not None:
+                df.iat[df_row, col_idx] = str(result)
+                changed = True
+    return df if changed else df
+
+
+def _to_number(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if s == "" or s.lower() in ("nan", "none", "nat"):
+        return None
+    s = s.replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _eval_formula(formula: str, get_cell) -> Optional[float]:
+    """Evaluate a small, safe subset of Excel formulas: SUM(range) and
+    +-*/ arithmetic over cell references. Returns None (never a guess) for
+    anything outside that subset."""
+    expr = formula.lstrip("=").strip()
+
+    def _sum_range(m: "re.Match[str]") -> str:
+        c1, r1, c2, r2 = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
+        col1 = openpyxl_col_index(c1)
+        col2 = openpyxl_col_index(c2)
+        total = 0.0
+        found_any = False
+        for r in range(min(r1, r2), max(r1, r2) + 1):
+            for c in range(min(col1, col2), max(col1, col2) + 1):
+                v = get_cell(openpyxl_col_letter(c), r)
+                if v is not None:
+                    total += v
+                    found_any = True
+        return str(total) if found_any else "0"
+
+    # Expand SUM(range) calls first.
+    expr = re.sub(
+        r"SUM\(\s*" + _RANGE_RE.pattern + r"\s*\)",
+        _sum_range,
+        expr,
+        flags=re.IGNORECASE,
+    )
+    if "SUM(" in expr.upper():
+        return None  # unsupported SUM shape (e.g. non-range args)
+
+    # Substitute remaining bare cell references with their numeric values.
+    def _sub_ref(m: "re.Match[str]") -> str:
+        col, row = m.group(1), int(m.group(2))
+        v = get_cell(col, row)
+        return str(v) if v is not None else "0"
+
+    expr = _CELL_REF_RE.sub(_sub_ref, expr)
+    if not _SAFE_ARITHMETIC_RE.match(expr):
+        return None
+    try:
+        result = eval(expr, {"__builtins__": {}}, {})  # noqa: S307 — validated arithmetic-only
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        return round(float(result), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def openpyxl_col_index(letters: str) -> int:
+    import openpyxl.utils as _u
+
+    return _u.column_index_from_string(letters.upper())
+
+
+def openpyxl_col_letter(idx: int) -> str:
+    import openpyxl.utils as _u
+
+    return _u.get_column_letter(idx)
 
 
 def _sniff_ext(file_bytes: bytes) -> str:

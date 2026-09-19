@@ -12,34 +12,48 @@ import reflex as rx
 
 from setu.foundation import components as c
 from setu.foundation import tokens as t
-from setu.routes import MODULE_INVENTORY, AREAS
+from setu.routes import AREAS
 from setu.state import AuthState
 from setu.state.dashboard_state import DashboardState
 from setu.views import shell
 
-_SETU_MODULE_COUNT = len(MODULE_INVENTORY)
 
-
-def _module_status_card(unit: str, name: str) -> rx.Component:
-    return rx.hstack(
-        rx.box(
-            rx.text(unit, font_size="11px", font_weight="700", color=t.Color.ACCENT.value),
-            padding="3px 9px",
-            background="#EAF0FB",
-            border="1px solid #D4E1F8",
-            border_radius="7px",
-            flex_shrink="0",
-            min_width="62px",
-            text_align="center",
+def _quick_access_card(screen) -> rx.Component:
+    """One quick-access tile on the dashboard. Every important feature has a
+    visible route here, so nothing depends on the user discovering a
+    collapsed sidebar area."""
+    return rx.link(
+        rx.hstack(
+            rx.box(
+                rx.icon(screen.icon, size=16, color=t.Color.ACCENT.value),
+                width="32px",
+                height="32px",
+                border_radius="9px",
+                background="#EAF0FB",
+                display="flex",
+                align_items="center",
+                justify_content="center",
+                flex_shrink="0",
+            ),
+            rx.text(
+                screen.label,
+                style=t.TEXT["body"],
+                font_weight="700",
+                flex="1",
+                min_width="0",
+            ),
+            rx.icon("arrow-right", size=14, color=t.Color.TEXT_MUTED.value),
+            spacing="3",
+            align="center",
+            width="100%",
         ),
-        rx.text(name, style=t.TEXT["body"], flex="1", min_width="0"),
-        rx.spacer(),
-        c.pill("Live", variant="rule", icon="check"),
+        href=screen.route,
+        text_decoration="none",
+        padding="10px 12px",
+        border=f"1px solid {t.Color.BORDER.value}",
+        border_radius="10px",
+        _hover={"background": "#F1F4FA", "border_color": t.Color.ACCENT.value},
         width="100%",
-        align="center",
-        spacing="3",
-        padding="10px 2px",
-        border_bottom=f"1px solid {t.Color.BORDER.value}",
     )
 
 
@@ -52,6 +66,20 @@ def dashboard_page() -> rx.Component:
             c.page_header(
                 f"Welcome back, {AuthState.display_name}",
                 "Setu runs in Reflex. Every module is live — pick a screen from the sidebar.",
+            ),
+            c.card(
+                c.section_title(
+                    "Quick access",
+                    "Jump straight to the screens you use most. Only the ones your role can open are shown.",
+                ),
+                rx.box(height="10px"),
+                rx.grid(
+                    rx.foreach(AuthState.key_screens, _quick_access_card),
+                    columns=rx.breakpoints(initial="1", sm="2", lg="4"),
+                    spacing="3",
+                    width="100%",
+                ),
+                width="100%",
             ),
             rx.grid(
                 c.card(
@@ -69,27 +97,6 @@ def dashboard_page() -> rx.Component:
                 columns="4",
                 spacing="4",
                 width="100%",
-            ),
-            c.card(
-                c.section_title(
-                    "Modules",
-                    "Each module's Objective / Data Model / Business Rules / UX / "
-                    "Acceptance Criteria carried over unchanged — only the implementation layer moved.",
-                ),
-                rx.box(height="10px"),
-                rx.vstack(
-                    *[_module_status_card(unit, name) for unit, name in MODULE_INVENTORY],
-                    spacing="0",
-                    width="100%",
-                ),
-                rx.box(height="12px"),
-                rx.hstack(
-                    rx.text(
-                        f"{_SETU_MODULE_COUNT} modules · Foundation component library built first (Step 0)",
-                        style=t.TEXT["micro"],
-                    ),
-                    width="100%",
-                ),
             ),
             spacing="5",
             width="100%",
@@ -218,6 +225,12 @@ def _ingestion_ai_route():
     return ingestion_ai_page()
 
 
+def _f6_route():
+    from setu.views.f6_page import f6_page
+
+    return f6_page()
+
+
 def _f5_route():
     from setu.views.f5_page import f5_page
 
@@ -309,6 +322,8 @@ def render_route(route: str) -> rx.Component:
         return _documents_route()
     if route == "/smart-ingestion":
         return _ingestion_ai_route()
+    if route == "/format-registry":
+        return _f6_route()
     if route == "/data-integrity":
         return _f5_route()
     if route == "/filing":
@@ -371,6 +386,8 @@ def _make_page(route: str):
         return _documents_route
     if route == "/smart-ingestion":
         return _ingestion_ai_route
+    if route == "/format-registry":
+        return _f6_route
     if route == "/data-integrity":
         return _f5_route
     if route == "/filing":

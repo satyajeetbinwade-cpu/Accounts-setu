@@ -150,6 +150,15 @@ def get_profile(conn: sqlite3.Connection, client_id: int, source_type: str) -> O
     return row
 
 
+def get_profile_by_id(conn: sqlite3.Connection, profile_id: int) -> Optional[dict[str, Any]]:
+    row = _row_to_dict(
+        conn, "SELECT * FROM column_mapping_profiles WHERE profile_id = ?", (profile_id,)
+    )
+    if row is not None:
+        row["column_map"] = json.loads(row["column_map"])
+    return row
+
+
 def upsert_profile(
     conn: sqlite3.Connection, *, client_id: int, source_type: str, column_map: dict[str, Optional[str]],
     trusted: bool, actor: str,
@@ -196,6 +205,59 @@ def list_profiles(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in rows:
         r["column_map"] = json.loads(r["column_map"])
     return rows
+
+
+def list_profiles_with_usage(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Profiles joined to the REAL reuse store.
+
+    ``column_mapping_profiles`` records that a mapping was confirmed for a
+    client + source type, but the mapping that is actually reused on a
+    future upload lives in ``ingestion_shape_cache`` (keyed by the file's
+    header signature). An admin deciding whether to revoke needs the usage
+    that actually happened, so aggregate it from the shape cache rather
+    than reporting the profile's own (never-incremented) last_used_at.
+    """
+    rows = _rows_to_dicts(
+        conn,
+        """
+        SELECT p.*,
+               COALESCE(SUM(s.times_used), 0) AS usage_count,
+               COUNT(s.shape_id)              AS shape_count,
+               MAX(s.last_used_at)            AS shape_last_used_at
+        FROM column_mapping_profiles p
+        LEFT JOIN ingestion_shape_cache s
+               ON s.client_id = p.client_id AND s.source_type = p.source_type
+        GROUP BY p.profile_id
+        ORDER BY p.updated_at DESC
+        """,
+    )
+    for r in rows:
+        r["column_map"] = json.loads(r["column_map"])
+        # Prefer the shape cache's real last-used; fall back to the profile's.
+        r["last_used_at"] = r.get("shape_last_used_at") or r.get("last_used_at")
+    return rows
+
+
+def untrust_shapes_for_profile(
+    conn: sqlite3.Connection, *, client_id: int, source_type: str,
+) -> int:
+    """Revoke trust on every learned shape backing a profile.
+
+    Revoking a profile must genuinely stop reuse. Flipping the profile's own
+    ``trusted`` flag does nothing on its own — the runtime reads the shape
+    cache — so the shapes are untrusted here too. Returns how many were
+    affected.
+    """
+    cur = conn.execute(
+        """
+        UPDATE ingestion_shape_cache
+        SET trusted = 0, updated_at = ?
+        WHERE client_id = ? AND source_type = ? AND trusted = 1
+        """,
+        (_now(), client_id, source_type),
+    )
+    conn.commit()
+    return cur.rowcount or 0
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +455,71 @@ def get_ingestion_result(conn: sqlite3.Connection, upload_key: str) -> Optional[
             except (TypeError, ValueError):
                 row[dst] = None
     return row
+
+
+def find_ingestion_result(
+    conn: sqlite3.Connection, *, client_id: int, source_type: str, filename: str,
+) -> Optional[dict[str, Any]]:
+    """Look up a persisted ingestion result WITHOUT composing the upload key.
+
+    The key is ``"<client_ref>/<period>/<source_type>/<filename>"``, but
+    ``raw_uploads`` stores neither the client_ref nor the period — so a
+    caller holding only a raw_upload row cannot rebuild the key and would
+    silently read back nothing (which is exactly how a file that genuinely
+    read 37 rows came to be displayed as "0 row(s) read"). Matching on the
+    columns that ARE stored is stable and needs no backfill.
+    """
+    row = _row_to_dict(
+        conn,
+        """
+        SELECT * FROM ingestion_results
+        WHERE client_id = ? AND source_type = ? AND filename = ?
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (client_id, source_type, filename),
+    )
+    if row is None:
+        return None
+    for src, dst in (
+        ("headers_json", "headers"),
+        ("mapping_json", "mapping"),
+        ("classification_json", "classification"),
+        ("unmapped_required_json", "unmapped_required"),
+        ("warnings_json", "warnings"),
+        ("notes_json", "notes"),
+    ):
+        if row.get(src):
+            try:
+                row[dst] = json.loads(row[src])
+            except (TypeError, ValueError):
+                row[dst] = None
+    return row
+
+
+def list_raw_uploads_with_context(
+    conn: sqlite3.Connection, *, client_id: Optional[int] = None, status: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Raw uploads joined to their F3 document's period.
+
+    ``raw_uploads`` has no period column, but the document it files into
+    does — so the Uploads list can surface the period the upload form
+    collected without a schema migration.
+    """
+    sql = """
+        SELECT u.*, d.period AS period, d.doc_type AS doc_type
+        FROM raw_uploads u
+        LEFT JOIN documents d ON d.document_id = u.document_id
+        WHERE 1=1
+    """
+    params: list[Any] = []
+    if client_id is not None:
+        sql += " AND u.client_id = ?"
+        params.append(client_id)
+    if status:
+        sql += " AND u.status = ?"
+        params.append(status)
+    sql += " ORDER BY u.created_at DESC"
+    return _rows_to_dicts(conn, sql, tuple(params))
 
 
 def list_ingestion_results(

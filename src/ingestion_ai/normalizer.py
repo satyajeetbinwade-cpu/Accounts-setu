@@ -79,6 +79,11 @@ from src.ingestion_ai import llm
 # Bookkeeping fields ingestion adds itself — never "mapped from a raw column".
 _STRUCTURAL_FIELDS = {"source_type", "source_file", "original_row", "total_tax"}
 
+# rounding_adjustment defaults to 0.0 (not None) when unmapped — it's a
+# residual, not a required identity/amount field, so an absent column just
+# means "this source doesn't carry one", never a caveat.
+_ZERO_DEFAULT_FIELDS = {"rounding_adjustment"}
+
 # The canonical field set the model is asked to map onto, per source_type.
 # tally_purchase_register / gstr2b / ims all share the GST canonical schema
 # (IMS exports observed in practice use the GSTR-2B layout plus IMS-specific
@@ -178,6 +183,13 @@ STATUS_PARTIAL = "partial"
 STATUS_BLOCKED = "blocked"
 STATUS_WRONG_SLOT = "wrong_slot"
 STATUS_UNRECOGNIZED = "unrecognized"
+# A file that is structurally readable but carries no data rows (a
+# header-only sheet, or a sheet whose every row was blank/subtotal). This is
+# NOT a failure and NOT a confident mapping — it is its own outcome, so the
+# review screen can never present an empty read as "every field mapped
+# confidently", and confirm_mapping() can refuse it unless the reviewer
+# explicitly acknowledges the file is deliberately empty.
+STATUS_EMPTY = "empty"
 
 # Default confidence above which a mapped field is pre-selected for the user
 # (Prompt 2). Overridable from the frontend — see get_preselect_threshold().
@@ -206,6 +218,7 @@ _CAPABILITY_FIELDS: dict[str, tuple[str, ...]] = {
     "match_by_date": ("invoice_date", "deposit_date"),
     "check_taxable_value": ("taxable_value",),
     "check_tax_amounts": ("cgst", "sgst", "igst", "cess", "total_tax"),
+    "check_rounding": ("rounding_adjustment",),
     "check_invoice_total": ("invoice_value",),
     "check_tds_amounts": ("amount_paid_credited", "tax_deducted", "tax_deposited"),
     "check_section": ("section",),
@@ -227,6 +240,7 @@ _CAPABILITY_LABELS: dict[str, str] = {
     "check_party_identity": "Party-name comparison",
     "check_reference": "Reference matching",
     "check_amount": "Amount comparison",
+    "check_rounding": "Rounding-residual tracking",
 }
 
 # Which canonical fields a recon type actually works on. The books slot
@@ -1074,7 +1088,9 @@ def apply_mapping(
         if f in out.columns:
             coerced, affected = _coerce_numeric(out[f])
             out[f] = coerced
-            if affected:
+            # rounding_adjustment defaulting to 0 is expected, not a warning
+            # — it's a residual field most sources never carry.
+            if affected and f not in _ZERO_DEFAULT_FIELDS:
                 warnings.append(
                     f"{len(affected)} row(s) had a blank or unparseable {f} and were set to 0."
                 )
@@ -1174,6 +1190,7 @@ def normalize_source_file(
     client_id: Optional[int] = None,
     recon_type: Optional[str] = None,
     actor: str = "system",
+    filename: Optional[str] = None,
     db_path=None,
     use_cache: bool = True,
 ) -> IngestionResult:
@@ -1191,6 +1208,11 @@ def normalize_source_file(
             required-field gate for the 'tally' slot, which feeds both GST
             and TDS recon from one file.
         actor: Who triggered this, for the audit trail.
+        filename: The caller's own name for the file. REQUIRED when `file`
+            is bytes or a file-like object — without it the temp file is
+            named "upload.csv" and the real extension is lost, so an .xlsx
+            upload is parsed as CSV and yields no rows. Callers passing a
+            path can omit it (the path carries the name).
         use_cache: When False, bypass the shape cache and always call the
             model (used by the "re-run mapping" action).
 
@@ -1201,9 +1223,28 @@ def normalize_source_file(
     from src.ingestion_ai import db as idb
 
     required = required_fields_for(source_type, recon_type)
-    filename, path, cleanup = _materialize(file)
+    filename, path, cleanup = _materialize(file, filename)
     try:
-        read = read_raw_with_header_detection(path)
+        try:
+            read = read_raw_with_header_detection(path)
+        except IngestionError as exc:
+            # A workbook with no tabular sheet is a readable-but-empty file,
+            # not a crash. Report it as its own outcome so the caller can
+            # present it honestly instead of surfacing a raw exception.
+            if "no sheet containing tabular data" not in str(exc):
+                raise
+            result = IngestionResult(
+                source_type=source_type, filename=filename, client=client, period=period,
+                status=STATUS_EMPTY, canonical_df=pd.DataFrame(), field_mappings=[],
+                unmapped_required_fields=[], row_count_in=0, row_count_out=0,
+                warnings=[], headers=[], header_row=None, sheet_name=None,
+                sheet_ambiguous=False, classification=None, model_used=None,
+                llm_cached=False, header_signature="",
+                message="The file contains no data rows — every sheet is empty or header-only.",
+            )
+            _persist_result(result, client_id=client_id, actor=actor, db_path=db_path)
+            return result
+
         headers = [str(c) for c in read.df.columns]
         samples = _sample_rows(read.df)
         signature = _header_signature(headers)
@@ -1327,8 +1368,17 @@ def normalize_source_file(
             path.unlink(missing_ok=True)
 
 
-def _materialize(file: Any) -> tuple[str, Path, bool]:
-    """Turn the caller's `file` into (filename, path, needs_cleanup)."""
+def _materialize(file: Any, filename: Optional[str] = None) -> tuple[str, Path, bool]:
+    """Turn the caller's `file` into (filename, path, needs_cleanup).
+
+    ``filename`` is the caller's own name for the file and MUST be supplied
+    whenever ``file`` is raw bytes or a file-like object. Without it the
+    temp file is named ``upload.csv``, which loses the real extension — an
+    .xlsx upload then gets written to a .csv path and parsed by the CSV
+    reader, producing binary junk instead of rows (and a storage key that
+    can never be looked up again). Callers that pass a path already carry
+    the name, so this is optional for them.
+    """
     import os
     import tempfile
 
@@ -1340,21 +1390,21 @@ def _materialize(file: Any) -> tuple[str, Path, bool]:
 
     if isinstance(file, (bytes, bytearray)):
         data = bytes(file)
-        filename = "upload.csv"
+        resolved = filename or "upload.csv"
     elif hasattr(file, "read"):
-        filename = getattr(file, "name", "upload.csv")
+        resolved = filename or getattr(file, "name", "upload.csv")
         data = file.read()
         if isinstance(data, str):
             data = data.encode("utf-8")
     else:
         raise IngestionError(f"Unsupported file input: {type(file)!r}")
 
-    suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ".csv"
+    suffix = "." + resolved.rsplit(".", 1)[-1].lower() if "." in resolved else ".csv"
     fd, path_str = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
     path = Path(path_str)
     path.write_bytes(data)
-    return filename, path, True
+    return resolved, path, True
 
 
 def _c5_context(client_id: Optional[int]) -> str:

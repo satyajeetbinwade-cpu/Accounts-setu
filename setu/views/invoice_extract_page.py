@@ -64,10 +64,19 @@ def _upload_row(row) -> rx.Component:
     return rx.hstack(
         rx.vstack(
             rx.text(row.filename, style=t.TEXT["body"], font_weight="600"),
-            rx.cond(
-                row.batch_id != "",
-                rx.text(f"Batch: {row.batch_id}", style=t.TEXT["micro"]),
-                rx.fragment(),
+            rx.hstack(
+                rx.cond(
+                    row.ai_used,
+                    c.pill(f"AI · {row.ai_model}", variant="ai"),
+                    c.pill("Offline parser", variant="placeholder"),
+                ),
+                rx.cond(
+                    row.batch_id != "",
+                    rx.text(f"Batch: {row.batch_id}", style=t.TEXT["micro"]),
+                    rx.fragment(),
+                ),
+                spacing="2",
+                align="center",
             ),
             spacing="1",
             align="start",
@@ -108,8 +117,10 @@ def _upload_section() -> rx.Component:
             rx.vstack(
                 c.section_title(
                     "Upload invoices",
-                    "Four formats — images and scanned PDFs route to the visual touchpoint; "
-                    "native PDF/Excel/Word route to the structured touchpoint.",
+                    "Any format — images (JPG/PNG), scanned or native PDF, Word and Excel/CSV. "
+                    "An AI layer reads the document and maps it onto the standard field set; "
+                    "images and scanned PDFs go to the vision model, text-based files to the "
+                    "structured model.",
                 ),
                 rx.hstack(
                     *[c.pill(label, variant="placeholder") for label in FORMAT_CHIPS],
@@ -154,21 +165,56 @@ def _upload_section() -> rx.Component:
                     id="f3b_upload",
                     accept=_ACCEPT,
                     multiple=True,
+                    on_drop=InvoiceExtractState.stage,
                     border=f"1px dashed {t.Color.BORDER.value}",
                     border_radius="12px",
                     width="100%",
                     background=t.Color.SURFACE.value,
                 ),
+                rx.cond(
+                    InvoiceExtractState.pending.length() > 0,
+                    rx.vstack(
+                        rx.text("Ready to extract", style=t.TEXT["label"]),
+                        rx.vstack(
+                            rx.foreach(
+                                InvoiceExtractState.pending,
+                                lambda pf: c.file_preview_chip(
+                                    pf,
+                                    on_remove=InvoiceExtractState.remove_pending(pf.key),
+                                ),
+                            ),
+                            spacing="2",
+                            width="100%",
+                        ),
+                        spacing="2",
+                        align="start",
+                        width="100%",
+                    ),
+                    rx.fragment(),
+                ),
+                rx.cond(
+                    InvoiceExtractState.upload_progress.length() > 0,
+                    rx.vstack(
+                        rx.foreach(
+                            InvoiceExtractState.upload_progress,
+                            lambda r: c.upload_progress_row(r),
+                        ),
+                        spacing="0",
+                        width="100%",
+                    ),
+                    rx.fragment(),
+                ),
                 rx.hstack(
                     rx.button(
                         "Upload & extract",
-                        on_click=InvoiceExtractState.handle_upload(rx.upload_files(upload_id="f3b_upload")),
+                        on_click=InvoiceExtractState.upload_pending,
+                        disabled=InvoiceExtractState.pending.length() == 0,
                         background=t.Color.ACCENT.value,
                         color="#FFFFFF",
                     ),
                     rx.button(
                         "Clear",
-                        on_click=rx.clear_selected_files("f3b_upload"),
+                        on_click=InvoiceExtractState.clear_pending,
                         variant="soft",
                         background="transparent",
                         color=t.Color.TEXT_SECONDARY.value,
@@ -314,7 +360,20 @@ def _field_row(f) -> rx.Component:
     return rx.vstack(
         rx.hstack(
             rx.vstack(
-                rx.text(f.label, style=t.TEXT["body"], font_weight="600"),
+                rx.hstack(
+                    rx.text(f.label, style=t.TEXT["body"], font_weight="600"),
+                    rx.button(
+                        rx.icon("locate", size=13),
+                        on_click=InvoiceExtractState.highlight_field(f.field_name),
+                        size="1",
+                        variant="ghost",
+                        background="transparent",
+                        color=t.Color.ACCENT.value,
+                        title="Locate on the source document",
+                    ),
+                    spacing="1",
+                    align="center",
+                ),
                 rx.cond(
                     f.source_location != "",
                     rx.text(f"source: {f.source_location}", style=t.TEXT["micro"]),
@@ -324,39 +383,83 @@ def _field_row(f) -> rx.Component:
                 align="start",
                 flex="1",
             ),
-            rx.cond(
-                f.resolved,
-                c.confidence_badge("rule", label="Resolved"),
+            rx.hstack(
                 rx.cond(
-                    f.not_present,
-                    c.confidence_badge("ai", label="not present"),
+                    f.resolved,
+                    c.confidence_badge("rule", label="Resolved"),
                     rx.cond(
-                        f.auto_accepted,
-                        rx.text("auto-accepted", style=t.TEXT["micro"]),
-                        c.confidence_badge("ai", pct=f.confidence),
+                        f.not_present,
+                        c.confidence_badge("ai", label="not present"),
+                        rx.cond(
+                            f.auto_accepted,
+                            c.confidence_badge("ai", label=f"Auto-accepted — {f.confidence}%"),
+                            c.confidence_badge("ai", pct=f.confidence),
+                        ),
                     ),
                 ),
+                rx.cond(
+                    f.resolved | f.auto_accepted,
+                    rx.button(
+                        "Edit",
+                        on_click=InvoiceExtractState.start_edit_field(f.field_name),
+                        size="1",
+                        variant="ghost",
+                        background="transparent",
+                        color=t.Color.TEXT_SECONDARY.value,
+                    ),
+                    rx.fragment(),
+                ),
+                spacing="2",
+                align="center",
             ),
             width="100%",
             align="center",
             spacing="3",
         ),
         rx.cond(
-            f.flagged,
+            f.flagged | (InvoiceExtractState.editing_field == f.field_name),
             rx.box(
                 rx.vstack(
+                    rx.cond(
+                        f.has_suggestion,
+                        rx.hstack(
+                            c.confidence_badge("ai", label=f"Suggested ({f.suggestion_label})"),
+                            rx.text(
+                                "Calculated from fields already accepted — confirm or override.",
+                                style=t.TEXT["micro"],
+                            ),
+                            spacing="2",
+                            align="center",
+                        ),
+                        rx.fragment(),
+                    ),
                     rx.input(
                         value=f.input_value,
                         on_change=InvoiceExtractState.set_field_input(f.field_name),
                         placeholder="Enter the correct value (or leave blank if genuinely absent)",
                         width="100%",
                     ),
-                    rx.button(
-                        "Resolve",
-                        on_click=InvoiceExtractState.resolve_field(f.field_name),
-                        size="1",
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
+                    rx.hstack(
+                        rx.button(
+                            "Resolve",
+                            on_click=InvoiceExtractState.resolve_field(f.field_name),
+                            size="1",
+                            background=t.Color.ACCENT.value,
+                            color="#FFFFFF",
+                        ),
+                        rx.cond(
+                            InvoiceExtractState.editing_field == f.field_name,
+                            rx.button(
+                                "Cancel",
+                                on_click=InvoiceExtractState.cancel_edit_field,
+                                size="1",
+                                variant="ghost",
+                                background="transparent",
+                                color=t.Color.TEXT_SECONDARY.value,
+                            ),
+                            rx.fragment(),
+                        ),
+                        spacing="2",
                     ),
                     spacing="2",
                     align="start",
@@ -378,6 +481,80 @@ def _field_row(f) -> rx.Component:
         width="100%",
         padding="8px 0",
         border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def _field_section(title: str, section_key: str) -> rx.Component:
+    """One review-screen group (Header / Line items / Totals). Renders only
+    the fields whose ``section`` matches AND that are still open — resolved
+    fields drop out of here and appear in the Resolved checklist below."""
+    return rx.vstack(
+        rx.text(title, style=t.TEXT["label"], font_weight="700", color=t.Color.TEXT_SECONDARY.value),
+        rx.vstack(
+            rx.foreach(
+                InvoiceExtractState.fields,
+                lambda f: rx.cond(
+                    (f.section == section_key) & ~f.resolved,
+                    _field_row(f),
+                    rx.fragment(),
+                ),
+            ),
+            spacing="0",
+            width="100%",
+        ),
+        spacing="2",
+        align="start",
+        width="100%",
+    )
+
+
+def _resolved_checklist_row(f) -> rx.Component:
+    """One row of the Resolved checklist: a tick, the field's human label,
+    and its confirmed value as the summary. No edit controls inline — the
+    value is already settled."""
+    return rx.hstack(
+        rx.icon("circle_check", size=15, color=t.Color.RULE.value),
+        rx.text(f.label, style=t.TEXT["body"], font_weight="600", flex="1"),
+        rx.text(
+            rx.cond(f.effective_value != "", f.effective_value, "—"),
+            style=t.TEXT["micro"],
+            color=t.Color.TEXT_SECONDARY.value,
+        ),
+        width="100%",
+        align="center",
+        spacing="3",
+        padding="6px 0",
+        border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def _resolved_checklist() -> rx.Component:
+    """The Resolved checklist — every resolved field, flat, below the open
+    sections. Renders nothing when nothing is resolved yet."""
+    return rx.cond(
+        InvoiceExtractState.resolved_count > 0,
+        c.card(
+            rx.vstack(
+                c.section_title(
+                    "Resolved",
+                    f"{InvoiceExtractState.resolved_count} field(s) confirmed — "
+                    "these are settled and no longer need review.",
+                ),
+                rx.vstack(
+                    rx.foreach(
+                        InvoiceExtractState.fields,
+                        lambda f: rx.cond(f.resolved, _resolved_checklist_row(f), rx.fragment()),
+                    ),
+                    spacing="0",
+                    width="100%",
+                ),
+                spacing="3",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        rx.fragment(),
     )
 
 
@@ -476,6 +653,33 @@ def _review_screen() -> rx.Component:
                     style=t.TEXT["micro"],
                 ),
                 rx.cond(
+                    InvoiceExtractState.detail_ai_used,
+                    rx.hstack(
+                        c.confidence_badge(
+                            "ai",
+                            label=f"AI-extracted · {InvoiceExtractState.detail_ai_model}",
+                        ),
+                        rx.cond(
+                            InvoiceExtractState.detail_ai_latency_ms > 0,
+                            rx.text(
+                                f"{InvoiceExtractState.detail_ai_latency_ms} ms",
+                                style=t.TEXT["micro"],
+                            ),
+                            rx.fragment(),
+                        ),
+                        spacing="2",
+                        align="center",
+                    ),
+                    rx.cond(
+                        InvoiceExtractState.detail_ai_error != "",
+                        c.inline_reason(
+                            f"AI extraction unavailable — {InvoiceExtractState.detail_ai_error}. "
+                            "Values below came from the offline parser."
+                        ),
+                        c.pill("Offline parser", variant="placeholder"),
+                    ),
+                ),
+                rx.cond(
                     InvoiceExtractState.detail_duplicate,
                     rx.text(
                         "⚠ Possible duplicate — same invoice number + vendor GSTIN as an earlier upload.",
@@ -491,11 +695,37 @@ def _review_screen() -> rx.Component:
         ),
         rx.cond(
             InvoiceExtractState.can_review,
-            rx.hstack(
+            rx.vstack(
                 c.card(
                     rx.vstack(
                         c.section_title("Source document"),
-                        _preview(),
+                        c.file_viewer_panel(
+                            title_var=InvoiceExtractState.detail_filename,
+                            kind_var=InvoiceExtractState.viewer_kind,
+                            image_src_var=InvoiceExtractState.viewer_image_src,
+                            page_var=InvoiceExtractState.viewer_page,
+                            page_count_var=InvoiceExtractState.viewer_page_count,
+                            table_headers_var=InvoiceExtractState.viewer_table_headers,
+                            table_rows_var=InvoiceExtractState.viewer_table_rows,
+                            text_var=InvoiceExtractState.viewer_text,
+                            download_name_var=InvoiceExtractState.viewer_download_name,
+                            download_href_var="data:" + InvoiceExtractState.viewer_download_mime + ";base64," + InvoiceExtractState.viewer_download_b64,
+                            on_close=InvoiceExtractState.close_viewer,
+                            on_page_prev=InvoiceExtractState.viewer_page_prev,
+                            on_page_next=InvoiceExtractState.viewer_page_next,
+                            zoom_var=InvoiceExtractState.viewer_zoom,
+                            on_zoom_in=InvoiceExtractState.viewer_zoom_in,
+                            on_zoom_out=InvoiceExtractState.viewer_zoom_out,
+                            on_zoom_reset=InvoiceExtractState.viewer_zoom_reset,
+                            highlight_active_var=InvoiceExtractState.highlight_active,
+                            highlight_x_var=InvoiceExtractState.highlight_x,
+                            highlight_y_var=InvoiceExtractState.highlight_y,
+                            highlight_w_var=InvoiceExtractState.highlight_w,
+                            highlight_h_var=InvoiceExtractState.highlight_h,
+                            highlight_page_var=InvoiceExtractState.highlight_page,
+                            highlight_row_index_var=InvoiceExtractState.highlight_row_index,
+                            highlight_snippet_var=InvoiceExtractState.highlight_snippet,
+                        ),
                         spacing="3",
                         align="start",
                         width="100%",
@@ -509,17 +739,16 @@ def _review_screen() -> rx.Component:
                             f"Confidence threshold: {InvoiceExtractState.detail_threshold}% — "
                             "fields below it (or absent) are flagged.",
                         ),
-                        rx.vstack(
-                            rx.foreach(InvoiceExtractState.fields, _field_row),
-                            spacing="0",
-                            width="100%",
-                        ),
+                        _field_section("Header", "header"),
+                        _field_section("Line items", "line_items"),
+                        _field_section("Totals block", "totals"),
                         spacing="3",
                         align="start",
                         width="100%",
                     ),
                     width="100%",
                 ),
+                _resolved_checklist(),
                 spacing="4",
                 width="100%",
                 align="start",
@@ -552,20 +781,81 @@ def _review_screen() -> rx.Component:
                         rx.button(
                             "Confirm upload",
                             on_click=InvoiceExtractState.confirm_upload,
+                            size="3",
                             background=t.Color.ACCENT.value,
                             color="#FFFFFF",
                         ),
                         c.confidence_badge("rule", label="Confirmed"),
                     ),
                 ),
-                rx.button(
-                    "Discard upload",
-                    on_click=InvoiceExtractState.discard_upload,
-                    variant="soft",
-                    background="#FDEBEA",
-                    color=t.Color.DANGER.value,
-                    border=f"1px solid {t.Color.DANGER.value}",
-                    border_radius="9px",
+                rx.hstack(
+                    rx.dialog.root(
+                        rx.dialog.trigger(
+                            rx.button(
+                                "Discard upload",
+                                variant="soft",
+                                background="#FDEBEA",
+                                color=t.Color.DANGER.value,
+                                border=f"1px solid {t.Color.DANGER.value}",
+                                border_radius="9px",
+                            ),
+                        ),
+                        rx.dialog.content(
+                            rx.vstack(
+                                rx.text("Discard this upload?", style=t.TEXT["card_title"]),
+                                rx.text(
+                                    "This permanently removes the upload and every extracted "
+                                    "field. It cannot be undone.",
+                                    style=t.TEXT["micro"],
+                                ),
+                                rx.dialog.close(
+                                    rx.button(
+                                        "Discard upload",
+                                        on_click=InvoiceExtractState.discard_upload,
+                                        background=t.Color.DANGER.value,
+                                        color="#FFFFFF",
+                                    ),
+                                ),
+                                spacing="3",
+                                align="start",
+                            ),
+                        ),
+                    ),
+                    rx.dialog.root(
+                        rx.dialog.trigger(
+                            rx.button(
+                                "Re-extract with AI",
+                                variant="soft",
+                                background="transparent",
+                                color=t.Color.TEXT_PRIMARY.value,
+                                border=f"1px solid {t.Color.BORDER.value}",
+                                border_radius="9px",
+                            ),
+                        ),
+                        rx.dialog.content(
+                            rx.vstack(
+                                rx.text("Re-extract with AI?", style=t.TEXT["card_title"]),
+                                rx.text(
+                                    "This replaces every extracted value, including any manual "
+                                    "resolutions already made on this upload. The upload returns "
+                                    "to the review flow.",
+                                    style=t.TEXT["micro"],
+                                ),
+                                rx.dialog.close(
+                                    rx.button(
+                                        "Re-extract",
+                                        on_click=InvoiceExtractState.re_extract_upload,
+                                        background=t.Color.ACCENT.value,
+                                        color="#FFFFFF",
+                                    ),
+                                ),
+                                spacing="3",
+                                align="start",
+                            ),
+                        ),
+                    ),
+                    spacing="3",
+                    align="center",
                 ),
                 spacing="3",
                 align="start",
@@ -624,25 +914,6 @@ def _batch_row(b) -> rx.Component:
         spacing="4",
         padding="8px 0",
         border_bottom=f"1px solid {t.Color.BORDER.value}",
-    )
-
-
-def _download_link() -> rx.Component:
-    return rx.cond(
-        InvoiceExtractState.last_export_b64 != "",
-        rx.link(
-            rx.button(
-                f"Download {InvoiceExtractState.last_export_name}",
-                background=t.Color.ACCENT.value,
-                color="#FFFFFF",
-            ),
-            href=(
-                "data:" + InvoiceExtractState.last_export_mime + ";base64,"
-                + InvoiceExtractState.last_export_b64
-            ),
-            download=InvoiceExtractState.last_export_name,
-        ),
-        rx.fragment(),
     )
 
 
@@ -707,7 +978,6 @@ def _export_section() -> rx.Component:
                             ),
                             c.inline_reason("Generating an export needs the export permission."),
                         ),
-                        _download_link(),
                         spacing="3",
                         align="start",
                         width="100%",
@@ -804,65 +1074,32 @@ def _model_admin_section() -> rx.Component:
             style=t.TEXT["micro"],
         ),
         rx.vstack(rx.foreach(InvoiceExtractState.touchpoints, _touchpoint_card), spacing="3", width="100%"),
-        rx.cond(
-            InvoiceExtractState.is_model_admin,
-            c.card(
-                rx.vstack(
-                    c.section_title(
-                        "Edit a model assignment",
-                        "These are the same assignments shown under Setup → AI Models — "
-                        "changing one here changes it there too.",
-                    ),
-                    rx.vstack(
-                        rx.text("Touchpoint", style=t.TEXT["label"]),
-                        rx.select(
-                            InvoiceExtractState.touchpoint_keys,
-                            value=InvoiceExtractState.model_edit_key,
-                            on_change=InvoiceExtractState.set_model_edit_key,
-                            width="320px",
-                        ),
-                        spacing="1",
-                        align="start",
-                    ),
-                    rx.hstack(
-                        rx.vstack(
-                            rx.text("Primary model", style=t.TEXT["label"]),
-                            rx.input(
-                                value=InvoiceExtractState.model_primary,
-                                on_change=InvoiceExtractState.set_model_primary,
-                                width="300px",
-                                font_family="monospace",
-                            ),
-                            spacing="1",
-                            align="start",
-                        ),
-                        rx.vstack(
-                            rx.text("Fallback model", style=t.TEXT["label"]),
-                            rx.input(
-                                value=InvoiceExtractState.model_fallback,
-                                on_change=InvoiceExtractState.set_model_fallback,
-                                width="300px",
-                                font_family="monospace",
-                            ),
-                            spacing="1",
-                            align="start",
-                        ),
-                        spacing="3",
-                        wrap="wrap",
-                    ),
-                    rx.button(
-                        "Save model assignment",
-                        on_click=InvoiceExtractState.save_model_assignment,
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
-                    ),
-                    spacing="3",
-                    align="start",
-                    width="100%",
+        c.card(
+            rx.vstack(
+                c.section_title(
+                    "Model assignments are read-only here",
+                    "Primary and fallback models are edited in one place only — Setup → AI Models. "
+                    "Changing them there takes effect here immediately.",
                 ),
+                rx.button(
+                    rx.hstack(
+                        rx.icon("cpu", size=15),
+                        rx.text("Edit in AI Model Config"),
+                        spacing="2",
+                        align="center",
+                    ),
+                    on_click=rx.redirect("/ai-models"),
+                    variant="soft",
+                    background="transparent",
+                    color=t.Color.ACCENT.value,
+                    border=f"1px solid {t.Color.ACCENT.value}",
+                    border_radius="9px",
+                ),
+                spacing="3",
+                align="start",
                 width="100%",
             ),
-            rx.fragment(),
+            width="100%",
         ),
         rx.cond(
             InvoiceExtractState.is_threshold_admin,

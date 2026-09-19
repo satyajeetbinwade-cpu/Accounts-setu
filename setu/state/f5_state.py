@@ -130,8 +130,8 @@ class F5State(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "f5.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("f5.view")):
+            return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)

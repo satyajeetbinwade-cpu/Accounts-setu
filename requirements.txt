@@ -4,3 +4,5 @@ streamlit
 rapidfuzz
 openpyxl
 cryptography
+pymupdf
+reflex==0.9.11.post1

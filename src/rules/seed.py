@@ -122,6 +122,21 @@ SEED_TAXONOMY: list[tuple[str, str, str, str, int]] = [
     ("difference_type", "rounding", "Rounding", "Small difference from rounding.", 5),
     ("difference_type", "duplicate_in_books", "Duplicate in Books", "Same invoice appears more than once.", 6),
     ("difference_type", "unexplained", "Unexplained", "Disagreement with no pinpointed reason.", 7),
+    # F6 (Source File Ingestion & Format Registry) — the two canonical field
+    # additions its build required confirming before build start (§12/§13
+    # of the F6 build prompt). Recorded here as taxonomy entries so the
+    # decision is visible/auditable in C1's own screen, not just a code
+    # comment. See src/ingestion.py's GST_CANONICAL_FIELDS (rounding_
+    # adjustment) and src/f6/schema.py's NormalizedRow (drill-down rows).
+    ("canonical_field_addition", "rounding_adjustment", "rounding_adjustment (GST)",
+     "Rounding/round-off residual carried per source row (e.g. Tally's 'Other "
+     "Amt.'). taxable + Σtax + rounding_adjustment = invoice_value, ±₹1. Never "
+     "folded into taxable value or tax. Confirmed for F6 build, 2026-09-18.", 1),
+    ("canonical_field_addition", "pre_aggregation_drill_down", "Pre-aggregation drill-down rows",
+     "Rate-bucketed source rows (e.g. GSTR-1's one-row-per-tax-rate lines, "
+     "Purchase Register's per-bucket columns) are retained alongside their "
+     "aggregated document-level row for drill-down, keyed by aggregation "
+     "group id. Confirmed for F6 build, 2026-09-18.", 2),
 ]
 
 # ---------------------------------------------------------------------------

@@ -69,7 +69,14 @@ CREATE TABLE IF NOT EXISTS extracted_invoice_fields (
     resolved        INTEGER NOT NULL DEFAULT 0,  -- reviewer has explicitly resolved this field
     resolved_value  TEXT,               -- reviewer's confirmed value (may differ from extracted)
     resolved_by     TEXT,
-    resolved_at     TEXT
+    resolved_at     TEXT,
+    -- Click-to-highlight coordinates (VISUAL touchpoint only; NULL otherwise).
+    -- Normalized 0-1 relative to the page image; bbox_page is 1-based.
+    bbox_x          REAL,
+    bbox_y          REAL,
+    bbox_w          REAL,
+    bbox_h          REAL,
+    bbox_page       INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_extracted_fields_upload ON extracted_invoice_fields(upload_id);
@@ -130,4 +137,34 @@ CREATE TABLE IF NOT EXISTS invoice_extract_change_log (
 def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     """Create F3-B tables if missing. Idempotent."""
     conn.executescript(INVOICE_EXTRACT_SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for pre-existing DBs.
+
+    ``CREATE TABLE IF NOT EXISTS`` never adds a column to a table that
+    already exists, so new columns must be added explicitly here (the same
+    pattern src/db.py and src/ingestion_ai/schema.py use).
+    """
+    _add_column(conn, "invoice_uploads", "ai_used", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "invoice_uploads", "ai_model", "TEXT")
+    _add_column(conn, "invoice_uploads", "ai_latency_ms", "INTEGER")
+    _add_column(conn, "invoice_uploads", "ai_error", "TEXT")
+    # Bounding boxes for click-to-highlight on the source document. Only the
+    # VISUAL touchpoint (image / scanned PDF) can populate these — the
+    # structured path has no image to localize against, so they stay NULL
+    # there and the UI falls back to row/text-snippet highlighting. Coords
+    # are normalized 0-1 relative to the page image; bbox_page is 1-based.
+    _add_column(conn, "extracted_invoice_fields", "bbox_x", "REAL")
+    _add_column(conn, "extracted_invoice_fields", "bbox_y", "REAL")
+    _add_column(conn, "extracted_invoice_fields", "bbox_w", "REAL")
+    _add_column(conn, "extracted_invoice_fields", "bbox_h", "REAL")
+    _add_column(conn, "extracted_invoice_fields", "bbox_page", "INTEGER")
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")

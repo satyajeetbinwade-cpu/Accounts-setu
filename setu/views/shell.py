@@ -56,7 +56,7 @@ def _nav_link(screen: NavScreen) -> rx.Component:
 
 def _area_block(area: NavArea) -> rx.Component:
     """One collapsible nav area: header row + its visible screens."""
-    is_open = NavState.active_area == area.area
+    is_open = NavState.expanded_area == area.area
     return rx.vstack(
         rx.hstack(
             rx.text(

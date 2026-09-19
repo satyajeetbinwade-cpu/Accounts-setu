@@ -166,8 +166,8 @@ class FilingState(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "filing.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("filing.view")):
+            return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)

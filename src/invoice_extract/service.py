@@ -58,12 +58,15 @@ from io import BytesIO
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.invoice_extract import ai_extractor
 from src.invoice_extract import db as idb
 from src.invoice_extract import extractor
 from src.invoice_extract.seed import (
     CANONICAL_FIELD_KEYS,
     DEFAULT_CONFIDENCE_THRESHOLD,
+    DERIVATIONS,
     EXPORT_FORMAT_VERSION,
+    FIELD_SECTIONS,
     FIELD_TALLY_COLUMNS,
     FIELD_LABELS,
     run_seed,
@@ -251,9 +254,19 @@ def upload_invoice(
         )
 
     source_format = extractor.source_format_for(filename)
-    field_results, extraction_path = extractor.extract(
-        filename=filename, file_bytes=file_bytes, source_format=source_format,
+
+    # AI extraction layer FIRST — reads every format (image / scanned PDF /
+    # native PDF / Word / Excel) the same way and maps onto the canonical
+    # field set. Falls back to the deterministic extractor when the AI layer
+    # is unavailable (no key, network error, unparseable reply), so the
+    # module keeps working offline — it just reports which path was used.
+    field_results, extraction_path, ai_meta = ai_extractor.extract_with_ai(
+        filename=filename, file_bytes=file_bytes, source_format=source_format, db_path=db_path,
     )
+    if not ai_meta["ai_used"]:
+        field_results, extraction_path = extractor.extract(
+            filename=filename, file_bytes=file_bytes, source_format=source_format,
+        )
 
     threshold = get_threshold(db_path=db_path)
     tagged = _apply_threshold(field_results, threshold)
@@ -270,6 +283,8 @@ def upload_invoice(
             conn, client_id=client_id, filename=filename, file_ext=ext, source_format=source_format,
             extraction_path=extraction_path, batch_id=batch_id, status=status,
             duplicate_warning=duplicate is not None, actor=actor, file_bytes=file_bytes,
+            ai_used=ai_meta["ai_used"], ai_model=ai_meta["model_id"],
+            ai_latency_ms=ai_meta["latency_ms"], ai_error=ai_meta["ai_error"],
         )
         for f in field_results:
             idb.insert_field(conn, upload_id=upload_id, result=f)
@@ -278,7 +293,8 @@ def upload_invoice(
             idb.create_queue_entry(conn, upload_id=upload_id, flagged_fields=reviewable)
 
         idb.log_change(conn, upload_id=upload_id, action="upload_extracted",
-                       detail=f"{source_format}/{extraction_path}; {len(reviewable)} field(s) need review", actor=actor)
+                       detail=f"{source_format}/{extraction_path}; ai={ai_meta['ai_used']}; "
+                              f"{len(reviewable)} field(s) need review", actor=actor)
     finally:
         conn.close()
 
@@ -293,6 +309,80 @@ def upload_invoice(
         "field_results": tagged,
         "reviewable_fields": reviewable,
         "duplicate": duplicate,
+        "ai_used": ai_meta["ai_used"],
+        "ai_model": ai_meta["model_id"],
+        "ai_error": ai_meta["ai_error"],
+    }
+
+
+def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, Any]:
+    """Re-run extraction on an ALREADY-uploaded invoice, using the current
+    (AI-first) extraction layer, and replace its stored field values.
+
+    This exists so uploads made before the AI layer shipped (or extracted
+    while the model was unavailable) can be refreshed without re-uploading
+    the file — the original file bytes are still stored. Reviewer decisions
+    on fields that are re-extracted are cleared, because the underlying
+    value may have changed; the upload returns to the review flow with the
+    new results. Refuses on an upload already in an immutable export batch.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_upload(conn, upload_id)
+        if upload is None:
+            raise InvoiceExtractError("Upload not found.")
+        if upload["status"] == STATUS_EXPORTED:
+            raise InvoiceExtractError("This upload is part of an immutable export batch — re-extract would need a new upload.")
+        data = idb.get_upload_bytes(conn, upload_id)
+        if not data:
+            raise InvoiceExtractError("The original file bytes for this upload are no longer available.")
+
+        filename = upload["filename"]
+        source_format = upload["source_format"]
+
+        field_results, extraction_path, ai_meta = ai_extractor.extract_with_ai(
+            filename=filename, file_bytes=data, source_format=source_format, db_path=db_path,
+        )
+        if not ai_meta["ai_used"]:
+            field_results, extraction_path = extractor.extract(
+                filename=filename, file_bytes=data, source_format=source_format,
+            )
+
+        threshold = get_threshold(db_path=db_path)
+        tagged = _apply_threshold(field_results, threshold)
+        reviewable = [f["field_name"] for f in tagged if f["reviewable"]]
+
+        # Replace the field set (reviewer decisions are intentionally dropped
+        # since the values just changed) and reset queue state.
+        conn.execute("DELETE FROM extracted_invoice_fields WHERE upload_id = ?", (upload_id,))
+        conn.execute("DELETE FROM invoice_review_queue_entries WHERE upload_id = ?", (upload_id,))
+        for f in field_results:
+            idb.insert_field(conn, upload_id=upload_id, result=f)
+
+        status = STATUS_NEEDS_REVIEW if reviewable else STATUS_EXTRACTED
+        conn.execute(
+            "UPDATE invoice_uploads SET status = ?, extraction_path = ?, ai_used = ?, ai_model = ?, "
+            "ai_latency_ms = ?, ai_error = ?, confirmed_at = NULL, confirmed_by = NULL WHERE upload_id = ?",
+            (status, extraction_path, int(ai_meta["ai_used"]), ai_meta["model_id"],
+             ai_meta["latency_ms"], ai_meta["ai_error"], upload_id),
+        )
+        if reviewable:
+            idb.create_queue_entry(conn, upload_id=upload_id, flagged_fields=reviewable)
+        conn.commit()
+        idb.log_change(conn, upload_id=upload_id, action="re_extracted",
+                       detail=f"{source_format}/{extraction_path}; ai={ai_meta['ai_used']}; "
+                              f"{len(reviewable)} field(s) need review", actor=actor)
+    finally:
+        conn.close()
+
+    return {
+        "upload_id": upload_id,
+        "status": status,
+        "extraction_path": extraction_path,
+        "ai_used": ai_meta["ai_used"],
+        "ai_model": ai_meta["model_id"],
+        "ai_error": ai_meta["ai_error"],
+        "reviewable_fields": reviewable,
     }
 
 
@@ -368,11 +458,73 @@ def get_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
         for r in rows:
             r = dict(r)
             r["label"] = FIELD_LABELS.get(r["field_name"], r["field_name"])
+            r["section"] = FIELD_SECTIONS.get(r["field_name"], "header")
             r["effective_value"] = idb.effective_value(r)
+            r["has_bbox"] = r.get("bbox_x") is not None and r.get("bbox_w") is not None
             out.append(r)
         return out
     finally:
         conn.close()
+
+
+def suggested_value(upload_id: int, field_name: str, *, db_path=None) -> Optional[dict[str, Any]]:
+    """A math-derived suggestion for a flagged/not-present field, or None.
+
+    Only fires when the field is one of the platform's known derivable
+    relationships (seed.DERIVATIONS) AND every dependency is itself a
+    trustworthy value: present, auto-accepted (or already resolved), and
+    numeric. A dependency that is merely *another pending suggestion* does
+    NOT qualify — otherwise a cascade could build on an unconfirmed number.
+
+    Returns ``{"value": "1234.50", "formula_label": "CGST + SGST + IGST"}``.
+    This is a SUGGESTION only: the caller pre-fills the reviewer's input and
+    the reviewer still clicks Resolve. Nothing is ever written here.
+    """
+    deps = DERIVATIONS.get(field_name)
+    if not deps:
+        return None
+    dep_keys, formula_label = deps
+    threshold = get_threshold(db_path=db_path)
+    by_name = {f["field_name"]: f for f in get_fields(upload_id, db_path=db_path)}
+
+    total = 0.0
+    for key in dep_keys:
+        dep = by_name.get(key)
+        if dep is None:
+            return None
+        # Trustworthy = resolved by a human, OR present and auto-accepted.
+        resolved = bool(dep.get("resolved"))
+        auto_accepted = (
+            bool(dep.get("is_present"))
+            and dep.get("confidence") is not None
+            and dep["confidence"] >= threshold
+        )
+        if not (resolved or auto_accepted):
+            return None
+        raw = dep.get("resolved_value") if resolved else dep.get("extracted_value")
+        num = _to_number(raw)
+        if num is None:
+            return None
+        total += num
+
+    return {"value": f"{round(total, 2):.2f}", "formula_label": formula_label}
+
+
+def _to_number(raw: Any) -> Optional[float]:
+    """Coerce a stored value to a float, tolerating currency symbols and
+    thousands separators. Returns None when it isn't a usable number."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip()
+    if not s:
+        return None
+    s = s.replace(",", "").replace("\u20b9", "").replace("$", "").strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def get_reviewable_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:

@@ -98,6 +98,36 @@ def get_version_bytes(conn: sqlite3.Connection, version_id: int) -> Optional[byt
     return row[0] if row else None
 
 
+def get_current_version(conn: sqlite3.Connection, document_id: int) -> Optional[dict[str, Any]]:
+    """The document's current version row (filename/file_ext/file_size/bytes),
+    joined off ``documents.current_version_id``. Returns None when no version
+    exists yet."""
+    return _row_to_dict(
+        conn,
+        "SELECT v.* FROM documents d "
+        "JOIN document_versions v ON v.version_id = d.current_version_id "
+        "WHERE d.document_id = ?",
+        (document_id,),
+    )
+
+
+def set_document_notes(conn: sqlite3.Connection, document_id: int, notes: str) -> None:
+    conn.execute("UPDATE documents SET notes = ? WHERE document_id = ?", (notes, document_id))
+    conn.commit()
+
+
+def discard_document(conn: sqlite3.Connection, document_id: int, actor: str) -> None:
+    """Hard path for the Unified Review Queue's explicit 'discard' resolution.
+    Removes the document row (and, via FK cascade-less explicit deletes, its
+    versions, evidence links and queue rows)."""
+    conn.execute("DELETE FROM evidence_links WHERE document_id = ?", (document_id,))
+    conn.execute("DELETE FROM document_versions WHERE document_id = ?", (document_id,))
+    conn.execute("DELETE FROM unified_review_queue_entries WHERE document_id = ?", (document_id,))
+    conn.execute("DELETE FROM document_edit_log WHERE document_id = ?", (document_id,))
+    conn.execute("DELETE FROM documents WHERE document_id = ?", (document_id,))
+    conn.commit()
+
+
 def get_document(conn: sqlite3.Connection, document_id: int) -> Optional[dict[str, Any]]:
     return _row_to_dict(conn, "SELECT * FROM documents WHERE document_id = ?", (document_id,))
 

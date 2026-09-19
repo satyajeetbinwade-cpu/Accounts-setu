@@ -185,6 +185,27 @@ def get_document(document_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
         conn.close()
 
 
+def get_current_version(document_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+    """The document's current version (filename/file_ext/file_size/file_bytes),
+    used by the shared file viewer to render content inline without
+    downloading."""
+    conn = _connect(db_path)
+    try:
+        return ddb.get_current_version(conn, document_id)
+    finally:
+        conn.close()
+
+
+def set_document_notes(document_id: int, notes: str, *, db_path=None) -> None:
+    """Optional reviewer note on the document itself — distinct from
+    Unified Review Queue resolution notes."""
+    conn = _connect(db_path)
+    try:
+        ddb.set_document_notes(conn, document_id, notes or "")
+    finally:
+        conn.close()
+
+
 def list_documents(
     *, client_id: Optional[int] = None, doc_type: Optional[str] = None, period: Optional[str] = None,
     search: Optional[str] = None, include_deleted: bool = False, deleted_only: bool = False, db_path=None,
@@ -202,17 +223,24 @@ def list_documents(
             needle = search.lower()
             filtered = []
             for row in rows:
-                versions = ddb.list_versions(conn, row["document_id"])
-                row["latest_filename"] = versions[0]["filename"] if versions else ""
+                _attach_version_meta(conn, row)
                 if needle in row["latest_filename"].lower() or needle in row["doc_type"].lower():
                     filtered.append(row)
             return filtered
         for row in rows:
-            versions = ddb.list_versions(conn, row["document_id"])
-            row["latest_filename"] = versions[0]["filename"] if versions else ""
+            _attach_version_meta(conn, row)
         return rows
     finally:
         conn.close()
+
+
+def _attach_version_meta(conn, row: dict[str, Any]) -> None:
+    """Attach the current version's filename, file size and upload timestamp
+    to a document row (for the vault table + duplicate detection)."""
+    versions = ddb.list_versions(conn, row["document_id"])
+    row["latest_filename"] = versions[0]["filename"] if versions else ""
+    row["file_size"] = versions[0]["file_size"] if versions else 0
+    row["uploaded_at"] = versions[0]["uploaded_at"] if versions else row.get("created_at", "")
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +307,56 @@ def list_queue(status: Optional[str] = "pending", *, db_path=None) -> list[dict[
     conn = _connect(db_path)
     try:
         return ddb.list_queue_entries(conn, status=status)
+    finally:
+        conn.close()
+
+
+def discard_document(document_id: int, *, actor: str, db_path=None) -> None:
+    """The 'discard' resolution option in the Unified Review Queue — removes
+    the document outright (not a soft-delete; it is still under review and
+    was never filed)."""
+    conn = _connect(db_path)
+    try:
+        ddb.discard_document(conn, document_id, actor)
+    finally:
+        conn.close()
+
+
+def queue_progress(db_path=None) -> dict[str, int]:
+    """Queue-level progress: how many entries were resolved 'today' vs still
+    pending, for the Unified Review Queue's progress indicator."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM unified_review_queue_entries WHERE status = 'pending'"
+        )
+        pending = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM unified_review_queue_entries "
+            "WHERE status = 'resolved' AND date(resolved_at) = date('now')"
+        )
+        resolved_today = cur.fetchone()[0]
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM unified_review_queue_entries "
+            "WHERE status = 'resolved'"
+        )
+        resolved_total = cur.fetchone()[0]
+        return {"pending": pending, "resolved_today": resolved_today, "resolved_total": resolved_total}
+    finally:
+        conn.close()
+
+
+def find_duplicate_filenames(*, db_path=None) -> set[str]:
+    """Filenames shared by more than one NON-deleted document — surfaced as a
+    'Possible duplicate' affordance mirroring F3-B's duplicate badge."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT v.filename FROM document_versions v "
+            "JOIN documents d ON d.current_version_id = v.version_id "
+            "WHERE d.is_deleted = 0 GROUP BY v.filename HAVING COUNT(*) > 1"
+        )
+        return {r[0] for r in cur.fetchall()}
     finally:
         conn.close()
 

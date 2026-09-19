@@ -68,21 +68,58 @@ def _upload_widget() -> rx.Component:
                 id="f3_upload",
                 accept=_ACCEPT,
                 multiple=True,
+                on_drop=DocumentsState.stage,
                 border=f"1px dashed {t.Color.BORDER.value}",
                 border_radius="12px",
                 width="100%",
                 background=t.Color.SURFACE.value,
             ),
+            # FilePreviewChip — staged files before upload (shared component).
+            rx.cond(
+                DocumentsState.pending.length() > 0,
+                rx.vstack(
+                    rx.text("Ready to upload", style=t.TEXT["label"]),
+                    rx.vstack(
+                        rx.foreach(
+                            DocumentsState.pending,
+                            lambda pf: c.file_preview_chip(
+                                pf,
+                                on_remove=DocumentsState.remove_pending(pf.key),
+                            ),
+                        ),
+                        spacing="2",
+                        width="100%",
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
+            # UploadProgressState — one distinct stage per file (shared).
+            rx.cond(
+                DocumentsState.upload_progress.length() > 0,
+                rx.vstack(
+                    rx.foreach(
+                        DocumentsState.upload_progress,
+                        lambda r: c.upload_progress_row(r),
+                    ),
+                    spacing="0",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
             rx.hstack(
                 rx.button(
                     "Upload",
-                    on_click=DocumentsState.handle_upload(rx.upload_files(upload_id="f3_upload")),
+                    on_click=DocumentsState.upload_pending,
+                    disabled=DocumentsState.pending.length() == 0,
                     background=t.Color.ACCENT.value,
                     color="#FFFFFF",
                 ),
                 rx.button(
                     "Clear",
-                    on_click=rx.clear_selected_files("f3_upload"),
+                    on_click=DocumentsState.clear_pending,
                     variant="soft",
                     background="transparent",
                     color=t.Color.TEXT_SECONDARY.value,
@@ -102,22 +139,35 @@ def _upload_widget() -> rx.Component:
 
 def _doc_row(doc) -> rx.Component:
     return rx.hstack(
-        rx.text(
-            doc.filename,
-            on_click=DocumentsState.open_document(doc.document_id),
+        rx.hstack(
+            rx.text(
+                doc.filename,
+                on_click=DocumentsState.open_document(doc.document_id),
+                font_size="13px",
+                font_weight="600",
+                color=t.Color.TEXT_PRIMARY.value,
+                cursor="pointer",
+                text_align="left",
+                overflow="hidden",
+                text_overflow="ellipsis",
+                white_space="nowrap",
+                _hover={"color": t.Color.ACCENT.value, "text_decoration": "underline"},
+            ),
+            rx.cond(
+                doc.is_duplicate,
+                c.pill("Possible duplicate", variant="ai"),
+                rx.fragment(),
+            ),
+            spacing="2",
+            align="center",
+            min_width="0",
             flex="3",
-            font_size="13px",
-            font_weight="600",
-            color=t.Color.TEXT_PRIMARY.value,
-            cursor="pointer",
-            text_align="left",
-            overflow="hidden",
-            text_overflow="ellipsis",
-            white_space="nowrap",
-            _hover={"color": t.Color.ACCENT.value, "text_decoration": "underline"},
         ),
+        rx.text(doc.client_label, style=t.TEXT["body"], flex="2"),
         rx.text(doc.doc_type, style=t.TEXT["body"], flex="2"),
-        rx.text(rx.cond(doc.period != "", doc.period, "—"), style=t.TEXT["body"], flex="2"),
+        rx.text(rx.cond(doc.period != "", doc.period, "—"), style=t.TEXT["body"], flex="1"),
+        rx.text(rx.cond(doc.uploaded_at != "", doc.uploaded_at, "—"), style=t.TEXT["micro"], flex="2"),
+        rx.text(doc.file_size_label, style=t.TEXT["micro"], flex="1"),
         rx.box(
             rx.cond(
                 doc.review_status == "pending_review",
@@ -126,10 +176,14 @@ def _doc_row(doc) -> rx.Component:
             ),
             flex="2",
         ),
+        rx.icon("chevron-right", size=16, color=t.Color.TEXT_MUTED.value),
         width="100%",
         align="center",
         padding="8px 4px",
         border_bottom=f"1px solid {t.Color.BORDER.value}",
+        cursor="pointer",
+        on_click=DocumentsState.open_document(doc.document_id),
+        _hover={"background": "#F6F8FB"},
     )
 
 
@@ -142,12 +196,11 @@ def _vault() -> rx.Component:
                 rx.hstack(
                     rx.text("Client:", style=t.TEXT["micro"]),
                     rx.select(
-                        DocumentsState.client_options.map(lambda o: o.legal_name),
-                        on_change=lambda v: DocumentsState.set_vault_client(
-                            DocumentsState.client_options.filter(lambda o: o.legal_name == v)[0].client_id
-                        ),
+                        DocumentsState.vault_client_names,
+                        value=DocumentsState.vault_client_name,
+                        on_change=DocumentsState.set_vault_client_by_name,
                         placeholder="Select a client",
-                        width="280px",
+                        width="320px",
                     ),
                     spacing="2",
                     align="center",
@@ -182,9 +235,13 @@ def _vault() -> rx.Component:
                             rx.vstack(
                                 rx.hstack(
                                     rx.text("File", style=t.TEXT["label"], flex="3"),
+                                    rx.text("Client", style=t.TEXT["label"], flex="2"),
                                     rx.text("Type", style=t.TEXT["label"], flex="2"),
-                                    rx.text("Period", style=t.TEXT["label"], flex="2"),
+                                    rx.text("Period", style=t.TEXT["label"], flex="1"),
+                                    rx.text("Uploaded", style=t.TEXT["label"], flex="2"),
+                                    rx.text("Size", style=t.TEXT["label"], flex="1"),
                                     rx.text("Status", style=t.TEXT["label"], flex="2"),
+                                    rx.box(width="16px"),
                                     width="100%",
                                     padding="0 4px 6px 4px",
                                     border_bottom=f"1px solid {t.Color.BORDER.value}",
@@ -216,19 +273,29 @@ def _document_detail() -> rx.Component:
     return rx.vstack(
         rx.button(
             "← Back to vault",
-            variant="ghost",
-            color_scheme="gray",
-            size="1",
             on_click=DocumentsState.back_to_vault,
+            variant="soft",
+            background="transparent",
+            color=t.Color.TEXT_SECONDARY.value,
+            border=f"1px solid {t.Color.BORDER.value}",
+            border_radius="9px",
+            size="2",
+            _hover={"background": "#EEF2F8", "color": t.Color.TEXT_PRIMARY.value},
         ),
         c.card(
             rx.vstack(
                 rx.hstack(
                     rx.vstack(
                         rx.text(DocumentsState.detail_filename, font_size="17px", font_weight="700"),
-                        rx.text(
-                            f"Client: {DocumentsState.detail_client} · Type: {DocumentsState.detail_type} · Period: {DocumentsState.detail_period}",
-                            style=t.TEXT["label"],
+                        rx.hstack(
+                            rx.text(f"Client: {DocumentsState.detail_client}", style=t.TEXT["label"]),
+                            rx.text("·", style=t.TEXT["micro"]),
+                            rx.text(f"Type: {DocumentsState.detail_type}", style=t.TEXT["label"]),
+                            rx.text("·", style=t.TEXT["micro"]),
+                            rx.text("Period:", style=t.TEXT["label"]),
+                            rx.text(DocumentsState.detail_period_label, style=t.TEXT["label"], font_weight="700"),
+                            spacing="1",
+                            align="center",
                         ),
                         spacing="1",
                         align="start",
@@ -246,6 +313,67 @@ def _document_detail() -> rx.Component:
                     ),
                     width="100%",
                     align="start",
+                ),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        # FileViewerPanel — the primary place a reviewer sees the file (shared).
+        c.file_viewer_panel(
+            title_var=DocumentsState.detail_filename,
+            kind_var=DocumentsState.viewer_kind,
+            image_src_var=DocumentsState.viewer_image_src,
+            page_var=DocumentsState.viewer_page,
+            page_count_var=DocumentsState.viewer_page_count,
+            table_headers_var=DocumentsState.viewer_table_headers,
+            table_rows_var=DocumentsState.viewer_table_rows,
+            text_var=DocumentsState.viewer_text,
+            download_name_var=DocumentsState.viewer_download_name,
+            download_href_var="data:" + DocumentsState.viewer_download_mime + ";base64," + DocumentsState.viewer_download_b64,
+            on_close=DocumentsState.close_viewer,
+            on_page_prev=DocumentsState.viewer_page_prev,
+            on_page_next=DocumentsState.viewer_page_next,
+            zoom_var=DocumentsState.viewer_zoom,
+            on_zoom_in=DocumentsState.viewer_zoom_in,
+            on_zoom_out=DocumentsState.viewer_zoom_out,
+            on_zoom_reset=DocumentsState.viewer_zoom_reset,
+        ),
+        rx.hstack(
+            rx.button(
+                rx.hstack(rx.icon("eye", size=16), rx.text("View file"), spacing="2"),
+                on_click=DocumentsState.open_document_viewer,
+                variant="soft",
+                background="transparent",
+                color=t.Color.TEXT_PRIMARY.value,
+                border=f"1px solid {t.Color.BORDER.value}",
+                border_radius="9px",
+                size="2",
+            ),
+            rx.text("Opens the document inline — no download needed.", style=t.TEXT["micro"]),
+            spacing="2",
+            align="center",
+        ),
+        # Optional note on the document itself (distinct from queue notes)
+        c.card(
+            rx.vstack(
+                rx.text("Reviewer note", style=t.TEXT["card_title"]),
+                rx.input(
+                    value=DocumentsState.detail_notes_draft,
+                    on_change=DocumentsState.set_detail_notes_draft,
+                    placeholder="Add an optional note about this document…",
+                    width="100%",
+                ),
+                rx.button(
+                    "Save note",
+                    on_click=DocumentsState.save_notes,
+                    variant="soft",
+                    background="transparent",
+                    color=t.Color.TEXT_PRIMARY.value,
+                    border=f"1px solid {t.Color.BORDER.value}",
+                    border_radius="9px",
+                    size="1",
                 ),
                 spacing="2",
                 align="start",
@@ -338,10 +466,8 @@ def _document_detail() -> rx.Component:
                     rx.vstack(
                         rx.select(
                             DocumentsState.client_options.map(lambda o: o.legal_name),
-                            on_change=lambda v: DocumentsState.set_reassign_client(
-                                DocumentsState.client_options.filter(lambda o: o.legal_name == v)[0].client_id
-                            ),
-                            placeholder="Correct client",
+                            value=DocumentsState.reassign_client_name,
+                            on_change=DocumentsState.set_reassign_client_by_name,
                             width="280px",
                         ),
                         rx.cond(
@@ -406,30 +532,42 @@ def _document_detail() -> rx.Component:
                     ),
                     rx.cond(
                         DocumentsState.can_delete,
-                        rx.popover.root(
-                            rx.popover.trigger(
-                                c.delete_button("Delete"),
-                            ),
-                            rx.popover.content(
-                                rx.vstack(
-                                    rx.text("Reason for deletion (optional)", style=t.TEXT["label"]),
-                                    rx.input(
-                                        value=DocumentsState.delete_reason,
-                                        on_change=DocumentsState.set_delete_reason,
-                                        width="100%",
-                                    ),
+                        rx.cond(
+                            DocumentsState.delete_confirm,
+                            rx.vstack(
+                                c.warning_banner(
+                                    "This soft-deletes the document. It can be restored from Recently Deleted."
+                                ),
+                                rx.text("Reason for deletion (optional)", style=t.TEXT["label"]),
+                                rx.input(
+                                    value=DocumentsState.delete_reason,
+                                    on_change=DocumentsState.set_delete_reason,
+                                    placeholder="Why is this being deleted?",
+                                    width="100%",
+                                ),
+                                rx.hstack(
                                     rx.button(
                                         "Confirm delete",
-                                        on_click=DocumentsState.soft_delete,
+                                        on_click=DocumentsState.confirm_soft_delete,
                                         background=t.Color.DANGER.value,
                                         color="#FFFFFF",
                                     ),
+                                    rx.button(
+                                        "Cancel",
+                                        on_click=DocumentsState.cancel_delete,
+                                        variant="soft",
+                                        background="transparent",
+                                        color=t.Color.TEXT_SECONDARY.value,
+                                        border=f"1px solid {t.Color.BORDER.value}",
+                                        border_radius="9px",
+                                    ),
                                     spacing="2",
-                                    align="start",
-                                    width="240px",
                                 ),
-                                side="bottom",
+                                spacing="2",
+                                align="start",
+                                width="100%",
                             ),
+                            c.delete_button("Delete", on_click=DocumentsState.confirm_delete),
                         ),
                         rx.vstack(
                             c.delete_button("Delete", disabled=True),
@@ -451,60 +589,194 @@ def _document_detail() -> rx.Component:
     )
 
 
+def _flag_pill(e) -> rx.Component:
+    """Distinct visual per flag type — 'couldn't classify' (needs human
+    judgment) vs 'couldn't map — N need mapping' vs 'couldn't map —
+    unrecognized shape' (parser gap) are different problems."""
+    return rx.match(
+        e.flag_kind,
+        ("classify", c.pill("Couldn't classify — needs judgment", variant="ai")),
+        ("mapping", c.pill("Couldn't map — fields need mapping", variant="accent")),
+        ("shape", c.pill("Couldn't map — unrecognized shape", variant="danger")),
+        c.pill("Needs review", variant="placeholder"),
+    )
+
+
 def _queue_row(e) -> rx.Component:
-    return c.card(
+    return rx.hstack(
         rx.vstack(
-            rx.hstack(
-                rx.vstack(
-                    rx.text(f"Document #{e.document_id} · {e.doc_type}", style=t.TEXT["card_title"]),
-                    rx.text(
-                        rx.cond(e.period != "", f"Client: {e.client_label} · Period: {e.period}", f"Client: {e.client_label}"),
-                        style=t.TEXT["micro"],
-                    ),
-                    spacing="1",
-                    align="start",
-                ),
-                rx.spacer(),
-                c.accent_pill(e.reason),
-                width="100%",
-                align="start",
+            rx.text(
+                rx.cond(e.document_id > 0, f"Document #{e.document_id} · {e.doc_type}", e.doc_type),
+                style=t.TEXT["body"],
+                font_weight="600",
             ),
-            rx.cond(
-                DocumentsState.can_resolve,
-                rx.vstack(
-                    rx.hstack(
-                        rx.select(
-                            ["(keep as-is)", "GSTR-2B", "Form 26AS", "Tally Export", "IMS Export", "TDS Certificate", "Bank Statement", "Invoice", "Other"],
-                            value=DocumentsState.queue_type[e.entry_id.to_string()],
-                            on_change=lambda v: DocumentsState.set_queue_type(e.entry_id, v),
-                            width="220px",
-                        ),
-                        rx.input(
-                            value=DocumentsState.queue_notes[e.entry_id.to_string()],
-                            on_change=lambda v: DocumentsState.set_queue_notes(e.entry_id, v),
-                            placeholder="Resolution notes (optional)",
-                            flex="1",
-                        ),
-                        rx.button(
-                            "Resolve",
-                            on_click=DocumentsState.resolve_queue(e.entry_id),
-                            background=t.Color.ACCENT.value,
-                            color="#FFFFFF",
-                        ),
-                        spacing="3",
-                        width="100%",
-                    ),
-                    spacing="2",
-                    align="start",
-                    width="100%",
-                ),
-                c.inline_reason("Requires Manager-level permission or above to resolve."),
+            rx.text(
+                rx.cond(e.period != "", f"Client: {e.client_label} · Period: {e.period}", f"Client: {e.client_label}"),
+                style=t.TEXT["micro"],
             ),
-            spacing="3",
+            spacing="1",
             align="start",
-            width="100%",
+            flex="1",
+            min_width="0",
+        ),
+        rx.text(e.reason, style=t.TEXT["micro"], flex="2", min_width="0"),
+        _flag_pill(e),
+        rx.button(
+            "Open",
+            on_click=DocumentsState.open_queue_item(e.entry_id),
+            size="1",
+            variant="soft",
+            background="transparent",
+            color=t.Color.TEXT_PRIMARY.value,
+            border=f"1px solid {t.Color.BORDER.value}",
+            border_radius="8px",
         ),
         width="100%",
+        align="center",
+        spacing="3",
+        padding="8px 0",
+        border_bottom=f"1px solid {t.Color.BORDER.value}",
+        _hover={"background": "#F6F8FB"},
+        cursor="pointer",
+        on_click=DocumentsState.open_queue_item(e.entry_id),
+    )
+
+
+def _detail_flag_pill() -> rx.Component:
+    return rx.match(
+        DocumentsState.queue_entry_flag_kind,
+        ("classify", c.pill("Couldn't classify — needs judgment", variant="ai")),
+        ("mapping", c.pill("Couldn't map — fields need mapping", variant="accent")),
+        ("shape", c.pill("Couldn't map — unrecognized shape", variant="danger")),
+        c.pill("Needs review", variant="placeholder"),
+    )
+
+
+def _queue_detail() -> rx.Component:
+    """File-by-file resolution flow: the FileViewerPanel + why it was flagged
+    + the resolution action together, reusing the Document Detail pattern."""
+    return rx.vstack(
+        rx.button(
+            "← Back to review queue",
+            on_click=DocumentsState.close_queue_item,
+            variant="soft",
+            background="transparent",
+            color=t.Color.TEXT_SECONDARY.value,
+            border=f"1px solid {t.Color.BORDER.value}",
+            border_radius="9px",
+            size="2",
+            _hover={"background": "#EEF2F8", "color": t.Color.TEXT_PRIMARY.value},
+        ),
+        c.card(
+            rx.vstack(
+                rx.hstack(
+                    rx.vstack(
+                        rx.text(
+                            DocumentsState.queue_entry_title,
+                            style=t.TEXT["card_title"],
+                        ),
+                        rx.foreach(
+                            DocumentsState.queue_entry_reason,
+                            lambda r: rx.text(r, style=t.TEXT["micro"]),
+                        ),
+                        spacing="1",
+                        align="start",
+                    ),
+                    rx.spacer(),
+                    _detail_flag_pill(),
+                    width="100%",
+                    align="start",
+                ),
+                rx.cond(
+                    DocumentsState.can_resolve,
+                    rx.vstack(
+                        rx.text("Resolution", style=t.TEXT["card_title"]),
+                        rx.hstack(
+                            rx.select(
+                                ["(keep as-is)", "GSTR-2B", "Form 26AS", "Tally Export", "IMS Export", "TDS Certificate", "Bank Statement", "Invoice", "Other"],
+                                value=DocumentsState.queue_entry_type_value,
+                                on_change=DocumentsState.set_queue_type(DocumentsState.queue_open_entry_id),
+                                width="240px",
+                            ),
+                            rx.text("Reclassify document type (remap fields → file)", style=t.TEXT["micro"]),
+                            spacing="2",
+                            align="center",
+                        ),
+                        rx.input(
+                            value=DocumentsState.queue_entry_notes_value,
+                            on_change=DocumentsState.set_queue_notes(DocumentsState.queue_open_entry_id),
+                            placeholder="Resolution notes (optional)",
+                            width="100%",
+                        ),
+                        rx.hstack(
+                            rx.button(
+                                "File (keep as-is)",
+                                on_click=DocumentsState.file_as_is,
+                                variant="soft",
+                                background="transparent",
+                                color=t.Color.TEXT_PRIMARY.value,
+                                border=f"1px solid {t.Color.BORDER.value}",
+                                border_radius="9px",
+                            ),
+                            rx.button(
+                                "Reclassify & file",
+                                on_click=DocumentsState.reclassify_and_file,
+                                background=t.Color.ACCENT.value,
+                                color="#FFFFFF",
+                            ),
+                            rx.cond(
+                                DocumentsState.discard_confirm,
+                                rx.hstack(
+                                    rx.button(
+                                        "Confirm discard",
+                                        on_click=DocumentsState.discard_queue(DocumentsState.queue_open_entry_id),
+                                        background=t.Color.DANGER.value,
+                                        color="#FFFFFF",
+                                    ),
+                                    rx.button(
+                                        "Cancel",
+                                        on_click=DocumentsState.cancel_discard,
+                                        variant="soft",
+                                        background="transparent",
+                                        color=t.Color.TEXT_SECONDARY.value,
+                                        border=f"1px solid {t.Color.BORDER.value}",
+                                        border_radius="9px",
+                                    ),
+                                    spacing="2",
+                                ),
+                                rx.button(
+                                    "Discard",
+                                    on_click=DocumentsState.confirm_discard,
+                                    variant="soft",
+                                    background="#FDEBEA",
+                                    color=t.Color.DANGER.value,
+                                    border=f"1px solid {t.Color.DANGER.value}",
+                                    border_radius="9px",
+                                ),
+                            ),
+                            spacing="2",
+                            align="center",
+                        ),
+                        rx.cond(
+                            DocumentsState.discard_confirm,
+                            c.warning_banner("Discard permanently removes this document — it cannot be restored."),
+                            rx.fragment(),
+                        ),
+                        spacing="3",
+                        align="start",
+                        width="100%",
+                    ),
+                    c.inline_reason("Requires Manager-level permission or above to resolve."),
+                ),
+                spacing="3",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        spacing="4",
+        width="100%",
+        align="start",
     )
 
 
@@ -513,6 +785,23 @@ def _review_queue() -> rx.Component:
         c.card(
             rx.vstack(
                 c.stat(DocumentsState.queue.length().to_string(), "items awaiting resolution"),
+                rx.hstack(
+                    rx.text(
+                        f"{DocumentsState.queue_progress['resolved_today']} of {DocumentsState.queue_progress['resolved_total'] + DocumentsState.queue_progress['pending']} resolved today",
+                        style=t.TEXT["micro"],
+                    ),
+                    rx.progress(
+                        value=rx.cond(
+                            (DocumentsState.queue_progress['resolved_total'] + DocumentsState.queue_progress['pending']) > 0,
+                            (DocumentsState.queue_progress['resolved_total'] * 100) / (DocumentsState.queue_progress['resolved_total'] + DocumentsState.queue_progress['pending']),
+                            0,
+                        ),
+                        width="200px",
+                        size="1",
+                    ),
+                    spacing="2",
+                    align="center",
+                ),
                 spacing="2",
                 align="start",
                 width="100%",
@@ -520,9 +809,48 @@ def _review_queue() -> rx.Component:
             width="100%",
         ),
         rx.cond(
-            DocumentsState.queue.length() > 0,
-            rx.vstack(rx.foreach(DocumentsState.queue, _queue_row), spacing="3", width="100%"),
-            c.empty_state("Nothing waiting on human review right now.", icon="check-check"),
+            DocumentsState.queue_open_entry_id != 0,
+            _queue_detail(),
+            rx.vstack(
+                rx.hstack(
+                    rx.select(
+                        DocumentsState.queue_client_options,
+                        value=DocumentsState.queue_filter_client,
+                        on_change=DocumentsState.set_queue_filter_client,
+                        width="220px",
+                    ),
+                    rx.select(
+                        ["All types", "GSTR-2B", "Form 26AS", "Tally Export", "IMS Export", "TDS Certificate", "Bank Statement", "Invoice", "Other"],
+                        value=DocumentsState.queue_filter_type,
+                        on_change=DocumentsState.set_queue_filter_type,
+                        width="200px",
+                    ),
+                    rx.select(
+                        ["All flags", "Couldn't classify", "Couldn't map — fields need mapping", "Couldn't map — unrecognized shape", "Other"],
+                        value=DocumentsState.queue_filter_flag,
+                        on_change=DocumentsState.set_queue_filter_flag,
+                        width="280px",
+                    ),
+                    spacing="3",
+                    width="100%",
+                    wrap="wrap",
+                ),
+                rx.cond(
+                    DocumentsState.filtered_queue.length() > 0,
+                    c.card(
+                        rx.vstack(
+                            rx.foreach(DocumentsState.filtered_queue, _queue_row),
+                            spacing="0",
+                            width="100%",
+                        ),
+                        width="100%",
+                    ),
+                    c.empty_state("Nothing waiting on human review right now.", icon="check-check"),
+                ),
+                spacing="3",
+                width="100%",
+                align="start",
+            ),
         ),
         spacing="4",
         width="100%",

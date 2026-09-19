@@ -103,6 +103,14 @@ SEED_PERMISSIONS: list[tuple[str, str, str]] = [
     ("invoice_extract.export", "invoice_extract", "Generate a Tally-ready export batch from Confirmed uploads."),
     ("invoice_extract.models.manage", "invoice_extract", "Edit the two invoice-extraction touchpoint model assignments (Admin)."),
     ("invoice_extract.threshold.manage", "invoice_extract", "Edit the invoice-extraction confidence threshold (Admin)."),
+    # --- F6 (source file ingestion & format registry) module actions ---
+    ("f6.view", "f6", "View the Format Registry, mapping-review screens, and ingestion run results."),
+    ("f6.upload", "f6", "Upload a source file for identification and ingestion (Path A/B/C)."),
+    ("f6.mapping.confirm", "f6", "Confirm a Path B mapping proposal and promote it (client-scoped by default)."),
+    ("f6.format.promote_firmwide", "f6",
+     "Promote a confirmed mapping firm-wide, changing parsing for every client at once "
+     "(Partner or above — the highest-consequence action in this module)."),
+    ("f6.format.quarantine", "f6", "Quarantine a format version (Manager or above)."),
 ]
 
 # role name -> list of permission codes granted by default.
@@ -167,6 +175,11 @@ DEFAULT_ROLE_GRANTS: dict[str, list[str]] = {
         "invoice_extract.export",
         "invoice_extract.models.manage",
         "invoice_extract.threshold.manage",
+        "f6.view",
+        "f6.upload",
+        "f6.mapping.confirm",
+        "f6.format.promote_firmwide",
+        "f6.format.quarantine",
     ],
     "Manager": [
         "auth.permissions.view",
@@ -215,6 +228,10 @@ DEFAULT_ROLE_GRANTS: dict[str, list[str]] = {
         "invoice_extract.upload",
         "invoice_extract.review",
         "invoice_extract.export",
+        "f6.view",
+        "f6.upload",
+        "f6.mapping.confirm",
+        "f6.format.quarantine",
     ],
     "Senior Accountant": [
         "recon.results.view",
@@ -240,6 +257,8 @@ DEFAULT_ROLE_GRANTS: dict[str, list[str]] = {
         "invoice_extract.upload",
         "invoice_extract.review",
         "invoice_extract.export",
+        "f6.view",
+        "f6.upload",
     ],
     "Article-Trainee": [
         "recon.results.view",
@@ -256,6 +275,8 @@ DEFAULT_ROLE_GRANTS: dict[str, list[str]] = {
         "module2.eligible_credit.view",
         "action_center.view",
         "invoice_extract.upload",
+        "f6.view",
+        "f6.upload",
     ],
     "End-Client": [
         "recon.results.view",

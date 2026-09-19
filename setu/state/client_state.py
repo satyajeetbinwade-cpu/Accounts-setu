@@ -203,8 +203,8 @@ class ClientState(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "clients.profile.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("clients.profile.view")):
+            return rx.redirect(deny)
         self._load_roster()
         if self.selected_client_id:
             self._load_profile()

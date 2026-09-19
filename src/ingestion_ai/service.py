@@ -172,10 +172,14 @@ def upload_and_infer(
         conn.close()
 
     # The unified layer does the structural read, the classification
-    # pre-check, and the field mapping — all of it.
+    # pre-check, and the field mapping — all of it. The filename is passed
+    # explicitly: without it the layer writes the bytes to a temp file named
+    # "upload.csv", losing the real extension (an .xlsx upload would then be
+    # parsed as CSV and yield no rows).
     result = normalizer.normalize_source_file(
         file_bytes, source_type, client_ref or str(client_id), period,
-        client_id=client_id, recon_type=recon_type, actor=actor, db_path=db_path,
+        client_id=client_id, recon_type=recon_type, actor=actor,
+        filename=filename, db_path=db_path,
     )
 
     thresholds = get_thresholds(db_path=db_path)
@@ -183,6 +187,14 @@ def upload_and_infer(
 
     if result.status in ("wrong_slot", "unrecognized"):
         upload_status = "unrecognized"
+    elif result.status == "empty" or result.row_count_out == 0:
+        # A file that mapped cleanly but yielded NO canonical rows is not a
+        # confident mapping — there is nothing to be confident about. This
+        # is its own status so the review screen can never present an empty
+        # read as "every field mapped confidently", and so confirm_mapping()
+        # can refuse it unless the reviewer explicitly says the file is
+        # deliberately empty.
+        upload_status = "empty"
     elif result.unmapped_required_fields:
         upload_status = "blocked"
     else:
@@ -347,9 +359,77 @@ def list_uploads(*, client_id: Optional[int] = None, status: Optional[str] = Non
         conn.close()
 
 
+def list_uploads_with_context(
+    *, client_id: Optional[int] = None, status: Optional[str] = None, db_path=None,
+) -> list[dict[str, Any]]:
+    """Uploads joined to their document's period, plus the row accounting
+    from the persisted ingestion result.
+
+    The Uploads list needs the period the upload form collected and the
+    real rows-read/extracted counts. Neither lives on ``raw_uploads``, so
+    both are resolved here rather than in the UI — and the counts are
+    resolved by ``stored_result_for_upload()``, which does NOT depend on
+    rebuilding the upload key (see that function).
+    """
+    conn = _connect(db_path)
+    try:
+        rows = idb.list_raw_uploads_with_context(conn, client_id=client_id, status=status)
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for u in rows:
+        stored = stored_result_for_upload(u["upload_id"], db_path=db_path) or {}
+        row = dict(u)
+        row["row_count_in"] = int(stored.get("row_count_in") or 0)
+        row["row_count_out"] = int(stored.get("row_count_out") or 0)
+        row["has_stored_result"] = bool(stored)
+        out.append(row)
+    return out
+
+
+def stored_result_for_upload(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+    """The persisted ingestion result for a raw upload.
+
+    Deliberately does NOT compose the upload key from the raw_upload row:
+    that row carries neither ``client_ref`` nor ``period``, so the composed
+    key never matched what ``normalize_source_file()`` stored, and every
+    upload displayed "0 row(s) read · 0 row(s) extracted" regardless of how
+    many rows it actually read. Resolving through the document (which does
+    carry the period) and matching on the stored columns fixes existing
+    rows too, with no backfill.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            return None
+        return idb.find_ingestion_result(
+            conn,
+            client_id=upload["client_id"],
+            source_type=upload["source_type"],
+            filename=upload["filename"],
+        )
+    finally:
+        conn.close()
+
+
+def upload_row_counts(upload_id: int, *, db_path=None) -> dict[str, int]:
+    """(rows_read, rows_extracted) for an upload — 0/0 only when genuinely
+    unknown, never as a silent default for a lookup miss."""
+    stored = stored_result_for_upload(upload_id, db_path=db_path)
+    if not stored:
+        return {"row_count_in": 0, "row_count_out": 0, "known": 0}
+    return {
+        "row_count_in": int(stored.get("row_count_in") or 0),
+        "row_count_out": int(stored.get("row_count_out") or 0),
+        "known": 1,
+    }
+
+
 def confirm_mapping(
     upload_id: int, *, field_overrides: dict[str, Optional[str]], trust_for_reuse: bool, actor: str,
-    client_ref: Optional[str] = None, db_path=None,
+    client_ref: Optional[str] = None, allow_empty: bool = False, db_path=None,
 ) -> None:
     """Human confirmation of the (possibly edited) mapping. Never
     auto-trusts — trust is opt-in via ``trust_for_reuse``, never implied
@@ -360,6 +440,13 @@ def confirm_mapping(
     (client + source_type + header signature) via the unified layer, so
     the next file of this shape skips both the model call and the manual
     step when trust was granted (Prompt 2).
+
+    HARD GATE on an empty read: a file that yielded zero canonical rows
+    cannot be confirmed as a mapping — there is no data for the mapping to
+    be correct about. ``allow_empty=True`` is the reviewer's explicit
+    "this file is deliberately empty" acknowledgement, and is the ONLY way
+    past the gate. Enforced here rather than in the UI so no caller can
+    bypass it.
 
     F5 retrofit: once the mapping is confirmed, the file's data is
     CANONICAL — this is the exact point F5's structural validity gate
@@ -372,6 +459,20 @@ def confirm_mapping(
         upload = idb.get_raw_upload(conn, upload_id)
         if upload is None:
             raise IngestionAIError("Upload not found.")
+
+        if not allow_empty:
+            stored = idb.find_ingestion_result(
+                conn,
+                client_id=upload["client_id"],
+                source_type=upload["source_type"],
+                filename=upload["filename"],
+            )
+            if stored is not None and int(stored.get("row_count_out") or 0) == 0:
+                raise IngestionAIError(
+                    "This file read 0 rows — there is no data for this mapping to apply to. "
+                    "Confirm it as a deliberately empty file if that is expected, or re-upload "
+                    "the correct file."
+                )
 
         idb.confirm_upload(
             conn, upload_id, confirmed_mapping=field_overrides, trusted_on_confirm=trust_for_reuse,
@@ -491,12 +592,40 @@ def list_profiles(*, db_path=None) -> list[dict[str, Any]]:
         conn.close()
 
 
-def revoke_profile_trust(profile_id: int, *, db_path=None) -> None:
-    """Revoking trust is reversible — the shape can be re-trusted on the
-    next confirm, so this doesn't need the Delete-vs-Deactivate pair."""
+def list_profiles_with_usage(*, db_path=None) -> list[dict[str, Any]]:
+    """Profiles with the usage that ACTUALLY happened.
+
+    ``column_mapping_profiles.last_used_at`` is never incremented by the
+    runtime (reuse reads ``ingestion_shape_cache``), so an admin deciding
+    whether to revoke would be looking at a permanently blank column. The
+    real counts are aggregated from the shape cache.
+    """
     conn = _connect(db_path)
     try:
+        return idb.list_profiles_with_usage(conn)
+    finally:
+        conn.close()
+
+
+def revoke_profile_trust(profile_id: int, *, db_path=None) -> int:
+    """Revoke trust for a mapping profile — and genuinely stop reuse.
+
+    Flipping the profile's own ``trusted`` flag is not enough: the runtime
+    reuses mappings out of ``ingestion_shape_cache``, so a revoke that only
+    touched the profile would leave the cached mapping being applied on
+    every future upload of that shape while the admin list claimed trust
+    was gone. The backing shapes are untrusted here too. Returns the number
+    of learned shapes affected.
+    """
+    conn = _connect(db_path)
+    try:
+        profile = idb.get_profile_by_id(conn, profile_id)
+        if profile is None:
+            raise IngestionAIError("Mapping profile not found.")
         idb.set_profile_trust(conn, profile_id, False)
+        return idb.untrust_shapes_for_profile(
+            conn, client_id=profile["client_id"], source_type=profile["source_type"]
+        )
     finally:
         conn.close()
 

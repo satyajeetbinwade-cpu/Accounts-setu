@@ -14,6 +14,7 @@ from setu.state.client_state import ClientState
 from setu.state.dashboard_state import DashboardState
 from setu.state.documents_state import DocumentsState
 from setu.state.f5_state import F5State
+from setu.state.f6_state import F6State
 from setu.state.filing_state import FilingState
 from setu.state.ingestion_ai_state import IngestionAiState
 from setu.state.invoice_extract_state import InvoiceExtractState
@@ -21,6 +22,7 @@ from setu.state.module2_state import Module2State
 from setu.state.navigation import NavState
 from setu.state.phase1_state import Phase1State
 from setu.state.reconcile_state import ReconcileState
+from setu.state.report_state import ReportState
 from setu.state.rules_state import RulesState
 from setu.state.security_state import SecurityState
 from setu.state.settings_state import SettingsState
@@ -36,6 +38,7 @@ __all__ = [
     "DashboardState",
     "DocumentsState",
     "F5State",
+    "F6State",
     "FilingState",
     "IngestionAiState",
     "InvoiceExtractState",
@@ -43,6 +46,7 @@ __all__ = [
     "NavState",
     "Phase1State",
     "ReconcileState",
+    "ReportState",
     "RulesState",
     "SecurityState",
     "SettingsState",

@@ -31,6 +31,7 @@ error. Callers surface it; they never quietly degrade to a guess.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import socket
@@ -299,26 +300,16 @@ def set_llm_limits(
 # ---------------------------------------------------------------------------
 
 
-def call_llm(
-    system_prompt: str, user_prompt: str, *, db_path=None, model_override: Optional[str] = None,
-) -> tuple[str, int, str]:
-    """Call the configured model. Returns (raw_text, latency_ms, model_id).
+def _post_chat(payload: dict[str, Any], *, db_path=None) -> tuple[str, int, str]:
+    """Shared transport for every chat-completion call (text or vision).
 
-    Raises LLMError (typed prefix in the message) on any failure. The API
-    key is never logged, stored, or returned.
+    Resolves config, POSTs the payload, and returns
+    ``(raw_text, latency_ms, model_id)``. Raises LLMError (typed prefix)
+    on any failure. The API key is never logged, stored, or returned.
     """
     cfg = resolve_llm_config(db_path=db_path)
-    model_id = model_override or cfg["model"]
-
-    payload = {
-        "model": model_id,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": cfg["max_tokens"],
-        "temperature": cfg["temperature"],
-    }
+    model_id = payload.get("model") or cfg["model"]
+    payload = {**payload, "model": model_id}
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         cfg["base_url"],
@@ -353,6 +344,82 @@ def call_llm(
 
     latency_ms = int((time.monotonic() - start) * 1000)
     return raw, latency_ms, model_id
+
+
+def call_llm(
+    system_prompt: str, user_prompt: str, *, db_path=None, model_override: Optional[str] = None,
+) -> tuple[str, int, str]:
+    """Call the configured model with a plain-text prompt. Returns
+    (raw_text, latency_ms, model_id)."""
+    cfg = resolve_llm_config(db_path=db_path)
+    payload = {
+        "model": model_override or cfg["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": cfg["max_tokens"],
+        "temperature": cfg["temperature"],
+    }
+    return _post_chat(payload, db_path=db_path)
+
+
+def call_llm_vision(
+    system_prompt: str,
+    user_prompt: str,
+    images: list[tuple[str, bytes]],
+    *,
+    db_path=None,
+    model_override: Optional[str] = None,
+) -> tuple[str, int, str]:
+    """Call a VISION-capable model with one or more images attached.
+
+    ``images`` is a list of ``(mime_type, raw_bytes)`` — e.g.
+    ``("image/png", png_bytes)``. Each image is sent as an OpenRouter
+    ``image_url`` content part with a base64 data URI, which is the
+    provider-agnostic shape every vision model on OpenRouter accepts.
+
+    Returns (raw_text, latency_ms, model_id). Raises LLMError on failure.
+    """
+    if not images:
+        raise LLMError("config_error|call_llm_vision requires at least one image.")
+
+    cfg = resolve_llm_config(db_path=db_path)
+    content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
+    for mime, raw in images:
+        b64 = base64.b64encode(raw).decode("ascii")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+        })
+
+    payload = {
+        "model": model_override or cfg["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
+        ],
+        "max_tokens": cfg["max_tokens"],
+        "temperature": cfg["temperature"],
+    }
+    return _post_chat(payload, db_path=db_path)
+
+
+def call_llm_vision_json(
+    system_prompt: str,
+    user_prompt: str,
+    images: list[tuple[str, bytes]],
+    *,
+    db_path=None,
+    model_override: Optional[str] = None,
+) -> tuple[dict[str, Any], int, str, str]:
+    """Vision call + JSON parse. Returns (parsed, latency_ms, model_id, raw)."""
+    raw, latency_ms, model_id = call_llm_vision(
+        system_prompt, user_prompt, images, db_path=db_path, model_override=model_override
+    )
+    content = _extract_message_content(raw)
+    parsed = parse_json_response(content)
+    return parsed, latency_ms, model_id, content
 
 
 def extract_json_object(text: str) -> str:

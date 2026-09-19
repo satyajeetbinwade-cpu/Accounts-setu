@@ -85,7 +85,7 @@ class AiModelsState(AuthState):
     @rx.event
     def load(self):
         if not self.can_manage:
-            return rx.redirect("/")
+            return rx.redirect(self._gate("ingestion_ai.llm.manage") or "/")
         self._load_all()
 
     def _load_all(self) -> None:

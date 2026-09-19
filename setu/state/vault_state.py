@@ -138,8 +138,8 @@ class VaultState(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "vault.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("vault.view")):
+            return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)

@@ -101,8 +101,8 @@ class SettingsState(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
-        if "settings.view" not in self._codes():
-            return rx.redirect("/")
+        if (deny := self._gate("settings.view")):
+            return rx.redirect(deny)
         self._load_all()
 
     def _load_all(self) -> None:

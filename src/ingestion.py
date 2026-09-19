@@ -34,6 +34,13 @@ GST_CANONICAL_FIELDS = [
     "igst",
     "cess",
     "total_tax",
+    # Rounding/round-off residual carried on a source row (e.g. Tally's
+    # "Other Amt." column). Added per F6 §12/§13: taxable + Σtax +
+    # rounding_adjustment = invoice_value, ±₹1. NEVER folded into taxable
+    # value or tax — a real ₹0.2-0.4 residual that would otherwise show up
+    # as an unexplained mismatch. Defaults to 0.0 for sources that don't
+    # carry one (nothing behaves differently for them).
+    "rounding_adjustment",
     "invoice_value",
     "original_row",
 ]
@@ -53,7 +60,7 @@ TDS_CANONICAL_FIELDS = [
     "original_row",
 ]
 
-GST_NUMERIC_FIELDS = ["taxable_value", "cgst", "sgst", "igst", "cess", "invoice_value"]
+GST_NUMERIC_FIELDS = ["taxable_value", "cgst", "sgst", "igst", "cess", "invoice_value", "rounding_adjustment"]
 TDS_NUMERIC_FIELDS = ["amount_paid_credited", "tax_deducted", "tax_deposited"]
 
 GST_UPPER_FIELDS = ["gstin"]

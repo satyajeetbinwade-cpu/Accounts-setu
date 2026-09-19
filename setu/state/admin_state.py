@@ -166,7 +166,7 @@ class AdminState(AuthState):
         itself must refuse — hiding a link is not access control.
         """
         if not self._require_admin():
-            return rx.redirect("/")
+            return rx.redirect(self._gate("auth.users.manage") or "/")
         self._refresh_all()
 
     def _require_admin(self) -> bool:

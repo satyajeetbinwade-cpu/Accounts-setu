@@ -129,6 +129,60 @@ class AuthState(rx.State):
         if had_token and self.user_id == 0:
             self.signed_out_inactivity = True
 
+    @rx.event
+    def require_auth(self):
+        """Gate every protected route.
+
+        Runs before a module's own ``load()`` so a deep link (or a stale
+        session) is sent to the sign-in page — never silently deposited on
+        the dashboard, which was the bug: an unauthenticated visitor to
+        ``/clients`` was redirected to ``/`` (which had no gate) and saw the
+        app shell without ever being asked to sign in.
+        """
+        self._project_user()
+        if not self.is_authenticated:
+            self.signed_out_inactivity = False
+            return rx.redirect("/login")
+
+    def _gate(self, permission: str | None = None) -> str | None:
+        """The route to redirect to when access must be refused, else ``None``.
+
+        Unauthenticated → ``/login`` (so the user is asked to sign in rather
+        than dumped on the dashboard). Signed in but lacking the permission →
+        ``/`` — the F1 contract that hiding a link is not access control, so
+        the route itself refuses.
+        """
+        self._project_user()
+        if not self.is_authenticated:
+            return "/login"
+        if permission and permission not in self._permission_codes():
+            return "/"
+        return None
+
+    # ------------------------------------------------------------------
+    # Dashboard quick access — the key screens, permission-projected so the
+    # landing page always offers a visible route to each important feature.
+    # ------------------------------------------------------------------
+    KEY_SCREENS: list[tuple[str, str, str, str | None]] = [
+        ("Clients", "/clients", "building-2", "clients.profile.view"),
+        ("Reconcile", "/reconcile", "route", None),
+        ("Reconciliation", "/reconciliation", "scale", "module2.view"),
+        ("Action Center", "/action-center", "list-checks", "action_center.view"),
+        ("Documents", "/documents", "folder-open", "documents.view"),
+        ("Smart Ingestion", "/smart-ingestion", "sparkles", "ingestion_ai.upload"),
+        ("Rules", "/rules", "book-open", "rules.view"),
+        ("Settings", "/settings", "settings", "settings.view"),
+    ]
+
+    @rx.var
+    def key_screens(self) -> list[NavScreen]:
+        codes = self._permission_codes()
+        visible: list[NavScreen] = []
+        for label, route, icon, permission in self.KEY_SCREENS:
+            if permission is None or permission in codes:
+                visible.append(NavScreen(label=label, route=route, icon=icon))
+        return visible
+
     # ------------------------------------------------------------------
     # Login / logout
     # ------------------------------------------------------------------
