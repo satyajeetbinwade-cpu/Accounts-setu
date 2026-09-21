@@ -55,7 +55,21 @@ def _hdr(text) -> str:
 
 
 def _parse_date(raw: str) -> date:
-    return datetime.strptime(str(raw).strip(), "%Y-%m-%d").date()
+    """Parse date in various formats: YYYY-MM-DD, DD-MM-YYYY, or DD-MM-YY."""
+    s = str(raw).strip()
+    if not s:
+        raise ValueError("empty date string")
+    
+    # Try multiple formats
+    formats = ["%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y", "%d/%m/%Y", "%d/%m/%y", "%Y/%m/%d"]
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    
+    # If none work, raise an error with helpful info
+    raise ValueError(f"date '{s}' does not match any expected format (tried: {', '.join(formats)})")
 
 
 def _dec(v) -> Decimal:

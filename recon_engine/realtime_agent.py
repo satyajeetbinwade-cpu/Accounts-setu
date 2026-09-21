@@ -162,12 +162,15 @@ def build_report(files: dict[str, Path], client_id: str, period: str,
     if files.get("portal_2b"):
         portal_rows = parse_gstr2b_workbook(files["portal_2b"])
     if files.get("portal_ims"):
-        ims_rows = parse_ims_csv(files["portal_ims"])
-        if portal_rows:
-            progress(f"portal: GSTR-2B workbook {len(portal_rows)} rows, "
-                     f"IMS cross-check {len(ims_rows)} rows")
-        else:
-            portal_rows = ims_rows
+        try:
+            ims_rows = parse_ims_csv(files["portal_ims"])
+            if portal_rows:
+                progress(f"portal: GSTR-2B workbook {len(portal_rows)} rows, "
+                         f"IMS cross-check {len(ims_rows)} rows")
+            else:
+                portal_rows = ims_rows
+        except (ValueError, IndexError) as e:
+            progress(f"warning: IMS CSV skipped ({e})")
     if not portal_rows:
         raise ValueError("no usable portal (GSTR-2B) data found")
 

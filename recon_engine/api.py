@@ -293,7 +293,7 @@ _AGENT_PAGE = """<!DOCTYPE html>
  h1{font-size:1.5rem} .card{background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:1.2rem 1.4rem;margin-bottom:1rem}
  input[type=file]{display:block;margin:.4rem 0;font-size:.9rem}
  button{background:#1f6feb;color:#fff;border:0;border-radius:8px;padding:.55rem 1.2rem;font-size:.95rem;cursor:pointer}
- button:disabled{opacity:.55}
+ button:disabled{opacity:.55;cursor:progress}
  .role{color:#57606a;font-size:.82rem;margin-left:.6rem}
  .pill{display:inline-block;padding:.1rem .5rem;border-radius:999px;background:#e6edf3;color:#57606a;font-size:.75rem}
  #status{white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:.85rem;color:#1a1f24}
@@ -306,67 +306,114 @@ _AGENT_PAGE = """<!DOCTYPE html>
  (GSTR-2B workbook / IMS B2B csv / Tally purchase register / credit-note
  register), normalises the formats, runs the reconciliation engine and serves
  a clickable, downloadable HTML report.</p>
- <form id="f">
-  <div>GSTR-2B (portal workbook&nbsp;<i>.xlsx</i>)<input type="file" name="files" data-role="portal_2b" multiple></div>
-  <div>IMS B2B csv (optional cross-check)<input type="file" name="files" data-role="portal_ims" multiple></div>
-  <div>Tally purchase register<input type="file" name="files" data-role="books_purchase" multiple></div>
-  <div>Tally credit-note register<input type="file" name="files" data-role="books_credit" multiple></div>
+ <form id="uploadForm">
+  <div>GSTR-2B (portal workbook&nbsp;<i>.xlsx</i>)<input type="file" id="portal_2b" data-role="portal_2b" accept=".json,.xlsx,.xlsm" multiple></div>
+  <div>IMS B2B csv (optional cross-check)<input type="file" id="portal_ims" data-role="portal_ims" accept=".csv,.xlsx,.xlsm" multiple></div>
+  <div>Tally purchase register<input type="file" id="books_purchase" data-role="books_purchase" accept=".csv,.xlsx,.xlsm" multiple></div>
+  <div>Tally credit-note register<input type="file" id="books_credit" data-role="books_credit" accept=".csv,.xlsx,.xlsm" multiple></div>
   <div>Client code <input id="cid" value="client" style="width:10rem"></div>
-  <button id="go" onclick="startJob()">Run reconciliation agent</button>
+  <button id="go" type="button">Run reconciliation agent</button>
  </form>
  <div id="roles" class="role"></div>
 </div>
 <div class="card"><div id="status">Waiting for upload…</div></div>
 <script>
+(function(){
  const ROLES={portal_2b:'portal · GSTR-2B workbook',portal_ims:'portal · IMS B2B csv',
               books_purchase:'books · Tally purchase register',books_credit:'books · credit-note register'};
- let filesSel=[];
- function onFileChange(){
-  filesSel=[];const out=[];
-  document.querySelectorAll('input[type=file]').forEach(i=>{
-   for(const f of i.files){filesSel.push(f);out.push(f.name+' → '+ (ROLES[i.dataset.role]||'?'));}
+ 
+ function updateRoles(){
+  const out=[];
+  ['portal_2b','portal_ims','books_purchase','books_credit'].forEach(id=>{
+   const inp=document.getElementById(id);
+   if(inp && inp.files && inp.files.length>0){
+    for(const f of inp.files){
+     out.push(f.name+' → '+ (ROLES[id]||'?'));
+    }
+   }
   });
-  document.getElementById('roles').textContent  ='';
-  document.getElementById('roles').textContent = out.join('\n');
+  document.getElementById('roles').textContent = out.join('\\n');
  }
- document.querySelectorAll('input[type=file]').forEach(i=>i.addEventListener('change',onFileChange));
+ 
+ function getSelectedFiles(){
+  const files=[];
+  ['portal_2b','portal_ims','books_purchase','books_credit'].forEach(id=>{
+   const inp=document.getElementById(id);
+   if(inp && inp.files && inp.files.length>0){
+    for(const f of inp.files){
+     files.push(f);
+    }
+   }
+  });
+  return files;
+ }
+ 
  async function startJob(){
+  const files=getSelectedFiles();
+  if(files.length===0){
+   alert('Please select at least one file');
+   return;
+  }
   const d=new FormData();
-  filesSel.forEach(f=>d.append('files',f));
+  files.forEach(f=>d.append('files',f));
   d.append('client_id',document.getElementById('cid').value||'client');
-  const go=document.getElementById('go');go.disabled=true;
+  const go=document.getElementById('go');
+  go.disabled=true;
   const st=document.getElementById('status');
+  st.textContent='Uploading files...';
   try{
    const r=await fetch('/api/agent/reconcile',{method:'POST',body:d});
-   const j=await r.json();st.textContent='job '+j.job_id+' → '+j.status+'\n';
+   const j=await r.json();
+   if(!r.ok){
+    throw new Error(j.detail||'Upload failed');
+   }
+   st.textContent='Job started: '+j.job_id+'\\nPolling status...\\n';
    poll(j.job_id);
-  }catch(e){st.textContent='ERROR '+e;go.disabled=false;}
+  }catch(e){
+   st.textContent='ERROR: '+e.message;
+   go.disabled=false;
+  }
  }
+ 
  async function poll(id){
   const st=document.getElementById('status');
-  const r=await fetch('/api/agent/jobs/'+id);
-  const j=await r.json();
-  if(j.status==='done'){
-   const rep=j.result.reports;
-   st.textContent='✔ report ready\n';
-   const box=document.getElementById('links');
-   if(!box){const b=document.createElement('div');b.id='links';b.className='card';
-     b.innerHTML='<b>Report</b><br><a href="'+rep.html+'" target="_blank">Open interactive HTML report</a> &nbsp;•&nbsp; '+
-       '<a href="'+rep.html+'?download=1">Download HTML</a><br>'+
-       '<a href="'+rep.markdown+'">Markdown</a> &nbsp;•&nbsp; <a href="'+rep.excel+'">Excel</a> &nbsp;•&nbsp; '+
-       '<a href="'+rep.csv_pre+'">Pre-recon CSVs</a> &nbsp;•&nbsp; <a href="'+rep.csv_post+'">Exceptions CSV</a> &nbsp;•&nbsp; '+
-       '<a href="'+rep.review_queue+'">Review queue JSON</a>'+
-       '<div style="color:#57606a;font-size:.8rem;margin-top:.4rem">F5 gate: '+j.result.f5.pass+
-       ' · verification: '+j.result.verification.pass+' · LLM used: '+j.result.llm_used+'</div>';
-     document.body.appendChild(b);}
+  try{
+   const r=await fetch('/api/agent/jobs/'+id);
+   const j=await r.json();
+   if(j.status==='done'){
+    const rep=j.result.reports;
+    st.textContent='✔ Reconciliation complete!\\n\\nReports:\\n';
+    const b=document.createElement('div');
+    b.className='card';
+    b.style.marginTop='1rem';
+    b.innerHTML='<h3>Download / View Reports</h3><ul style="list-style:none;padding:0"><li><a href="'+rep.html+'" target="_blank">📊 Open interactive HTML dashboard</a></li><li><a href="'+rep.html+'?download=1">⬇️ Download HTML</a></li><li><a href="'+rep.markdown+'">📝 Markdown</a></li><li><a href="'+rep.excel+'">📈 Excel</a></li><li><a href="'+rep.csv_pre+'">📋 Pre-recon CSV</a></li><li><a href="'+rep.csv_post+'">📋 Exceptions CSV</a></li><li><a href="'+rep.review_queue+'">📋 Review queue</a></li></ul><div style="color:#57606a;font-size:.8rem;margin-top:1rem"><b>Quality gates:</b><br>F5 gate: '+(j.result.f5.pass?'✓ PASS':'✗ FAIL')+' | Verification: '+(j.result.verification.pass?'✓ PASS':'✗ FAIL')+' | LLM: '+(j.result.llm_used?'✓ Yes':'○ No')+'</div>';
+    document.body.appendChild(b);
    }else if(j.status==='error'){
-   st.textContent='✖ job failed:\n'+j.error;
+    st.textContent='✖ Reconciliation failed:\\n'+j.error;
+    document.getElementById('go').disabled=false;
    }else{
-   st.textContent=(st.textContent||'')+ (j.progress?(' → '+j.progress+'\n'):'');
-   setTimeout(()=>poll(id),3000);
+    st.textContent='Status: '+j.status+'\\nProgress: '+(j.progress||'...')+'\\n\\n(checking again in 2 seconds)';
+    setTimeout(()=>poll(id),2000);
    }
+  }catch(e){
+   st.textContent='Error polling status: '+e.message;
+   document.getElementById('go').disabled=false;
+  }
  }
- document.addEventListener('DOMContentLoaded',()=>document.querySelectorAll('input[type=file]').forEach(i=>i.addEventListener('change',onFileChange)));
+ 
+ document.addEventListener('DOMContentLoaded',function(){
+  ['portal_2b','portal_ims','books_purchase','books_credit'].forEach(id=>{
+   const inp=document.getElementById(id);
+   if(inp){
+    inp.addEventListener('change',updateRoles);
+   }
+  });
+  const btn=document.getElementById('go');
+  if(btn){
+   btn.addEventListener('click',startJob);
+  }
+ });
+})();
 </script></body></html>"""
 
 

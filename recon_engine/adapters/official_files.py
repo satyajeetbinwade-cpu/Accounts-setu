@@ -182,7 +182,26 @@ def _tally_register_rows(path: str | Path, sheet_name: str):
         raise RuntimeError("openpyxl required for Tally register parsing")
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
-        ws = wb[sheet_name]
+        # Try exact match first
+        ws = None
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            # Try case-insensitive match for common variants
+            for sn in wb.sheetnames:
+                if sn.lower() == sheet_name.lower():
+                    ws = wb[sn]
+                    break
+        
+        if ws is None:
+            # Fallback: if only one sheet exists, use it
+            if len(wb.sheetnames) == 1:
+                ws = wb[wb.sheetnames[0]]
+            else:
+                # Otherwise list available sheets
+                available = ", ".join(wb.sheetnames)
+                raise KeyError(f"Worksheet '{sheet_name}' does not exist. Available sheets: {available}")
+        
         out = []
         for r in range(5, (ws.max_row or 0) + 1):
             v = [ws.cell(row=r, column=c).value for c in range(1, 21)]
