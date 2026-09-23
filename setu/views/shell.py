@@ -1,8 +1,8 @@
 """The app shell: fixed sidebar navigation + content area.
 
-Reproduces the Streamlit app's sidebar (identity block, current context,
-grouped nav) and the three-area information architecture. The content area is
-filled by whichever page is routed.
+Renders the sidebar (identity block, current context, grouped nav) and the
+three-area information architecture. The content area is filled by whichever
+page is routed.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ SIDEBAR_WIDTH = "248px"
 def _nav_link(screen: NavScreen) -> rx.Component:
     """One sidebar link. The active route gets the accent bar + tint —
     never bold text alone (Foundation 2.3)."""
-    active = rx.State.router.page.path == screen.route
+    active = rx.State.router.url.path == screen.route
     return rx.link(
         rx.hstack(
             rx.icon(

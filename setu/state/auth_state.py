@@ -4,7 +4,7 @@ Owns the signed-in user's identity/permission view of the app: which areas and
 screens they may see, the current area, and the sign-in/sign-out actions.
 
 Business logic is NOT written here — every handler calls ``src.auth.service``
-(the F1 public API), exactly as the Streamlit login gate did.
+(the F1 public API).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from setu.routes import AREAS, Screen
 
 # Session token storage key. Stored in a Cookie so a browser refresh keeps the
 # user signed in (Reflex reconnects the client by cookie rather than replaying
-# server-side session_state, unlike Streamlit).
+# server-side session state).
 SESSION_COOKIE = "setu_session"
 
 
@@ -141,7 +141,13 @@ class AuthState(rx.State):
         """
         self._project_user()
         if not self.is_authenticated:
-            self.signed_out_inactivity = False
+            # Preserve the "inactivity" reason that ``check_session`` set when
+            # a prior session expired on this browser (the cookie still holds
+            # the now-invalid token). Only reset it for a genuinely fresh
+            # visit — no prior token — which is a plain sign-in redirect with
+            # no reason banner.
+            if not self.session_token:
+                self.signed_out_inactivity = False
             return rx.redirect("/login")
 
     def _gate(self, permission: str | None = None) -> str | None:
@@ -268,7 +274,7 @@ class AuthState(rx.State):
     @rx.var
     def nav_areas(self) -> list[NavArea]:
         """The areas/screens this user may see, as typed models for the Var
-        system. Mirrors ``_build_nav`` in the Streamlit ``app.py``."""
+        system."""
         codes = self._permission_codes()
         result: list[NavArea] = []
         for area, screens in AREAS.items():

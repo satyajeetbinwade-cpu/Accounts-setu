@@ -1,17 +1,17 @@
-"""Setu Phase 2 — design tokens (color, typography, layout chrome).
+"""Setu — design tokens (color, typography, layout chrome).
 
 This module codifies section 2 of the UI Foundation spec into reusable,
 module-level constants plus a CSS-variable emitter. It is presentation
 infrastructure only: no widget helpers, no component renderers (those are the
-separate "component specs" in section 3 of the spec, built later).
+separate "component specs" in section 3 of the spec).
 
 Roles are keyed by *meaning*, not by hex — so a module's build prompt stays
 correct even if a shade shifts during the later delight/polish phase. Dark
 mode, animation, and brand-identity polish are explicitly out of scope (all
 deferred to the later polish phase); nothing here is final visual identity.
 
-Nothing in this module talks to Streamlit on import — it can be imported
-freely by any module (UI or otherwise) without side effects.
+Nothing in this module talks to any UI framework on import — it can be
+imported freely by any module (UI or otherwise) without side effects.
 """
 
 from __future__ import annotations

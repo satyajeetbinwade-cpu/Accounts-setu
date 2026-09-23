@@ -1,7 +1,7 @@
 """Setu — Reflex app entry point.
 
-The Phase 2 frontend. Boots the same framework-agnostic service layer the
-Streamlit app uses (``src/*/service.py``), then registers every route.
+Boots the framework-agnostic service layer (``src/*/service.py``), then
+registers every route.
 
 Run with: reflex run
 """
@@ -47,9 +47,9 @@ from setu.views import pages
 from setu.views.login import login_page
 
 # --- Service layer bootstrap ------------------------------------------------
-# Mirrors the Streamlit app's startup. Each init_* is idempotent (creates
-# tables / seeds first-run data only), so running both apps against the same
-# db/poc.db is safe. Modules are added here as they're migrated.
+# Each init_* is idempotent (creates tables / seeds first-run data only), so
+# repeated starts against the same db/poc.db are safe. Modules are added here
+# as they're built.
 db.init_db()
 auth.init_auth()
 

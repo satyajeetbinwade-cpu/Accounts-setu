@@ -1,6 +1,6 @@
-"""Setu Phase 2 — design tokens (Reflex form).
+"""Setu — design tokens (Reflex form).
 
-Same locked values as ``src/ui/design_tokens.py`` (the Streamlit app's single
+Reuses the locked values from ``src/shared/design_tokens.py`` (the single
 source of truth). That module is deliberately framework-agnostic, so the
 Reflex app reuses its constants *directly* rather than re-deriving them —
 if a shade shifts during the polish phase it changes in exactly one place.
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from src.ui.design_tokens import (
+from src.shared.design_tokens import (
     COLOR,
     FONT_FAMILY,
     LAYOUT,
@@ -135,8 +135,7 @@ def global_css() -> str:
 
     Emitted once via ``rx.App(head_components=...)``. Prepends the canonical
     ``--setu-*`` custom properties (from the shared token module) so any
-    hand-written CSS — here or in a component — references the same names
-    the Streamlit app already uses.
+    hand-written CSS — here or in a component — references the same names.
     """
     return _tokens_css() + f"""
 <style>
@@ -144,6 +143,13 @@ def global_css() -> str:
   html, body {{ background-color: {Color.PAGE_BACKGROUND.value}; }}
   body {{ font-family: {FONT}; }}
   * {{ -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }}
+
+  /* Indeterminate progress stripe for the AI-working indicator (components.ai_progress).
+     A model call has no meaningful percentage, so the bar scrolls rather than fills. */
+  @keyframes setu-indeterminate {{
+      from {{ transform: translateX(-48px); }}
+      to   {{ transform: translateX(0); }}
+  }}
   ::selection {{ background: {Color.ACCENT.value}22; }}
   ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
   ::-webkit-scrollbar-thumb {{

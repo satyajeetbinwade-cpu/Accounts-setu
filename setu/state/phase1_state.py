@@ -1,8 +1,7 @@
 """Phase-1 tools state — Run / Review / Compare / Config / Export.
 
-Ports the Phase-1 Streamlit tabs onto the shared engine. Every handler calls
-``src.*`` services (runner / queries / export / config_loader / discovery /
-ingestion_ai); no business logic lives here.
+Every handler calls ``src.*`` services (runner / queries / export /
+config_loader / discovery / ingestion_ai); no business logic lives here.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from src.export import export_run
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
 from src.runner import RunExecutionError, execute_run
-from src.ui import discovery
+from src.shared import discovery
 from setu.state.auth_state import AuthState
 
 AT_RISK_CLASSIFICATIONS = ("Amount Difference", "Not in Books", "Not in Portal")

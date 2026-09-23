@@ -14,7 +14,6 @@ Sub-modules:
                   authenticate(), session validation, permission checks,
                   user/role/team CRUD, security-event logging.
 
-Nothing outside src/auth and src/ui/auth_ui.py should touch the auth
-tables directly — go through service.py so permission logic stays in one
-place.
+Nothing outside src/auth should touch the auth tables directly — go through
+service.py so permission logic stays in one place.
 """

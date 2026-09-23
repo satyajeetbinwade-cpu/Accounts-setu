@@ -1,11 +1,8 @@
-"""Setu Phase 2 — Foundation component library (Reflex form).
+"""Setu — Foundation component library (Reflex form).
 
-The shared, framework-agnostic component library built ONCE in Step 0. Every
-module's screens consume these rather than styling anything ad hoc — the same
-discipline the Streamlit build enforced. Each component mirrors the visual
-contract of its ``src/ui/theme.py`` counterpart exactly (same tokens, same
-fill/content rules), so the two frontends stay visually identical while both
-run in parallel.
+The shared component library built ONCE in Step 0. Every module's screens
+consume these rather than styling anything ad hoc. Each component implements
+the locked visual contract (same tokens, same fill/content rules).
 
 Components (per the UI Foundation spec section 3):
   3.1  confidence_badge        — rule-match (solid, no %) vs AI (tinted, %)
@@ -233,8 +230,7 @@ def reason_capture(
     """The reason field that must be filled before a sensitive save commits.
 
     Pair it with a save button whose ``disabled`` prop is driven by
-    ``value == ""`` — the same gate the Streamlit build's service layer
-    enforces structurally.
+    ``value == ""`` — the same gate the service layer enforces structurally.
     """
     return rx.vstack(
         rx.text(label, style=t.TEXT["label"]),
@@ -641,6 +637,55 @@ def file_preview_chip(
         border=f"1px solid {t.Color.BORDER.value}",
         border_radius="10px",
         background=t.Color.SURFACE.value,
+    )
+
+
+def ai_progress(label, *, visible=None) -> rx.Component:
+    """A visible "AI is working" indicator for any long-running model call.
+
+    A live model call takes ~15-25s. Without this the whole screen appears
+    frozen. Renders an indeterminate striped bar (no meaningful percentage
+    exists for a model call) plus a spinner and the caller's label of what
+    is happening. ``label`` is a Var string; empty = nothing shown unless
+    ``visible`` is supplied.
+    """
+    shown = visible if visible is not None else (label != "")
+    return rx.cond(
+        shown,
+        rx.hstack(
+            rx.spinner(size="2", color=t.Color.ACCENT.value),
+            rx.vstack(
+                rx.text(label, font_size="12px", font_weight="600", color=t.Color.TEXT_PRIMARY.value),
+                rx.el.div(
+                    rx.el.div(
+                        style={
+                            "height": "6px",
+                            "border_radius": "999px",
+                            "background": (
+                                "repeating-linear-gradient(90deg, "
+                                + t.Color.ACCENT.value + " 0 24px, "
+                                + t.Color.BORDER.value + " 24px 48px)"
+                            ),
+                            "animation": "setu-indeterminate 1.1s linear infinite",
+                            "width": "100%",
+                        },
+                    ),
+                    style={"width": "100%", "overflow": "hidden", "border_radius": "999px"},
+                ),
+                spacing="2",
+                align="start",
+                flex="1",
+                min_width="0",
+            ),
+            width="100%",
+            align="center",
+            spacing="3",
+            padding="12px 14px",
+            background=t.Color.SURFACE.value,
+            border=f"1px solid {t.Color.BORDER.value}",
+            border_radius="10px",
+        ),
+        rx.fragment(),
     )
 
 

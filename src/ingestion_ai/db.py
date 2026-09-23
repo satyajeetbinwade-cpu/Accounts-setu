@@ -260,6 +260,38 @@ def untrust_shapes_for_profile(
     return cur.rowcount or 0
 
 
+def delete_shape(
+    conn: sqlite3.Connection, *, client_ref: str, source_type: str, header_signature: str,
+) -> int:
+    """Delete a cached shape so the next ingest of this file shape re-maps.
+
+    Used by the "re-run through model" action: the cache is keyed on the
+    header set, so leaving the row in place would replay the old mapping
+    forever. Returns how many rows were deleted.
+    """
+    cur = conn.execute(
+        """
+        DELETE FROM ingestion_shape_cache
+        WHERE client_ref = ? AND source_type = ? AND header_signature = ?
+        """,
+        (client_ref, source_type, header_signature),
+    )
+    conn.commit()
+    return cur.rowcount or 0
+
+
+def delete_ingestion_result(conn: sqlite3.Connection, upload_key: str) -> int:
+    """Delete a persisted ingestion result so the next read re-derives it.
+
+    The runner's `_canonical_frame_for()` reuses a stored result's mapping
+    without re-calling the model, so a re-run must clear this row too —
+    otherwise the fresh mapping would be ignored on the next run.
+    """
+    cur = conn.execute("DELETE FROM ingestion_results WHERE upload_key = ?", (upload_key,))
+    conn.commit()
+    return cur.rowcount or 0
+
+
 # ---------------------------------------------------------------------------
 # ingestion_shape_cache — the unified layer's shape-keyed cache + learned
 # trusted mappings (see schema.py for why the key includes the header set).

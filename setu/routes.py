@@ -1,14 +1,11 @@
 """Route + navigation map.
 
-The Reflex rewrite keeps the Streamlit app's three-area information
-architecture (Reconcile / All tools / Setup) — it was the right call there and
-nothing about moving frameworks changes it. The *routes* are per screen so
-deep links and browser back/forward work naturally (something the Streamlit
-tab model couldn't offer).
+The app uses a three-area information architecture (Reconcile / All tools /
+Setup). The *routes* are per screen so deep links and browser back/forward
+work naturally.
 
 Each entry carries the permission a user needs to see it; the sidebar filters
-on that exactly as ``app.py``'s ``_build_nav`` did, so a user only ever sees
-areas and screens they can actually open.
+on that, so a user only ever sees areas and screens they can actually open.
 """
 
 from __future__ import annotations

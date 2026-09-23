@@ -23,8 +23,9 @@ from src.export import export_run
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
 from src.runner import RunExecutionError, execute_run
-from src.ui import discovery
+from src.shared import discovery
 from setu.state.auth_state import AuthState
+from setu.state.history import HistoryEntry, load_history
 
 STAGES: list[tuple[int, str]] = [
     (1, "Context"),
@@ -83,6 +84,9 @@ class ExceptionRow:
 class RecordField:
     label: str
     value: str
+    key: str = ""
+    side: str = ""
+    overridden: bool = False
 
 
 @dataclass
@@ -125,6 +129,13 @@ class ReconcileState(AuthState):
     blockers: list[str] = []
     upload_error: str = ""
 
+    # stage 2 — re-run through model (per-file, confirm-gated)
+    rerun_source_type: str = ""
+    rerun_filename: str = ""
+    rerun_open: bool = False
+    rerun_busy: bool = False
+    rerun_message: str = ""
+
     # stage 3
     selected_files: list[str] = []
 
@@ -143,6 +154,17 @@ class ReconcileState(AuthState):
     detail_reviewed: bool = False
     detail_books: list[RecordField] = []
     detail_portal: list[RecordField] = []
+
+    # stage 4 — inline field editing
+    edit_side: str = ""
+    edit_field: str = ""
+    edit_value: str = ""
+    edit_reason: str = ""
+    edit_open: bool = False
+    edit_error: str = ""
+
+    # stage 4 — edit history for the open record
+    detail_history: list[HistoryEntry] = []
 
     # stage 5
     export_b64: str = ""
@@ -345,9 +367,15 @@ class ReconcileState(AuthState):
             threshold = ingestion_ai.get_preselect_threshold()
         except Exception:  # noqa: BLE001
             threshold = 0.75
+        # A mapped field with NO confidence is a RULE-sourced mapping (the
+        # deterministic GSTR-2B/IMS parser, or a trusted profile) — not a
+        # low-confidence guess. Only an explicit numeric confidence below the
+        # threshold counts as "needs review".
         low_conf = [
             m for m in mapping
-            if m.get("source_column") and (m.get("confidence") is None or m["confidence"] < threshold)
+            if m.get("source_column")
+            and m.get("confidence") is not None
+            and m["confidence"] < threshold
         ]
         needs_review = len(unmapped) + len(low_conf)
         required_missing = len(stored.get("unmapped_required") or [])
@@ -368,10 +396,14 @@ class ReconcileState(AuthState):
                 "resolved": True,
             }
         if status == "partial" or needs_review:
+            if needs_review:
+                label = f"⚠ {needs_review} field(s) need review"
+            else:
+                label = f"⚠ {rows} rows — partial report"
             return {
                 **empty, "code": "review", "chip_variant": "ai", "rows": rows,
                 "needs_review": needs_review, "caveats": caveats,
-                "chip_label": f"⚠ {needs_review} field(s) need review", "resolved": True,
+                "chip_label": label, "resolved": True,
             }
         return {
             **empty, "code": "ok", "chip_variant": "rule", "rows": rows,
@@ -414,6 +446,55 @@ class ReconcileState(AuthState):
             )
         except Exception as exc:  # noqa: BLE001
             self.error = f"AI ingestion couldn't read {filename}: {exc}"
+
+    # ------------------------------------------------------------------
+    # Re-run through model (per-file, confirm-gated)
+    # ------------------------------------------------------------------
+    @rx.event
+    def open_rerun(self, source_type: str, filename: str):
+        """Open the confirm dialog for a per-file model re-run.
+
+        A re-run is a live model call (~15-25s) and discards the cached
+        mapping, so it is always confirmed first — never a one-click action.
+        """
+        if not filename:
+            return
+        self.rerun_source_type = source_type
+        self.rerun_filename = filename
+        self.rerun_message = ""
+        self.rerun_open = True
+
+    @rx.event
+    def close_rerun(self):
+        self.rerun_open = False
+        self.rerun_busy = False
+
+    @rx.event
+    def confirm_rerun(self):
+        if not (self.rerun_source_type and self.rerun_filename):
+            self.rerun_open = False
+            return
+        self.rerun_busy = True
+        self.error = ""
+        try:
+            out = ingestion_ai.re_run_file(
+                self.ctx_client, self.ctx_period, self.rerun_source_type, self.rerun_filename,
+                actor=self.username,
+                client_id=_client_id_for_folder(self.ctx_client),
+                recon_type=self.ctx_recon_type,
+            )
+            how = "the deterministic layout parser" if not out.get("model_used") else "the model"
+            self.rerun_message = (
+                f"Re-ran {self.rerun_filename} through {how} — "
+                f"{out['row_count_out']} row(s) mapped."
+            )
+            self.flash = self.rerun_message
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"Re-run failed for {self.rerun_filename}: {exc}"
+        finally:
+            self.rerun_busy = False
+            self.rerun_open = False
+            self._load_slots()
 
     @rx.var
     def slot_labels(self) -> list[str]:
@@ -579,8 +660,98 @@ class ReconcileState(AuthState):
         self.detail_difference_type = row["difference_type"] if isinstance(row.get("difference_type"), str) else ""
         self.detail_reason = row.get("match_reason") or ""
         self.detail_reviewed = bool(row.get("reviewed"))
-        self.detail_books = _record_fields(row.get("books_record"))
-        self.detail_portal = _record_fields(row.get("portal_record"))
+        overridden = set(row.get("overridden_fields") or [])
+        self.detail_books = _record_fields(row.get("books_record"), "books", overridden)
+        self.detail_portal = _record_fields(row.get("portal_record"), "portal", overridden)
+        fp = row.get("fingerprint")
+        if fp:
+            try:
+                self.detail_history = load_history("match_result", f"{fp}:books")
+                self.detail_history += load_history("match_result", f"{fp}:portal")
+            except Exception:  # noqa: BLE001
+                self.detail_history = []
+        else:
+            self.detail_history = []
+
+    # ------------------------------------------------------------------
+    # Stage 4 — inline field editing
+    # ------------------------------------------------------------------
+    @rx.event
+    def open_edit(self, side: str, field: str, value: str):
+        self.edit_side = side
+        self.edit_field = field
+        self.edit_value = value
+        self.edit_reason = ""
+        self.edit_error = ""
+        self.edit_open = True
+
+    @rx.event
+    def close_edit(self):
+        self.edit_open = False
+        self.edit_error = ""
+
+    @rx.event
+    def set_edit_value(self, v: str):
+        self.edit_value = v
+
+    @rx.event
+    def set_edit_reason(self, v: str):
+        self.edit_reason = v
+
+    @rx.event
+    def save_edit(self):
+        """Save a reviewer's correction to one field of the matched record.
+
+        The correction is stored against the record's fingerprint (so it
+        survives a re-run) and fed back into Module 2 / the Action Center.
+        A reason is required — a correction to a matched record is a
+        sensitive change and must be explainable.
+        """
+        if not (self.edit_side and self.edit_field):
+            self.edit_open = False
+            return
+        if not self.edit_reason.strip():
+            self.edit_error = "A reason is required before saving a correction."
+            return
+        df = queries.get_results(self.run_id)
+        match = df[df["result_id"] == self.selected_result_id]
+        if match.empty:
+            self.edit_open = False
+            return
+        fingerprint = match.iloc[0].get("fingerprint")
+        if not fingerprint:
+            self.edit_error = "This record has no stable identity, so it can't be corrected."
+            return
+        try:
+            queries.set_field_override(
+                self.ctx_client, self.ctx_period, self.ctx_recon_type, fingerprint,
+                self.edit_side, self.edit_field, self.edit_value,
+                reason=self.edit_reason.strip(), actor=self.username,
+            )
+            self.flash = f"Corrected {self.edit_field} — the change is logged and applied to the exceptions."
+            self.edit_open = False
+            self._load_exception_detail()
+        except Exception as exc:  # noqa: BLE001
+            self.edit_error = f"The correction couldn't be saved: {exc}"
+
+    @rx.event
+    def revert_edit(self, side: str, field: str):
+        """Revert a field to the engine's original value."""
+        df = queries.get_results(self.run_id)
+        match = df[df["result_id"] == self.selected_result_id]
+        if match.empty:
+            return
+        fingerprint = match.iloc[0].get("fingerprint")
+        if not fingerprint:
+            return
+        try:
+            queries.clear_field_override(
+                self.ctx_client, self.ctx_period, self.ctx_recon_type, fingerprint, side, field,
+            )
+            self.flash = f"Reverted {field} to the engine's value."
+            self._load_exception_detail()
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"The revert couldn't be saved: {exc}"
 
     # ==================================================================
     # Stage 5 — Export
@@ -628,14 +799,21 @@ def _list_files(client: str, period: str, source_type: str) -> list[str]:
     return sorted(set(files))
 
 
-def _record_fields(record) -> list[RecordField]:
+def _record_fields(record, side: str = "", overridden: set[str] | None = None) -> list[RecordField]:
     if not isinstance(record, dict):
         return []
+    overridden = overridden or set()
     out: list[RecordField] = []
     for k, v in record.items():
         if str(k).startswith("_") or v in (None, ""):
             continue
-        out.append(RecordField(label=str(k).replace("_", " "), value=str(v)))
+        out.append(RecordField(
+            label=str(k).replace("_", " "),
+            value=str(v),
+            key=str(k),
+            side=side,
+            overridden=f"{side}.{k}" in overridden,
+        ))
     return out
 
 

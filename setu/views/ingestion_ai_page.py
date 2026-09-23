@@ -144,11 +144,75 @@ def _upload_row(u) -> rx.Component:
             ),
             rx.text("Uploaded, pending mapping review", style=t.TEXT["micro"]),
         ),
+        rx.button(
+            rx.icon("refresh-cw", size=14),
+            "Re-run",
+            on_click=IngestionAiState.open_rerun(u.upload_id, u.filename),
+            size="1",
+            variant="soft",
+            background="transparent",
+            color=t.Color.TEXT_SECONDARY.value,
+            border=f"1px solid {t.Color.BORDER.value}",
+            border_radius="8px",
+        ),
         width="100%",
         align="center",
         spacing="3",
         padding="8px 0",
         border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def _rerun_dialog() -> rx.Component:
+    """Per-file confirm dialog for a model re-run. A re-run is a live model
+    call (~15-25s) and discards the cached mapping, so it is never one-click."""
+    return rx.dialog.root(
+        rx.dialog.content(
+            rx.vstack(
+                rx.text("Re-run this file through the model?", style=t.TEXT["card_title"]),
+                rx.text(IngestionAiState.rerun_target_name, style=t.TEXT["body"], font_weight="600"),
+                rx.text(
+                    "This discards the cached mapping for this file and asks the model to map "
+                    "its columns again. It takes roughly 15–25 seconds and may produce a "
+                    "different mapping than the one you have now.",
+                    style=t.TEXT["micro"],
+                ),
+                c.ai_progress(
+                    rx.cond(
+                        IngestionAiState.busy_label != "",
+                        IngestionAiState.busy_label,
+                        "Asking the model to map this file…",
+                    ),
+                    visible=IngestionAiState.rerun_busy,
+                ),
+                rx.hstack(
+                    rx.button(
+                        "Re-run through model",
+                        on_click=IngestionAiState.confirm_rerun,
+                        background=t.Color.ACCENT.value,
+                        color="#FFFFFF",
+                        disabled=IngestionAiState.rerun_busy,
+                    ),
+                    rx.button(
+                        "Cancel",
+                        on_click=IngestionAiState.close_rerun,
+                        variant="soft",
+                        background="transparent",
+                        color=t.Color.TEXT_SECONDARY.value,
+                        border=f"1px solid {t.Color.BORDER.value}",
+                        border_radius="9px",
+                        disabled=IngestionAiState.rerun_busy,
+                    ),
+                    spacing="2",
+                ),
+                spacing="3",
+                align="start",
+                width="100%",
+            ),
+            max_width="520px",
+        ),
+        open=IngestionAiState.rerun_open,
+        on_open_change=IngestionAiState.close_rerun,
     )
 
 
@@ -449,6 +513,7 @@ def _upload_and_list() -> rx.Component:
                             rx.text("Rows", style=t.TEXT["label"], flex="2"),
                             rx.text("Status", style=t.TEXT["label"], flex="3"),
                             rx.box(width="60px"),
+                            rx.box(width="70px"),
                             width="100%",
                             padding="0 0 6px 0",
                             border_bottom=f"1px solid {t.Color.BORDER.value}",
@@ -466,6 +531,7 @@ def _upload_and_list() -> rx.Component:
             width="100%",
         ),
         _bulk_confirm_dialog(),
+        _rerun_dialog(),
         spacing="4",
         width="100%",
         align="start",
@@ -489,68 +555,145 @@ def _confidence_cell(row) -> rx.Component:
     )
 
 
+def _confidence_cell(row) -> rx.Component:
+    return rx.match(
+        row.status,
+        # rule-sourced (deterministic parser / trusted profile): solid badge,
+        # no percentage — structurally distinct from the AI tinted form.
+        ("rule", c.confidence_badge("rule", label="Rule-based")),
+        ("auto", c.confidence_badge("ai", pct=row.confidence)),
+        ("flagged", c.confidence_badge("ai", pct=row.confidence, label=f"AI — {row.confidence}% (review)")),
+        ("unavailable", c.pill("Needs input", variant="danger")),
+        ("unavailable_review", c.pill("Below threshold", variant="danger")),
+        ("unmapped", c.pill("Not mapped", variant="placeholder")),
+        c.pill("Needs input", variant="placeholder"),
+    )
+
+
 def _column_row(row) -> rx.Component:
     """One row of the mapping table: source column → canonical field →
-    confidence, with the canonical field EDITABLE via a dropdown of valid
-    canonical fields."""
-    return rx.hstack(
-        rx.vstack(
+    confidence. The canonical field is shown as READ-ONLY text with an
+    explicit Edit button — one row edits at a time (an always-open dropdown
+    per row is what made the old table overflow and feel unusable)."""
+    is_editing = IngestionAiState.editing_column == row.raw_column
+    return rx.vstack(
+        # --- read-only summary row (always) ---
+        rx.hstack(
+            rx.vstack(
+                rx.cond(
+                    row.is_unmapped_field,
+                    rx.text("(no source column)", style=t.TEXT["micro"], font_style="italic"),
+                    rx.text(row.raw_column, font_size="13px", font_weight="600"),
+                ),
+                spacing="0",
+                align="start",
+                flex="4",
+                min_width="0",
+            ),
+            rx.box(
+                rx.hstack(
+                    rx.text(row.mapped_field, font_size="13px", font_weight="600"),
+                    rx.cond(
+                        row.required,
+                        c.pill("required", variant="danger"),
+                        c.pill("optional", variant="placeholder"),
+                    ),
+                    spacing="2",
+                    align="center",
+                ),
+                flex="3",
+                min_width="0",
+            ),
+            rx.box(_confidence_cell(row), flex="2", min_width="0"),
             rx.cond(
                 row.is_unmapped_field,
-                rx.text("(no source column)", style=t.TEXT["micro"], font_style="italic"),
-                rx.text(row.raw_column, font_size="13px", font_weight="600"),
+                rx.box(width="70px"),
+                rx.button(
+                    rx.icon("pencil", size=13),
+                    "Edit",
+                    on_click=IngestionAiState.start_edit_column(row.raw_column),
+                    size="1",
+                    variant="soft",
+                    background="transparent",
+                    color=t.Color.TEXT_PRIMARY.value,
+                    border=f"1px solid {t.Color.BORDER.value}",
+                    border_radius="8px",
+                    flex_shrink="0",
+                ),
             ),
-            rx.cond(
-                row.reason != "",
-                rx.text(row.reason, style=t.TEXT["micro"]),
-                rx.fragment(),
-            ),
-            spacing="0",
-            align="start",
-            flex="3",
-            min_width="0",
+            width="100%",
+            align="center",
+            spacing="3",
         ),
+        # --- reason (below, full width, never squeezed) ---
         rx.cond(
-            row.is_unmapped_field,
-            rx.text(row.mapped_field, style=t.TEXT["body"], font_weight="600", flex="3"),
-            rx.select(
-                IngestionAiState.canonical_field_select_options,
-                value=rx.cond(row.mapped_field != "", row.mapped_field, _LEAVE_UNMAPPED),
-                on_change=lambda v: IngestionAiState.set_column_mapping(row.raw_column, v),
+            row.reason != "",
+            rx.text(row.reason, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
+            rx.fragment(),
+        ),
+        # --- inline editor (only for the row being edited) ---
+        rx.cond(
+            is_editing,
+            rx.hstack(
+                rx.select(
+                    IngestionAiState.canonical_field_select_options,
+                    value=IngestionAiState.edit_draft_field,
+                    on_change=IngestionAiState.set_edit_draft_field,
+                    width="280px",
+                ),
+                rx.button(
+                    "Save",
+                    on_click=IngestionAiState.save_edit_column,
+                    size="1",
+                    background=t.Color.ACCENT.value,
+                    color="#FFFFFF",
+                ),
+                rx.button(
+                    "Cancel",
+                    on_click=IngestionAiState.cancel_edit_column,
+                    size="1",
+                    variant="soft",
+                    background="transparent",
+                    color=t.Color.TEXT_SECONDARY.value,
+                    border=f"1px solid {t.Color.BORDER.value}",
+                    border_radius="8px",
+                ),
+                spacing="2",
+                align="center",
                 width="100%",
-                flex="3",
+                padding_top="6px",
             ),
+            rx.fragment(),
         ),
-        rx.box(_confidence_cell(row), flex="2"),
-        rx.cond(
-            row.required,
-            rx.text("required", style=t.TEXT["micro"], color=t.Color.DANGER.value, flex="1"),
-            rx.text("optional", style=t.TEXT["micro"], flex="1"),
-        ),
+        spacing="1",
+        align="start",
         width="100%",
-        align="center",
-        spacing="3",
-        padding="8px 0",
+        padding="10px 0",
         border_bottom=f"1px solid {t.Color.BORDER.value}",
     )
 
 
 def _raw_preview() -> rx.Component:
     """First several rows of the ACTUAL sheet, so the mapping can be
-    sanity-checked against real values rather than headers alone."""
+    sanity-checked against real values rather than headers alone. Sits in
+    the left pane of the two-pane review layout."""
     return c.card(
         rx.vstack(
-            rx.text("Raw file — first rows", style=t.TEXT["card_title"]),
+            rx.hstack(
+                rx.text("Source file", style=t.TEXT["card_title"]),
+                rx.spacer(),
+                rx.cond(
+                    IngestionAiState.review_c5_used,
+                    c.accent_pill("C5 context"),
+                    rx.fragment(),
+                ),
+                width="100%",
+                align="center",
+            ),
             rx.text(
                 f"{IngestionAiState.review_filename} · {IngestionAiState.review_source_label}",
                 style=t.TEXT["micro"],
             ),
-            rx.cond(
-                IngestionAiState.header_row_note != "",
-                rx.text(IngestionAiState.header_row_note, style=t.TEXT["micro"]),
-                rx.fragment(),
-            ),
-            rx.text(IngestionAiState.row_count_note, style=t.TEXT["micro"]),
             rx.cond(
                 IngestionAiState.preview_rows.length() > 0,
                 rx.el.div(
@@ -568,6 +711,9 @@ def _raw_preview() -> rx.Component:
                                             "border_bottom": f"1px solid {t.Color.BORDER.value}",
                                             "color": t.Color.TEXT_SECONDARY.value,
                                             "white_space": "nowrap",
+                                            "position": "sticky",
+                                            "top": "0",
+                                            "background": t.Color.SURFACE.value,
                                         },
                                     ),
                                 ),
@@ -585,6 +731,9 @@ def _raw_preview() -> rx.Component:
                                                 "font_size": "12px",
                                                 "padding": "4px 8px",
                                                 "white_space": "nowrap",
+                                                "max_width": "180px",
+                                                "overflow": "hidden",
+                                                "text_overflow": "ellipsis",
                                                 "color": t.Color.TEXT_PRIMARY.value,
                                             },
                                         ),
@@ -596,7 +745,7 @@ def _raw_preview() -> rx.Component:
                     ),
                     width="100%",
                     overflow="auto",
-                    max_height="320px",
+                    max_height="300px",
                 ),
                 rx.text(
                     rx.cond(
@@ -606,11 +755,6 @@ def _raw_preview() -> rx.Component:
                     ),
                     style=t.TEXT["micro"],
                 ),
-            ),
-            rx.cond(
-                IngestionAiState.review_c5_used,
-                c.accent_pill("C5 instruction context applied"),
-                rx.fragment(),
             ),
             rx.vstack(
                 rx.foreach(IngestionAiState.notes, lambda n: rx.text(f"ℹ {n}", style=t.TEXT["micro"])),
@@ -649,10 +793,10 @@ def _mapping_table() -> rx.Component:
                 IngestionAiState.columns.length() > 0,
                 rx.vstack(
                     rx.hstack(
-                        rx.text("Source column", style=t.TEXT["label"], flex="3"),
+                        rx.text("Source column", style=t.TEXT["label"], flex="4"),
                         rx.text("Canonical field", style=t.TEXT["label"], flex="3"),
                         rx.text("Confidence", style=t.TEXT["label"], flex="2"),
-                        rx.text("", style=t.TEXT["label"], flex="1"),
+                        rx.box(width="70px"),
                         width="100%",
                         padding="0 0 6px 0",
                         border_bottom=f"1px solid {t.Color.BORDER.value}",
@@ -668,6 +812,147 @@ def _mapping_table() -> rx.Component:
             width="100%",
         ),
         width="100%",
+    )
+
+
+def _checklist_row(f) -> rx.Component:
+    """One row of the mapped-fields checklist: tick/cross + field name +
+    required/optional tag + the source column it came from."""
+    return rx.hstack(
+        rx.cond(
+            f.needs_attention,
+            rx.icon("circle_alert", size=15, color=t.Color.DANGER.value),
+            rx.icon("circle_check", size=15, color=t.Color.RULE.value),
+        ),
+        rx.text(f.canonical_field, font_size="13px", font_weight="600", min_width="150px"),
+        rx.cond(
+            f.required,
+            c.pill("required", variant="danger"),
+            c.pill("optional", variant="placeholder"),
+        ),
+        rx.text(
+            rx.cond(f.raw_column != "", f.raw_column, "— not mapped —"),
+            style=t.TEXT["micro"],
+            color=rx.cond(
+                f.raw_column != "", t.Color.TEXT_SECONDARY.value, t.Color.DANGER.value
+            ),
+            flex="1",
+            min_width="0",
+        ),
+        # Where the mapping came from: rule (deterministic parser / trusted
+        # profile) vs AI — never color alone, always a text label. A field
+        # with no source column (residual, legitimately absent) gets none.
+        rx.cond(
+            (~f.needs_attention) & (f.raw_column != ""),
+            rx.cond(
+                f.status == "rule",
+                c.pill("Rule", variant="rule"),
+                c.pill("AI", variant="ai"),
+            ),
+            rx.fragment(),
+        ),
+        spacing="2",
+        align="center",
+        width="100%",
+        padding="6px 0",
+        border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def _mapping_checklist() -> rx.Component:
+    """The mapped-fields checklist: one row per canonical field, in schema
+    order, with its mapping status. This is the "is everything covered?"
+    view — the column table is the per-column view."""
+    return c.card(
+        rx.vstack(
+            rx.hstack(
+                rx.text("Mapping checklist", style=t.TEXT["card_title"]),
+                rx.spacer(),
+                rx.text(
+                    f"{IngestionAiState.mapped_checklist_done} of "
+                    f"{IngestionAiState.mapped_checklist.length()} mapped",
+                    style=t.TEXT["label"],
+                    color=t.Color.TEXT_SECONDARY.value,
+                ),
+                width="100%",
+                align="center",
+            ),
+            rx.text(
+                "Every canonical field this reconciliation needs, and where it comes from. "
+                "Anything still unmapped is a gap the report will carry as a caveat.",
+                style=t.TEXT["micro"],
+            ),
+            rx.vstack(
+                rx.foreach(IngestionAiState.mapped_checklist, _checklist_row),
+                spacing="0",
+                width="100%",
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _sample_value_chip(sv) -> rx.Component:
+    """One mapped value: field label + the REAL first value from the file.
+    Amounts get a monospace tabular treatment so figures line up."""
+    return rx.vstack(
+        rx.text(sv.label, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
+        rx.text(
+            rx.cond(sv.value != "", sv.value, "— blank —"),
+            font_size="13px",
+            font_weight="600",
+            font_family=rx.cond(sv.is_amount, "ui-monospace, SFMono-Regular, Menlo, monospace", "inherit"),
+            color=rx.cond(sv.value != "", t.Color.TEXT_PRIMARY.value, t.Color.TEXT_MUTED.value),
+            no_of_lines=1,
+        ),
+        spacing="0",
+        align="start",
+        min_width="150px",
+        flex="1",
+    )
+
+
+def _sample_values() -> rx.Component:
+    """The mapped VALUES card: what the file actually contains, per field —
+    a GSTIN, an invoice number, rupee amounts — so the reviewer can sanity
+    check the numbers (not just the column mapping) before confirming."""
+    return rx.cond(
+        IngestionAiState.sample_values.length() > 0,
+        c.card(
+            rx.vstack(
+                rx.hstack(
+                    rx.text("Mapped values — what we read from the file", style=t.TEXT["card_title"]),
+                    rx.spacer(),
+                    rx.text(
+                        "First value found per field",
+                        style=t.TEXT["micro"],
+                        color=t.Color.TEXT_MUTED.value,
+                    ),
+                    width="100%",
+                    align="center",
+                ),
+                rx.text(
+                    "A real value from the file for each mapped field. Check the GSTIN and the "
+                    "amounts read correctly — if a number looks wrong, the column is mapped wrong.",
+                    style=t.TEXT["micro"],
+                ),
+                rx.flex(
+                    rx.foreach(IngestionAiState.sample_values, _sample_value_chip),
+                    wrap="wrap",
+                    spacing="4",
+                    width="100%",
+                    row_gap="12px",
+                ),
+                spacing="3",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        rx.fragment(),
     )
 
 
@@ -748,7 +1033,26 @@ def _confirm_dialog() -> rx.Component:
 
 def _mapping_review() -> rx.Component:
     return rx.vstack(
-        _back_button("← Back to uploads", IngestionAiState.back_to_uploads),
+        rx.hstack(
+            _back_button("← Back to uploads", IngestionAiState.back_to_uploads),
+            rx.spacer(),
+            rx.button(
+                rx.icon("refresh-cw", size=14),
+                "Re-run through model",
+                on_click=IngestionAiState.open_rerun(
+                    IngestionAiState.selected_upload_id, IngestionAiState.review_filename
+                ),
+                variant="soft",
+                background="transparent",
+                color=t.Color.TEXT_SECONDARY.value,
+                border=f"1px solid {t.Color.BORDER.value}",
+                border_radius="9px",
+                size="2",
+            ),
+            width="100%",
+            justify="between",
+            align="center",
+        ),
         rx.cond(
             IngestionAiState.classification_error != "",
             c.inline_reason(IngestionAiState.classification_error),
@@ -764,13 +1068,65 @@ def _mapping_review() -> rx.Component:
             c.inline_reason(IngestionAiState.blocked_banner),
             rx.fragment(),
         ),
-        rx.cond(
-            IngestionAiState.review_status == STATUS_CONFIRMED,
-            c.confidence_badge("rule", label="Confirmed"),
-            rx.fragment(),
+        # Visible "AI is working" indicator — a model call takes ~15-25s and
+        # would otherwise look like a frozen screen.
+        c.ai_progress(
+            rx.cond(IngestionAiState.busy_label != "", IngestionAiState.busy_label, "Working…"),
+            visible=IngestionAiState.busy_label != "",
         ),
+        # --- header card: what this file is + its status ---
+        c.card(
+            rx.vstack(
+                rx.hstack(
+                    rx.vstack(
+                        rx.text(IngestionAiState.review_filename, style=t.TEXT["card_title"]),
+                        rx.text(
+                            f"{IngestionAiState.review_source_label}"
+                            + rx.cond(
+                                IngestionAiState.review_period != "",
+                                " · " + IngestionAiState.review_period,
+                                "",
+                            ),
+                            style=t.TEXT["micro"],
+                        ),
+                        spacing="1",
+                        align="start",
+                    ),
+                    rx.spacer(),
+                    rx.cond(
+                        IngestionAiState.review_status == STATUS_CONFIRMED,
+                        c.confidence_badge("rule", label="Confirmed"),
+                        rx.cond(
+                            IngestionAiState.review_status == STATUS_BLOCKED,
+                            c.pill("Blocked", variant="danger"),
+                            c.pill("Needs review", variant="ai"),
+                        ),
+                    ),
+                    width="100%",
+                    align="center",
+                ),
+                rx.cond(
+                    IngestionAiState.row_count_note != "",
+                    rx.text(IngestionAiState.row_count_note, style=t.TEXT["micro"]),
+                    rx.fragment(),
+                ),
+                rx.cond(
+                    IngestionAiState.header_row_note != "",
+                    rx.text(IngestionAiState.header_row_note, style=t.TEXT["micro"]),
+                    rx.fragment(),
+                ),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        # --- source file preview (full width; the mapping table needs the
+        # whole 1200px shell width — a side-by-side split collapses it) ---
         _raw_preview(),
+        _sample_values(),
         _mapping_table(),
+        _mapping_checklist(),
         rx.cond(
             IngestionAiState.can_review,
             c.card(
@@ -807,6 +1163,7 @@ def _mapping_review() -> rx.Component:
             rx.fragment(),
         ),
         _confirm_dialog(),
+        _rerun_dialog(),
         spacing="4",
         width="100%",
         align="start",

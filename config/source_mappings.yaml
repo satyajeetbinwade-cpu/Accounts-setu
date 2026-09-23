@@ -45,17 +45,40 @@ tally:
 
 gstr2b:
   # GSTR-2B portal export (GST recon, portal side).
+  #
+  # Real GSTN GSTR-2B workbooks use a TWO-ROW MERGED header: a parent row
+  # ("Invoice Details", "Tax Amount") above a child row ("Invoice number",
+  # "Integrated Tax(₹)", ...). The ingestion layer flattens that to
+  # "parent :: child" labels (see normalizer.detect_header_pair), so the
+  # aliases below are keyed on the FLATTENED form. The flat child-only
+  # aliases are kept too, for the single-header CSV exports of the same data.
   columns:
     "GSTIN of Supplier": gstin
+    "gstin of supplier": gstin
     "Trade/Legal Name": party_name
+    "trade/legal name": party_name
     "Invoice Number": invoice_number
+    "invoice details :: invoice number": invoice_number
     "Invoice Date": invoice_date
+    "invoice details :: invoice date": invoice_date
     "Taxable Value": taxable_value
+    "taxable value (₹)": taxable_value
     "Integrated Tax": igst
+    "tax amount :: integrated tax(₹)": igst
     "Central Tax": cgst
+    "tax amount :: central tax(₹)": cgst
     "State/UT Tax": sgst
+    "tax amount :: state/ut tax(₹)": sgst
     "Cess": cess
+    "tax amount :: cess(₹)": cess
     "Invoice Value": invoice_value
+    "invoice details :: invoice value(₹)": invoice_value
+    "ITC Availability": itc_eligibility
+    "itc availability": itc_eligibility
+    "Supply Attract Reverse Charge": reverse_charge
+    "supply attract reverse charge": reverse_charge
+    "GSTR-1/IFF/GSTR-5 Period": gstr1_period
+    "gstr-1/iff/gstr-5 period": gstr1_period
   date_columns:
     invoice_date: "%Y-%m-%d"
 
@@ -63,18 +86,36 @@ ims:
   # Invoice Management System export (alternate GST portal source).
   # IMS exports observed in practice use the same column layout as GSTR-2B
   # (plus IMS-specific action columns, which aren't part of the canonical
-  # schema and are ignored here).
+  # schema and are ignored here). Same two-row merged header as GSTR-2B, so
+  # the flattened parent::child aliases apply here too.
   columns:
     "GSTIN of Supplier": gstin
+    "gstin of supplier": gstin
     "Trade/Legal Name": party_name
+    "trade/legal name": party_name
     "Invoice Number": invoice_number
+    "invoice details :: invoice number": invoice_number
+    "Credit Note number": invoice_number
+    "credit note number": invoice_number
     "Invoice Date": invoice_date
+    "invoice details :: invoice date": invoice_date
+    "Credit Note Date": invoice_date
+    "credit note date": invoice_date
     "Taxable Value": taxable_value
+    "taxable value": taxable_value
     "Integrated Tax": igst
+    "integrated tax": igst
     "Central Tax": cgst
+    "central tax": cgst
     "State/UT Tax": sgst
+    "state/ut tax": sgst
     "Cess": cess
+    "cess": cess
     "Invoice Value": invoice_value
+    "Credit Note Value": invoice_value
+    "credit note value": invoice_value
+    "Status": ims_action_state
+    "status": ims_action_state
   date_columns:
     invoice_date: "%Y-%m-%d"
 

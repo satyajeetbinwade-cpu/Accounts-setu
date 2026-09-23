@@ -13,7 +13,7 @@ from setu.routes import AREAS
 
 class NavState(rx.State):
     # The currently expanded sidebar area. "Reconcile" is the default landing
-    # area, matching the Streamlit app's nav reorg.
+    # area.
     active_area: str = "Reconcile"
 
     @rx.event
@@ -25,21 +25,17 @@ class NavState(rx.State):
         self.active_area = area if self.active_area != area else ""
 
     @rx.var
-    def current_area(self) -> str:
-        """The area that owns the current route, so the sidebar can expand it
-        automatically — a screen is never hidden behind a collapsed area."""
-        path = self.router.page.path
-        for area, screens in AREAS.items():
-            for screen in screens:
-                if screen.route == path:
-                    return area
-        return ""
-
-    @rx.var
     def expanded_area(self) -> str:
-        """The area to render open: the user's explicit choice, unless the
-        current route lives in a different area (then that one wins)."""
-        current = self.current_area
-        if current and current != self.active_area:
-            return current
+        """The area to render open — the user's explicit choice via the
+        header click. This is a plain accordion: clicking a header opens that
+        area (and, via ``toggle_area``, closes it on a second click).
+
+        We intentionally do NOT auto-override this with the current route's
+        area. Doing so made it impossible to open a *different* area than the
+        one the current screen lives in (e.g. from the dashboard you could
+        never expand "Setup" to reach Config, because the dashboard's
+        "Reconcile" area kept winning). A screen is still always reachable —
+        its page renders regardless of area state, and the user opens its
+        parent area with one click.
+        """
         return self.active_area

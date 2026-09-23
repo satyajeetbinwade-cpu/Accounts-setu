@@ -75,6 +75,193 @@ def get_review_state(
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Field-level overrides on a matched record (reviewer corrections).
+# ---------------------------------------------------------------------------
+
+
+def set_field_override(
+    client: str,
+    period: str,
+    recon_type: str,
+    fingerprint: str,
+    side: str,
+    field: str,
+    value: Optional[str],
+    *,
+    reason: Optional[str] = None,
+    actor: str = "system",
+    db_path=None,
+) -> None:
+    """Record a reviewer's correction to one field of a matched record.
+
+    Writes the override (carried forward by fingerprint, like review state)
+    AND an F4 edit-history entry, so the correction is auditable. `side` is
+    'books' or 'portal'.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = db.get_connection(db_path)
+    try:
+        db.set_field_override(
+            conn, client, period, recon_type, fingerprint, side, field, value,
+            reason=reason, changed_by=actor, changed_at=now,
+        )
+    finally:
+        conn.close()
+
+    # F4 audit — best-effort, never blocks the correction.
+    try:
+        from src.f4 import service as f4
+
+        f4.record_edit(
+            record_type="match_result",
+            record_id=f"{fingerprint}:{side}",
+            field=field,
+            old_value=None,
+            new_value=value,
+            reason=reason,
+            actor=actor,
+            db_path=db_path,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Feed the correction back into Module 2 / Action Center: regenerate the
+    # exceptions for every run containing this fingerprint so the flagged
+    # items reflect the corrected value. Best-effort — a correction must
+    # never fail because a downstream module is unavailable.
+    try:
+        from src.module2 import service as m2
+
+        for run_id in run_ids_for_fingerprint(client, period, recon_type, fingerprint, db_path=db_path):
+            m2.generate_exceptions_for_run(run_id, client_id=_client_id_for_run(run_id, db_path=db_path), actor=actor, db_path=db_path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _client_id_for_run(run_id: int, *, db_path=None) -> int:
+    """Resolve the F2 client_id for a run via its client folder name."""
+    conn = db.get_connection(db_path)
+    try:
+        row = conn.execute("SELECT client FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return 0
+    folder = row[0]
+
+    def norm(name: str) -> str:
+        return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+    try:
+        from src.clients import service as clients
+
+        target = norm(folder)
+        for c in clients.list_clients(include_inactive=True):
+            if norm(c["legal_name"]) == target:
+                return int(c["client_id"])
+        for c in clients.list_clients(include_inactive=True):
+            n = norm(c["legal_name"])
+            if target and (n.startswith(target) or target.startswith(n)):
+                return int(c["client_id"])
+    except Exception:  # noqa: BLE001
+        pass
+    return 0
+
+
+def clear_field_override(
+    client: str, period: str, recon_type: str, fingerprint: str, side: str, field: str,
+    *, db_path=None,
+) -> None:
+    conn = db.get_connection(db_path)
+    try:
+        db.clear_field_override(conn, client, period, recon_type, fingerprint, side, field)
+    finally:
+        conn.close()
+
+
+def get_field_overrides(
+    client: str, period: str, recon_type: str, *, db_path=None
+) -> dict[str, dict[str, dict[str, Any]]]:
+    conn = db.get_connection(db_path)
+    try:
+        return db.get_field_overrides(conn, client, period, recon_type)
+    finally:
+        conn.close()
+
+
+def _apply_field_overrides(
+    records: list[dict[str, Any]], overrides: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    """Apply stored field overrides onto the books/portal record dicts in
+    place, and record which fields were overridden so the UI can mark them."""
+    for d in records:
+        fp = d.get("fingerprint")
+        by_side = overrides.get(fp)
+        if not by_side:
+            continue
+        overridden: list[str] = []
+        for side, field_map in by_side.items():
+            record = d.get(f"{side}_record")
+            if not isinstance(record, dict):
+                continue
+            for field, meta in field_map.items():
+                record[field] = meta.get("value")
+                overridden.append(f"{side}.{field}")
+        d["overridden_fields"] = overridden
+
+
+def apply_record_overrides(
+    client: str, period: str, recon_type: str, fingerprint: Optional[str],
+    books: Optional[dict[str, Any]], portal: Optional[dict[str, Any]], *, db_path=None,
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Apply a fingerprint's stored field overrides to a books/portal record
+    pair, returning the corrected copies.
+
+    Module 2 reads match_results directly (not through get_results()), so it
+    calls this to see the reviewer's corrections — that is how an edit in the
+    Review screen reaches the reconciliation exceptions and the Action Center.
+    """
+    if not fingerprint:
+        return books, portal
+    overrides = get_field_overrides(client, period, recon_type, db_path=db_path)
+    by_side = overrides.get(fingerprint)
+    if not by_side:
+        return books, portal
+    out_books = dict(books) if isinstance(books, dict) else books
+    out_portal = dict(portal) if isinstance(portal, dict) else portal
+    for side, field_map in by_side.items():
+        target = out_books if side == "books" else out_portal
+        if not isinstance(target, dict):
+            continue
+        for field, meta in field_map.items():
+            target[field] = meta.get("value")
+    return out_books, out_portal
+
+
+def run_ids_for_fingerprint(
+    client: str, period: str, recon_type: str, fingerprint: str, *, db_path=None,
+) -> list[int]:
+    """Every run that contains this fingerprint — used to regenerate the
+    downstream exceptions after a reviewer corrects a record."""
+    conn = db.get_connection(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT mr.run_id
+            FROM match_results mr
+            JOIN runs r ON r.run_id = mr.run_id
+            WHERE mr.fingerprint = ? AND r.client = ? AND r.period = ? AND r.recon_type = ?
+            """,
+            (fingerprint, client, period, recon_type),
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+    finally:
+        conn.close()
+
+
 def get_run(run_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
     """Return the run row as a dict, or None if not found."""
     conn = db.get_connection(db_path)
@@ -187,6 +374,7 @@ def get_results(
         client, period, recon_type = run_row
 
         review_map = db.get_review_state(conn, client, period, recon_type)
+        override_map = db.get_field_overrides(conn, client, period, recon_type)
     finally:
         conn.close()
 
@@ -219,9 +407,16 @@ def get_results(
         d["review_stale"] = is_stale
         d["reviewer_note"] = review_note
         d["reviewed_at"] = reviewed_at
+        d["overridden_fields"] = []
         records.append(d)
 
-    df = pd.DataFrame.from_records(records, columns=_RESULT_COLUMNS + ["review_stale", "reviewed_at"])
+    # Reviewer corrections are applied on top of the engine's records, so the
+    # UI (and any downstream reader) sees the corrected values.
+    _apply_field_overrides(records, override_map)
+
+    df = pd.DataFrame.from_records(
+        records, columns=_RESULT_COLUMNS + ["review_stale", "reviewed_at", "overridden_fields"]
+    )
 
     if reviewed is not None:
         df = df[df["reviewed"] == reviewed]

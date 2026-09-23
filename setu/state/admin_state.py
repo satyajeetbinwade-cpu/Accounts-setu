@@ -250,7 +250,7 @@ class AdminState(AuthState):
             ]
 
     def _load_teams(self) -> None:
-        from src.ui import discovery
+        from src.shared import discovery
 
         try:
             self.team_clients = discovery.list_clients()

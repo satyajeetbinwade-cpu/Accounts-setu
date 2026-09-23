@@ -247,9 +247,14 @@ def _field_results_from_ingestion(result, thresholds: dict[str, int]) -> list[di
         conf_pct = None if m.confidence is None else int(round(m.confidence * 100))
         if not m.mapped:
             status = "unavailable"
-        elif conf_pct is not None and conf_pct >= thresholds["auto_apply"]:
+        elif conf_pct is None:
+            # No confidence = RULE-sourced (deterministic GSTR-2B/IMS parser,
+            # or a trusted profile) — a confident mapping, not a guess. Its
+            # own status so the UI can show a rule badge, never "AI — 0%".
+            status = "rule"
+        elif conf_pct >= thresholds["auto_apply"]:
             status = "auto"
-        elif conf_pct is not None and conf_pct >= thresholds["manual"]:
+        elif conf_pct >= thresholds["manual"]:
             status = "flagged"
         else:
             status = "unavailable_review"
@@ -271,6 +276,107 @@ def _doc_type_for_source(source_type: str) -> str:
         "gstr2b": "GSTR-2B", "ims": "IMS Export", "form26as": "Form 26AS",
         "tds": "TDS Certificate", "tally": "Tally Export",
     }.get(source_type, "Other")
+
+
+def _folder_name_for_client(client_id: int, client_ref: Optional[str] = None) -> Optional[str]:
+    """Resolve the data/ FOLDER name for a client id.
+
+    The reconciliation engine reads files from `data/<folder>/<period>/
+    <source_type>/`, where the folder is a client's folder name (often
+    abbreviated), NOT F2's `legal_name`. An upload stored only in the DB
+    never reached that folder, so a confirmed file was invisible to the
+    Reconcile flow. This maps a client id onto the folder whose name best
+    matches the client's legal name (exact, then normalized-prefix), and
+    falls back to the passed client_ref, then the DB client row's own name.
+    """
+    from src.data_paths import DATA_ROOT
+
+    candidates: list[str] = []
+    try:
+        from src.clients import service as clients
+
+        for c in clients.list_clients(include_inactive=True):
+            if int(c["client_id"]) == int(client_id):
+                candidates.append(str(c["legal_name"]))
+                break
+    except Exception:  # noqa: BLE001
+        pass
+    if client_ref:
+        candidates.append(str(client_ref))
+
+    on_disk = [p.name for p in DATA_ROOT.iterdir() if p.is_dir()] if DATA_ROOT.exists() else []
+
+    def norm(name: str) -> str:
+        return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+    # Exact folder-name match, then the BEST (longest-overlap) normalized
+    # prefix match either way. Longest wins: "Acme Textiles Pvt Ltd" must
+    # resolve to "AcmeTextiles", never the shorter unrelated "acme" folder.
+    for cand in candidates:
+        if cand in on_disk:
+            return cand
+    best: Optional[tuple[int, str]] = None
+    for cand in candidates:
+        n = norm(cand)
+        for folder in on_disk:
+            f = norm(folder)
+            if f and n and (f == n or f.startswith(n) or n.startswith(f)):
+                overlap = min(len(f), len(n))
+                if best is None or overlap > best[0]:
+                    best = (overlap, folder)
+    if best is not None:
+        return best[1]
+    # No match on disk — fall back to the client's own name (source_data_path
+    # will create the folder) rather than silently dropping the file.
+    if candidates:
+        return candidates[0]
+    return None
+
+
+def materialize_upload_to_disk(
+    upload_id: int, *, client_ref: Optional[str] = None, db_path=None,
+) -> Optional[str]:
+    """Copy an upload's stored bytes into the client's data/ folder so the
+    reconciliation engine can see it.
+
+    THE MISSING LINK: `upload_and_infer()` stores bytes ONLY in F3's
+    document_versions BLOB, and the Reconcile flow's file picker reads the
+    DISK folder (`data/<client>/<period>/<source_type>/`). Without this
+    step a confirmed upload could never be chosen for reconciliation.
+    Called from `confirm_mapping()`.
+
+    Returns the destination filename, or None when the file couldn't be
+    written (best-effort — never blocks a confirmation that succeeded).
+    """
+    from src.data_paths import source_data_path
+
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            return None
+        doc = ddb.get_document(conn, upload["document_id"])
+        version = ddb.get_current_version(conn, upload["document_id"]) if doc else None
+        file_bytes = version.get("file_bytes") if version else None
+        period = (doc.get("period") if doc else None) or upload.get("period")
+        filename = upload["filename"]
+        source_type = upload["source_type"]
+    finally:
+        conn.close()
+
+    if not file_bytes:
+        return None
+
+    folder = _folder_name_for_client(upload["client_id"], client_ref)
+    if not folder:
+        return None
+    try:
+        directory = source_data_path(folder, period or "-", source_type)
+        dest = directory / filename
+        dest.write_bytes(file_bytes)
+        return filename
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _ext(filename: str) -> str:
@@ -511,6 +617,156 @@ def confirm_mapping(
         pass
 
     _run_f5_structural_checks(upload, field_overrides)
+
+    # Materialize the confirmed file into the client's data/ folder so the
+    # Reconcile flow can actually pick it (F3 stores bytes only as a DB BLOB;
+    # the engine reads the disk folder). Best-effort — never un-confirms.
+    materialize_upload_to_disk(upload_id, client_ref=client_ref, db_path=db_path)
+
+
+def re_run_mapping(
+    upload_id: int, *, actor: str, client_ref: Optional[str] = None, db_path=None,
+) -> dict[str, Any]:
+    """Force a fresh model mapping for an already-ingested file.
+
+    The shape cache is keyed on the file's header set, so once a file has
+    been ingested its mapping is replayed on every future read — including
+    a mapping that left a field (e.g. GSTIN) unmapped. This action clears
+    BOTH the cached shape and the persisted ingestion result for the file,
+    then re-normalizes with `use_cache=False` so the model genuinely runs
+    again.
+
+    Returns the fresh ingestion result as a dict (status, row counts,
+    mapping). Raises IngestionAIError when the upload or its stored file
+    bytes can't be found.
+
+    NOTE: this is a live model call (~15-25s). Callers should confirm with
+    the user before invoking it.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            raise IngestionAIError("Upload not found.")
+        doc = ddb.get_document(conn, upload["document_id"])
+        file_bytes = ddb.get_version_bytes(conn, doc["current_version_id"]) if doc else None
+        period = doc.get("period") if doc else None
+    finally:
+        conn.close()
+
+    if not file_bytes:
+        raise IngestionAIError(
+            "The original file bytes are no longer available for this upload — re-upload the file."
+        )
+
+    ref = client_ref or str(upload["client_id"])
+    source_type = upload["source_type"]
+    filename = upload["filename"]
+
+    # Clear the cached shape + the persisted result so nothing replays the
+    # old mapping. Best-effort: a missing row is fine.
+    try:
+        conn = idb.connect(db_path)
+        try:
+            stored = idb.find_ingestion_result(
+                conn, client_id=upload["client_id"], source_type=source_type, filename=filename,
+            )
+            headers = (stored or {}).get("headers") or []
+            if headers:
+                signature = normalizer._header_signature([str(h) for h in headers])
+                idb.delete_shape(
+                    conn, client_ref=ref, source_type=source_type, header_signature=signature,
+                )
+            idb.delete_ingestion_result(
+                conn, normalizer.upload_key(ref, period, source_type, filename),
+            )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    result = normalizer.normalize_source_file(
+        file_bytes, source_type, ref, period,
+        client_id=upload["client_id"], actor=actor, filename=filename,
+        db_path=db_path, use_cache=False,
+    )
+
+    thresholds = get_thresholds(db_path=db_path)
+    field_results = _field_results_from_ingestion(result, thresholds)
+
+    # Refresh the stored report so the review screen shows the new mapping.
+    conn = _connect(db_path)
+    try:
+        idb.create_report(
+            conn, upload_id=upload_id, field_mapping=field_results,
+            c5_context_used=bool(_c5_runtime_context(upload["client_id"])),
+        )
+    finally:
+        conn.close()
+
+    return {
+        "status": result.status,
+        "row_count_in": result.row_count_in,
+        "row_count_out": result.row_count_out,
+        "model_used": result.model_used,
+        "llm_cached": result.llm_cached,
+        "field_results": field_results,
+        "ingestion": result,
+    }
+
+
+def re_run_file(
+    client: str, period: Optional[str], source_type: str, filename: str,
+    *, actor: str, client_id: Optional[int] = None, recon_type: Optional[str] = None, db_path=None,
+) -> dict[str, Any]:
+    """Force a fresh mapping for a file identified by its coordinates.
+
+    The Reconcile flow works with files on disk (client/period/source_type/
+    filename), not raw_upload rows, so it needs this coordinate-keyed
+    variant of `re_run_mapping()`. Same behaviour: clear the cached shape +
+    persisted result, then re-normalize with `use_cache=False`.
+
+    A live model call (~15-25s) — confirm with the user first.
+    """
+    from src.data_paths import source_data_path
+
+    path = source_data_path(client, period, source_type) / filename
+    if not path.exists():
+        raise IngestionAIError(f"Source file not found: {path}")
+
+    # Clear the cached shape + persisted result so nothing replays the old
+    # mapping. Best-effort.
+    try:
+        conn = idb.connect(db_path)
+        try:
+            stored = normalizer.get_stored_result(client, period, source_type, filename, db_path=db_path)
+            headers = (stored or {}).get("headers") or []
+            if headers:
+                signature = normalizer._header_signature([str(h) for h in headers])
+                idb.delete_shape(
+                    conn, client_ref=client, source_type=source_type, header_signature=signature,
+                )
+            idb.delete_ingestion_result(
+                conn, normalizer.upload_key(client, period, source_type, filename),
+            )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+    result = normalizer.normalize_source_file(
+        path, source_type, client, period,
+        client_id=client_id, recon_type=recon_type, actor=actor,
+        db_path=db_path, use_cache=False,
+    )
+    return {
+        "status": result.status,
+        "row_count_in": result.row_count_in,
+        "row_count_out": result.row_count_out,
+        "model_used": result.model_used,
+        "llm_cached": result.llm_cached,
+        "ingestion": result,
+    }
 
 
 def _run_f5_structural_checks(upload: dict[str, Any], field_overrides: dict[str, Optional[str]]) -> None:

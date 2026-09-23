@@ -1,8 +1,8 @@
 """F1 admin console — Identity & Access.
 
-Faithful to ``render_admin_tab`` in the Streamlit build: five sections (Users,
-Roles, Permission Lookup, Clients & Teams, Security), Admin-only except the
-read-only Security view (Admin + Partner). Uses only Foundation components.
+Five sections (Users, Roles, Permission Lookup, Clients & Teams, Security),
+Admin-only except the read-only Security view (Admin + Partner). Uses only
+Foundation components.
 """
 
 from __future__ import annotations

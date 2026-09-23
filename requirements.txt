@@ -1,6 +1,5 @@
 pandas
 pyyaml
-streamlit
 rapidfuzz
 openpyxl
 cryptography

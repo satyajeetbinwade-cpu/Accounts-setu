@@ -1,8 +1,7 @@
 """Phase-1 tools — Run / Review / Compare / Config / Export.
 
-Ports the Phase-1 Streamlit tabs onto the shared engine. Every screen reads
-from ``Phase1State`` (which calls ``src.*`` services). Uses only Foundation
-components.
+Every screen reads from ``Phase1State`` (which calls ``src.*`` services).
+Uses only Foundation components.
 """
 
 from __future__ import annotations

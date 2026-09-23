@@ -2,7 +2,7 @@
 
 Modules import their components from here rather than styling anything ad
 hoc. See ``components.py`` for the component catalogue and ``tokens.py`` for
-the locked design tokens (shared with the Streamlit app).
+the locked design tokens.
 """
 
 from setu.foundation import components, tokens

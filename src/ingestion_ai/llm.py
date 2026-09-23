@@ -2,8 +2,7 @@
 
 This is the ONE place the ingestion layer talks to a model. It exists so
 that the model/provider choice is a *configuration* concern (editable from
-the frontend — see src/ui/ai_settings_tab.py) rather than something baked
-into the mapping logic.
+the frontend) rather than something baked into the mapping logic.
 
 Provider: OpenRouter, reusing the same urllib-based transport as
 src/ai_analysis.py (no third-party HTTP client — `requests` is not a

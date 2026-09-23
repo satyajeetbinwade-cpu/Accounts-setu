@@ -102,6 +102,25 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
 
 CREATE INDEX IF NOT EXISTS idx_ai_fingerprint ON ai_analysis(fingerprint, status);
 CREATE INDEX IF NOT EXISTS idx_ai_result      ON ai_analysis(result_id);
+
+-- Field-level corrections a reviewer makes to a matched record's books/portal
+-- values. Kept OUTSIDE match_results (which is immutable by design) and keyed
+-- by fingerprint, exactly like review_state — so a correction survives a
+-- re-run and is re-applied to the same underlying record. Every write also
+-- goes to F4's edit history (see src/queries.py).
+CREATE TABLE IF NOT EXISTS result_field_overrides (
+    client        TEXT    NOT NULL,
+    period        TEXT    NOT NULL,
+    recon_type    TEXT    NOT NULL,
+    fingerprint   TEXT    NOT NULL,
+    side          TEXT    NOT NULL,   -- 'books' | 'portal'
+    field         TEXT    NOT NULL,
+    value         TEXT,               -- the corrected value (NULL = cleared)
+    reason        TEXT,
+    changed_by    TEXT,
+    changed_at    TEXT,
+    PRIMARY KEY (client, period, recon_type, fingerprint, side, field)
+);
 """
 
 
@@ -332,3 +351,92 @@ def get_review_state(
             "reviewed_confidence_band": row[7],
         }
     return result
+
+
+# ---------------------------------------------------------------------------
+# Field-level overrides on a matched record — carried forward across runs,
+# keyed by fingerprint (same carry-forward contract as review_state).
+# ---------------------------------------------------------------------------
+
+
+def set_field_override(
+    conn: sqlite3.Connection,
+    client: str,
+    period: str,
+    recon_type: str,
+    fingerprint: str,
+    side: str,
+    field: str,
+    value: Optional[str],
+    *,
+    reason: Optional[str] = None,
+    changed_by: Optional[str] = None,
+    changed_at: Optional[str] = None,
+) -> None:
+    """Upsert a reviewer's correction to one field of a matched record.
+
+    `side` is 'books' or 'portal'. A NULL `value` clears the field. Keyed by
+    fingerprint so the correction is re-applied to the same record on a
+    later run.
+    """
+    conn.execute(
+        """
+        INSERT INTO result_field_overrides
+            (client, period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (client, period, recon_type, fingerprint, side, field) DO UPDATE SET
+            value = excluded.value,
+            reason = excluded.reason,
+            changed_by = excluded.changed_by,
+            changed_at = excluded.changed_at
+        """,
+        (client, period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at),
+    )
+    conn.commit()
+
+
+def clear_field_override(
+    conn: sqlite3.Connection,
+    client: str,
+    period: str,
+    recon_type: str,
+    fingerprint: str,
+    side: str,
+    field: str,
+) -> None:
+    """Remove a field override (revert to the engine's original value)."""
+    conn.execute(
+        """
+        DELETE FROM result_field_overrides
+        WHERE client = ? AND period = ? AND recon_type = ? AND fingerprint = ?
+          AND side = ? AND field = ?
+        """,
+        (client, period, recon_type, fingerprint, side, field),
+    )
+    conn.commit()
+
+
+def get_field_overrides(
+    conn: sqlite3.Connection,
+    client: str,
+    period: str,
+    recon_type: str,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Return {fingerprint: {side: {field: {value, reason, changed_by, changed_at}}}}."""
+    rows = conn.execute(
+        """
+        SELECT fingerprint, side, field, value, reason, changed_by, changed_at
+        FROM result_field_overrides
+        WHERE client = ? AND period = ? AND recon_type = ?
+        """,
+        (client, period, recon_type),
+    ).fetchall()
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for fp, side, field, value, reason, changed_by, changed_at in rows:
+        out.setdefault(fp, {}).setdefault(side, {})[field] = {
+            "value": value,
+            "reason": reason,
+            "changed_by": changed_by,
+            "changed_at": changed_at,
+        }
+    return out

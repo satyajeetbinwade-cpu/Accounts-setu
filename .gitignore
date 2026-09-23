@@ -38,9 +38,6 @@ db/
 .env
 *.pem
 
-# ---- Streamlit ----
-.streamlit/secrets.toml
-
 # ---- IDE / OS ----
 .vscode/
 .idea/
@@ -52,11 +49,6 @@ Thumbs.db
 .pytest_cache/
 .mypy_cache/
 *.log
-
-# ---- Demo module scratch ----
-# Ephemeral per-session uploads staged by demo/session.py. Never committed:
-# they are throwaway copies of whatever was uploaded to a demo session.
-data/_demo/
 
 # ---- Reflex (generated / runtime) ----
 # .web/ is the generated frontend build (~200MB), .states/ is runtime state

@@ -4,7 +4,7 @@ in the app goes through.
 `normalize_source_file()` sits between every upload and the reconciliation
 engine. There is deliberately no code path where a raw uploaded file
 reaches the engine without passing through it first (see
-src/runner.py's `_canonical_frames` and src/ui/run_tab.py).
+src/runner.py's `_canonical_frames`).
 
 What it does, in order:
 
@@ -71,6 +71,7 @@ from src.ingestion import (
     _normalize_dates_flexible,
 )
 from src.ingestion_ai import llm
+from src.ingestion_ai import f6_bridge
 
 # ---------------------------------------------------------------------------
 # Canonical schemas per source_type
@@ -554,6 +555,10 @@ class RawRead:
     sheet_name: Optional[str]
     sheet_ambiguous: bool
     warnings: list[str]
+    # Set when the file carried a TWO-ROW merged header (parent + child).
+    # `header_row` is then None and the columns are already flattened to
+    # "parent :: child" labels — see `detect_header_pair()`.
+    header_row_pair: Optional[tuple[int, int]] = None
 
 
 def _looks_like_data_row(values: list[str]) -> bool:
@@ -609,7 +614,95 @@ def detect_header_row(preview: pd.DataFrame, *, max_scan_rows: int = 20) -> Opti
     return best_row
 
 
-def _read_csv_tolerant(path: Path, header_row: Optional[int]) -> pd.DataFrame:
+def _is_blank_cell(v: Any) -> bool:
+    return str(v).strip() in ("", "nan", "None")
+
+
+def detect_header_pair(preview: pd.DataFrame, *, max_scan_rows: int = 20) -> Optional[tuple[int, int]]:
+    """Detect a TWO-ROW merged header (parent row + child row).
+
+    Real GSTN exports (GSTR-2B, IMS) ship a merged header: a parent row with
+    merged spans ("Invoice Details", "Tax Amount") immediately above a child
+    row carrying the finer sub-labels ("Invoice number", "Integrated Tax",
+    "Central Tax", ...). The single-row detector picks the PARENT row and
+    loses every child label, so those files map poorly — the columns come out
+    as "Invoice Details" / "Tax Amount" / "Unnamed: N" and the required GST
+    fields can't be resolved.
+
+    The signature of a merged header is COMPLEMENTARY BLANKS: a merged parent
+    cell is non-null only in its first column, so the child row fills columns
+    the parent left blank. (The parent row usually has MORE non-empty cells
+    overall, because it also carries single-column labels like "GSTIN of
+    supplier" — so "child has more cells" is NOT the test.)
+
+    Returns (parent_idx, child_idx) when a genuine pair is found, else None.
+    A pair is: two consecutive header-shaped rows where the child fills at
+    least 2 columns the parent left blank, the parent carries at least 3
+    labels (a title row has 1-2), and the row after the child is NOT itself a
+    header (three stacked label rows are not a merged header).
+    """
+    n = min(len(preview), max_scan_rows)
+    scores = [_score_header_row(list(preview.iloc[i])) for i in range(n)]
+
+    for i in range(n - 1):
+        if scores[i] <= 0 or scores[i + 1] <= 0:
+            continue
+        parent = list(preview.iloc[i])
+        child = list(preview.iloc[i + 1])
+        parent_n = sum(1 for v in parent if not _is_blank_cell(v))
+        if parent_n < 3:
+            continue
+        # Columns the parent left blank but the child fills — the merged-cell
+        # signature. Require at least 2 so a single stray blank can't trigger.
+        filled_by_child = sum(
+            1 for p, c in zip(parent, child) if _is_blank_cell(p) and not _is_blank_cell(c)
+        )
+        if filled_by_child < 2:
+            continue
+        if i + 2 < n and scores[i + 2] > 0:
+            continue
+        return (i, i + 1)
+    return None
+
+
+def _apply_header_pair(raw: pd.DataFrame, header_pair: tuple[int, int]) -> pd.DataFrame:
+    """Flatten a two-row merged header into parent::child column labels and
+    return the frame with those labels and the data rows below the child row.
+
+    Reuses F6's `flatten_two_row_header` — the SAME disambiguation mechanism
+    the format registry uses for GSTR-2B/IMS — so the two paths can never
+    disagree about what a merged header means.
+    """
+    from src.f6.fingerprint import flatten_two_row_header
+
+    parent_idx, child_idx = header_pair
+    parent_row = list(raw.iloc[parent_idx]) if parent_idx < len(raw) else []
+    child_row = list(raw.iloc[child_idx]) if child_idx < len(raw) else []
+    labels = flatten_two_row_header(parent_row, child_row)
+    df = raw.iloc[child_idx + 1 :].reset_index(drop=True)
+    if len(labels) < len(df.columns):
+        labels = labels + [f"col_{i}" for i in range(len(labels), len(df.columns))]
+    labels = labels[: len(df.columns)]
+    # Flattened labels can collide (e.g. B2B-CDNR carries two "tax amount ::
+    # integrated tax(₹)" blocks). Duplicate column names make pandas return a
+    # DataFrame for df[col], which breaks every downstream per-column op — so
+    # disambiguate with a numeric suffix.
+    seen: dict[str, int] = {}
+    unique: list[str] = []
+    for label in labels:
+        if label in seen:
+            seen[label] += 1
+            unique.append(f"{label} #{seen[label]}")
+        else:
+            seen[label] = 0
+            unique.append(label)
+    df.columns = unique
+    return df
+
+
+def _read_csv_tolerant(
+    path: Path, header_row: Optional[int], header_pair: Optional[tuple[int, int]] = None,
+) -> pd.DataFrame:
     """Read a CSV that may be RAGGED — real Tally/GSTN exports routinely
     carry title rows with fewer fields than the data rows, which makes
     pandas' parsers abort with "Expected N fields, saw M" (both the C and
@@ -643,16 +736,24 @@ def _read_csv_tolerant(path: Path, header_row: Optional[int]) -> pd.DataFrame:
     padded = [r + [""] * (width - len(r)) for r in rows]
     df = pd.DataFrame(padded, dtype=str)
 
+    if header_pair is not None:
+        return _apply_header_pair(df, header_pair)
     if header_row is not None and 0 <= header_row < len(df):
         df.columns = [str(c).strip() for c in df.iloc[header_row]]
         df = df.iloc[header_row + 1 :].reset_index(drop=True)
     return df
 
 
-def _read_sheet(path: Path, sheet: Any, header_row: Optional[int]) -> pd.DataFrame:
+def _read_sheet(
+    path: Path, sheet: Any, header_row: Optional[int],
+    header_pair: Optional[tuple[int, int]] = None,
+) -> pd.DataFrame:
     ext = path.suffix.lower()
     if ext == ".csv":
-        return _read_csv_tolerant(path, header_row)
+        return _read_csv_tolerant(path, header_row, header_pair)
+    if header_pair is not None:
+        raw = pd.read_excel(path, sheet_name=sheet, header=None, dtype=str)
+        return _apply_header_pair(raw, header_pair)
     if header_row is None:
         return pd.read_excel(path, sheet_name=sheet, header=None, dtype=str)
     return pd.read_excel(path, sheet_name=sheet, header=header_row, dtype=str)
@@ -686,6 +787,12 @@ def read_raw_with_header_detection(path: Path) -> RawRead:
 
     if ext == ".csv":
         preview = _read_csv_tolerant(path, None).head(20)
+        header_pair = detect_header_pair(preview)
+        if header_pair is not None:
+            df = _read_sheet(path, None, None, header_pair)
+            return RawRead(df=_finalize_read(df, None, header_pair), header_row=None,
+                           sheet_name=None, sheet_ambiguous=False, warnings=warnings,
+                           header_row_pair=header_pair)
         header_row = detect_header_row(preview)
         df = _read_sheet(path, None, header_row)
         if header_row is None:
@@ -704,46 +811,66 @@ def read_raw_with_header_detection(path: Path) -> RawRead:
     if not sheet_names:
         raise IngestionError(f"Workbook {path.name} contains no sheets.")
 
-    candidates: list[tuple[str, Optional[int], pd.DataFrame, int]] = []
+    candidates: list[tuple[str, Optional[int], Optional[tuple[int, int]], pd.DataFrame, int]] = []
     for name in sheet_names:
         preview = pd.read_excel(path, sheet_name=name, header=None, nrows=20, dtype=str)
-        header_row = detect_header_row(preview)
-        df = _read_sheet(path, name, header_row)
-        candidates.append((name, header_row, df, _sheet_tabularity(df)))
+        header_pair = detect_header_pair(preview)
+        header_row = None if header_pair is not None else detect_header_row(preview)
+        df = _read_sheet(path, name, header_row, header_pair)
+        candidates.append((name, header_row, header_pair, df, _sheet_tabularity(df)))
 
     # Pick the sheet with tabular data. If more than one sheet is genuinely
     # tabular, the choice is ambiguous and we say so rather than pretending
     # it wasn't a judgement call.
-    tabular = [c for c in candidates if c[3] > 0]
+    tabular = [c for c in candidates if c[4] > 0]
     if not tabular:
         raise IngestionError(f"Workbook {path.name} has no sheet containing tabular data.")
 
-    tabular.sort(key=lambda c: c[3], reverse=True)
-    chosen = tabular[0]
-    sheet_ambiguous = len(tabular) > 1
+    # A sheet with a genuine two-row merged header is a real GSTN data sheet
+    # (B2B, B2B-CDNR, ...). Prefer those over instruction/summary sheets —
+    # a GSTR-2B workbook's "Read me" tab is 400+ rows of documentation and
+    # would otherwise win on raw row count.
+    pair_sheets = [c for c in tabular if c[2] is not None]
+    pool = pair_sheets or tabular
+    pool.sort(key=lambda c: c[4], reverse=True)
+    chosen = pool[0]
+    sheet_ambiguous = len(pool) > 1
     if sheet_ambiguous:
-        others = ", ".join(c[0] for c in tabular[1:])
+        others = ", ".join(c[0] for c in pool[1:])
         warnings.append(
-            f"Workbook has {len(tabular)} sheets with tabular data — used {chosen[0]!r} "
+            f"Workbook has {len(pool)} sheets with tabular data — used {chosen[0]!r} "
             f"(largest). Other candidate sheet(s): {others}."
         )
     if len(sheet_names) > 1 and not sheet_ambiguous:
         warnings.append(f"Workbook has {len(sheet_names)} sheets — used {chosen[0]!r}.")
 
-    name, header_row, df, _ = chosen
-    if header_row is None:
+    name, header_row, header_pair, df, _ = chosen
+    if header_pair is not None:
+        warnings.append(
+            f"Sheet {name!r} has a two-row merged header — columns were flattened to "
+            "'parent :: child' labels so the sub-fields (invoice number, tax amounts) "
+            "are mapped correctly."
+        )
+    elif header_row is None:
         warnings.append(
             f"No header row detected in sheet {name!r} — every row looked like data. "
             "Columns were auto-named and the first row was kept as a record."
         )
-    return RawRead(df=_finalize_read(df, header_row), header_row=header_row,
-                   sheet_name=name, sheet_ambiguous=sheet_ambiguous, warnings=warnings)
+    return RawRead(df=_finalize_read(df, header_row, header_pair), header_row=header_row,
+                   sheet_name=name, sheet_ambiguous=sheet_ambiguous, warnings=warnings,
+                   header_row_pair=header_pair)
 
 
-def _finalize_read(df: pd.DataFrame, header_row: Optional[int]) -> pd.DataFrame:
+def _finalize_read(
+    df: pd.DataFrame, header_row: Optional[int],
+    header_pair: Optional[tuple[int, int]] = None,
+) -> pd.DataFrame:
     """Normalize the read frame: stringify headers, drop fully-empty rows
     and subtotal/grand-total rows, and reset the index."""
-    if header_row is None:
+    if header_pair is not None:
+        # Columns are already the flattened parent::child labels.
+        df.columns = [str(c).strip() for c in df.columns]
+    elif header_row is None:
         df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
     else:
         df.columns = [str(c).strip() for c in df.columns]
@@ -1025,6 +1152,88 @@ def infer_mapping(
     return out, model_id
 
 
+# A GSTIN is 15 chars: 2-digit state + 5 letters + 4 digits + letter + digit
+# + letter + alphanumeric. Used to RESCUE a gstin the model left unmapped but
+# whose values are unmistakably GSTINs — the "fetched but not mapped" case.
+_GSTIN_VALUE_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z][A-Z][0-9A-Z]$")
+_PAN_VALUE_RE = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
+
+
+def _rescue_identity_field(
+    field: str, pattern: re.Pattern[str], headers: list[str], samples: list[dict[str, str]],
+    mappings: list[FieldMapping], used_columns: set[str], *, required: bool,
+) -> Optional[FieldMapping]:
+    """Deterministically map an identity field (gstin/pan) whose VALUES are
+    unmistakable, when the model left it unmapped.
+
+    This is the fix for "the file clearly contains a GSTIN but it wasn't
+    mapped": the model's one-to-one rule can let another field claim the
+    column first, or the model can simply return null. We scan the sample
+    values for a column that is overwhelmingly the target pattern and map it
+    — but ONLY when the field is currently unmapped and the column is not
+    already claimed, so a genuine model mapping is never overridden.
+    """
+    existing = next((m for m in mappings if m.canonical_field == field), None)
+    if existing is not None and existing.mapped:
+        return None
+    if not samples:
+        return None
+
+    best_col: Optional[str] = None
+    best_hits = 0
+    for col in headers:
+        if col in used_columns:
+            continue
+        values = [str(r.get(col, "")).strip().upper() for r in samples]
+        values = [v for v in values if v]
+        if not values:
+            continue
+        hits = sum(1 for v in values if pattern.match(v))
+        # Require a strong majority of non-empty sample values to match, so a
+        # stray code in a free-text column can't win.
+        if hits >= max(2, int(len(values) * 0.6)) and hits > best_hits:
+            best_col, best_hits = col, hits
+    if best_col is None:
+        return None
+    return FieldMapping(
+        canonical_field=field, source_column=best_col, confidence=0.9,
+        reason=(
+            f"Inferred from values — column {best_col!r} contains "
+            f"{best_hits} value(s) matching the {field.upper()} pattern."
+        ),
+        required=required,
+    )
+
+
+def _rescue_identity_fields(
+    source_type: str, headers: list[str], samples: list[dict[str, str]],
+    mappings: list[FieldMapping],
+) -> list[FieldMapping]:
+    """Apply the deterministic identity rescue to a mapping list. Only runs
+    for GST-family slots (gstin) and TDS-family slots (pan)."""
+    family = _schema_family(source_type)
+    targets: list[tuple[str, re.Pattern[str]]] = []
+    if family in ("gst", "tally"):
+        targets.append(("gstin", _GSTIN_VALUE_RE))
+    if family in ("tds", "tally"):
+        targets.append(("pan", _PAN_VALUE_RE))
+    if not targets:
+        return mappings
+
+    used = {m.source_column for m in mappings if m.mapped and m.source_column}
+    required_set = set(required_fields_for(source_type))
+    out = list(mappings)
+    for field, pattern in targets:
+        rescue = _rescue_identity_field(
+            field, pattern, headers, samples, out, used, required=field in required_set,
+        )
+        if rescue is None:
+            continue
+        used.add(rescue.source_column)
+        out = [rescue if m.canonical_field == field else m for m in out]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 4. Apply mapping + coerce
 # ---------------------------------------------------------------------------
@@ -1198,7 +1407,7 @@ def normalize_source_file(
 
     Args:
         file: A path (str/Path) to the file, or raw bytes, or a file-like
-            object with `.read()` (e.g. a Streamlit UploadedFile).
+            object with `.read()`.
         source_type: The declared upload slot — "tally_purchase_register",
             "gstr2b", "ims", "form26as", "tds", or a 2C source.
         client: The client folder/name the upload belongs to.
@@ -1255,6 +1464,58 @@ def normalize_source_file(
         model_used: Optional[str] = None
         llm_cached = False
         mappings: list[FieldMapping] = []
+
+        # --- Deterministic portal-export fast path (F6 bridge) ---
+        # GSTR-2B and IMS have a KNOWN, fixed GSTN layout. F6 models it
+        # precisely and parses it with zero model calls, so use that instead
+        # of asking a model to guess the mapping. This runs BEFORE the shape
+        # cache so a stale cached model mapping can never shadow the
+        # deterministic parse. Falls through to the generic path when the
+        # bridge doesn't cover the source type or yields no rows.
+        if f6_bridge.supports(source_type):
+            bridged = f6_bridge.parse_portal_export(path, source_type, filename)
+            if bridged is not None:
+                bridge_df, bridge_maps, bridge_warnings = bridged
+                warnings.extend(bridge_warnings)
+                notes.append(
+                    "Parsed with the deterministic GSTR-2B/IMS layout (F6 format registry) — "
+                    "no model call was needed."
+                )
+                bridge_mappings = [
+                    FieldMapping(
+                        canonical_field=m["canonical_field"],
+                        source_column=m.get("source_column"),
+                        confidence=m.get("confidence"),
+                        reason=m.get("reason") or "",
+                        required=bool(m.get("required")),
+                    )
+                    for m in bridge_maps
+                ]
+                bridge_unmapped_required = [
+                    f for f in required
+                    if not any(m.canonical_field == f and m.mapped for m in bridge_mappings)
+                ]
+                bridge_unmapped_optional = [
+                    m.canonical_field for m in bridge_mappings if not m.required and not m.mapped
+                ]
+                bridge_status = (
+                    STATUS_PARTIAL
+                    if (bridge_unmapped_required or bridge_unmapped_optional or warnings)
+                    else STATUS_OK
+                )
+                result = IngestionResult(
+                    source_type=source_type, filename=filename, client=client, period=period,
+                    status=bridge_status, canonical_df=bridge_df, field_mappings=bridge_mappings,
+                    unmapped_required_fields=bridge_unmapped_required,
+                    row_count_in=len(read.df), row_count_out=len(bridge_df), warnings=warnings,
+                    headers=headers, header_row=read.header_row, sheet_name=read.sheet_name,
+                    sheet_ambiguous=read.sheet_ambiguous, classification=None,
+                    model_used=None, llm_cached=False, header_signature=signature,
+                    notes=notes,
+                )
+                result.caveats = result.build_caveats(recon_type)
+                _persist_result(result, client_id=client_id, actor=actor, db_path=db_path)
+                return result
 
         conn = idb.connect(db_path)
         cached_shape = None
@@ -1317,6 +1578,21 @@ def normalize_source_file(
                 client, source_type, signature, headers, mappings, classification,
                 model_used, client_id=client_id, actor=actor, db_path=db_path,
             )
+
+        # --- Deterministic identity rescue ---
+        # The model's one-to-one rule can leave gstin/pan unmapped even when
+        # the file plainly contains them (another field claimed the column
+        # first, or the model returned null). Rescue them from the VALUES —
+        # never overriding a genuine mapping. Runs on both the cache and the
+        # model path, so a cached gstin=None is corrected too.
+        rescued = _rescue_identity_fields(source_type, headers, samples, mappings)
+        if rescued != mappings:
+            for m in rescued:
+                if m.mapped and not any(
+                    old.canonical_field == m.canonical_field and old.mapped for old in mappings
+                ):
+                    notes.append(f"{m.canonical_field.upper()} recovered from column values: {m.reason}")
+            mappings = rescued
 
         # --- Apply + coerce ---
         canonical_df, apply_warnings = apply_mapping(read.df, mappings, source_type, filename)

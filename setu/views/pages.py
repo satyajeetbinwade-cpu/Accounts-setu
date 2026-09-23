@@ -1,9 +1,8 @@
 """Per-route pages.
 
-Module pages are migrated one at a time. Screens that aren't rebuilt yet
-render an honest, on-brand placeholder — never a fabricated UI — using the
-Foundation's 3.5 badge so the gap is visible and named, exactly as the
-Streamlit build marked unbuilt features.
+Screens that aren't built yet render an honest, on-brand placeholder — never
+a fabricated UI — using the Foundation's 3.5 badge so the gap is visible and
+named.
 """
 
 from __future__ import annotations
@@ -58,8 +57,8 @@ def _quick_access_card(screen) -> rx.Component:
 
 
 def dashboard_page() -> rx.Component:
-    """The signed-in landing screen. In the Streamlit app this was F1's
-    role-aware Home shell; here it doubles as the migration status board.
+    """The signed-in landing screen — a role-aware Home shell that doubles as
+    the migration status board.
     """
     return shell.shell(
         rx.vstack(

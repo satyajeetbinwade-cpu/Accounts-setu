@@ -16,6 +16,7 @@ The upload handler is async because Reflex ``UploadFile.read()`` is a coroutine.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import reflex as rx
 
@@ -96,6 +97,19 @@ class FieldRow:
     candidates: list[str]
     status: str
     needs_attention: bool
+
+
+@dataclass
+class SampleValue:
+    """A real value read from the file for one canonical field — so the
+    reviewer sees actual data (a GSTIN, an amount), not just which column
+    was picked. Derived from the raw preview rows; never invented."""
+
+    canonical_field: str
+    label: str
+    value: str
+    raw_column: str
+    is_amount: bool
 
 
 @dataclass
@@ -208,10 +222,36 @@ class IngestionAiState(SharedUploadState):
     confirm_open: bool = False
     allow_empty_ack: bool = False
 
+    # Per-row editing on the mapping table: the raw_column currently being
+    # edited ("" = none) and the dropdown draft. Editing one row at a time
+    # keeps the table readable — 20 always-open dropdowns is what made the
+    # old table overflow and feel unusable.
+    editing_column: str = ""
+    edit_draft_field: str = ""
+
+    # Re-run through model (per-file, confirm-gated).
+    rerun_open: bool = False
+    rerun_busy: bool = False
+    rerun_target_id: int = 0
+    rerun_target_name: str = ""
+
+    # A generic "AI is working" indicator: non-empty while a long model call
+    # runs, so the view can show a spinner + what it's doing.
+    busy_label: str = ""
+
     # raw-file preview (first rows of the actual sheet)
     preview_headers: list[str] = []
     preview_rows: list[list[str]] = []
     preview_note: str = ""
+
+    # Mapped values — a real sample value per canonical field, so the
+    # reviewer sees actual data (GSTIN, invoice number, amounts) rather than
+    # only which column was chosen.
+    sample_values: list[SampleValue] = []
+
+    # Non-reactive: the preview frame, used only to derive sample_values on
+    # the same pass. Underscore-prefixed so Reflex never serialises it.
+    _preview_df: Any = None
 
     # raw-file context
     header_row_note: str = ""
@@ -307,6 +347,36 @@ class IngestionAiState(SharedUploadState):
         here (not in the view) because a Var list cannot be concatenated
         with a Python list at compile time."""
         return [LEAVE_UNMAPPED] + list(self.canonical_field_options)
+
+    @rx.var
+    def mapped_checklist(self) -> list[FieldRow]:
+        """Every canonical field with its mapping status — the checklist the
+        review screen renders alongside the column table. One row per
+        canonical field, in schema order, so nothing is silently absent."""
+        seen: dict[str, FieldRow] = {}
+        order: list[str] = []
+        for f in list(self.needs_attention) + list(self.confident_fields):
+            if f.canonical_field not in seen:
+                seen[f.canonical_field] = f
+                order.append(f.canonical_field)
+        # Canonical fields with no report entry at all still belong on the
+        # checklist — EXCEPT residual fields (rounding_adjustment defaults
+        # to 0 when absent; a portal export never carries one), which are
+        # not a gap and must not read as one.
+        residual_fields = {"rounding_adjustment"}
+        for opt in self.canonical_field_options:
+            if opt not in seen:
+                seen[opt] = FieldRow(
+                    canonical_field=opt, raw_column="", confidence=0, reason="",
+                    required=False, from_trusted_profile=False, candidates=[],
+                    status="unmapped", needs_attention=opt not in residual_fields,
+                )
+                order.append(opt)
+        return [seen[k] for k in order]
+
+    @rx.var
+    def mapped_checklist_done(self) -> int:
+        return sum(1 for f in self.mapped_checklist if not f.needs_attention)
 
     @rx.var
     def filtered_profiles(self) -> list[ProfileRow]:
@@ -646,6 +716,64 @@ class IngestionAiState(SharedUploadState):
         self.confirm_open = False
         self._load_uploads()
 
+    # ------------------------------------------------------------------
+    # Re-run through model (per-file, confirm-gated)
+    # ------------------------------------------------------------------
+    @rx.event
+    def open_rerun(self, upload_id: int, filename: str):
+        """Open the confirm dialog for a per-file model re-run.
+
+        A re-run is a live model call (~15-25s) and discards the cached
+        mapping, so it is always confirmed first — never one-click.
+        """
+        self.rerun_target_id = upload_id
+        self.rerun_target_name = filename
+        self.rerun_open = True
+
+    @rx.event
+    def close_rerun(self):
+        self.rerun_open = False
+        self.rerun_busy = False
+
+    @rx.event
+    async def confirm_rerun(self):
+        """Re-run the mapping through the model, yielding progress.
+
+        A live model call takes ~15-25s and BLOCKS — a plain sync handler
+        can never repaint a spinner mid-call (its `busy=True` → work →
+        `busy=False` all happen inside one server round-trip). As an async
+        generator, each `yield` flushes state to the browser, so the spinner
+        and status text genuinely show while the model runs.
+        """
+        if not self.rerun_target_id:
+            self.rerun_open = False
+            return
+        self.rerun_busy = True
+        self.busy_label = f"Re-running {self.rerun_target_name} through the model…"
+        self.error = ""
+        yield
+        try:
+            out = ingestion_ai.re_run_mapping(
+                self.rerun_target_id, actor=self.username, client_ref=self._client_ref(),
+            )
+            self.flash = (
+                f"Re-ran {self.rerun_target_name} through the model — "
+                f"{out['row_count_out']} row(s) mapped."
+            )
+        except ingestion_ai.IngestionAIError as exc:
+            self.error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"Re-run failed for {self.rerun_target_name}: {exc}"
+        finally:
+            self.rerun_busy = False
+            self.busy_label = ""
+            self.rerun_open = False
+            if self.selected_upload_id == self.rerun_target_id:
+                self._load_review()
+            else:
+                self._load_uploads()
+        yield
+
     def _load_review(self) -> None:
         if not self.selected_upload_id:
             return
@@ -665,10 +793,14 @@ class IngestionAiState(SharedUploadState):
         needs: list[FieldRow] = []
         confident: list[FieldRow] = []
         for f in fields:
+            # A mapped field with NO confidence is RULE-sourced (the
+            # deterministic GSTR-2B/IMS parser, or a trusted profile) — not a
+            # low-confidence guess. Only an explicit numeric confidence below
+            # the threshold counts as needing attention.
+            conf = f.get("confidence")
             is_needs = (
                 not f.get("raw_column")
-                or f.get("confidence") is None
-                or (f.get("confidence") or 0) / 100.0 < threshold
+                or (conf is not None and (conf or 0) / 100.0 < threshold)
             )
             row = FieldRow(
                 canonical_field=f["canonical_field"],
@@ -693,6 +825,9 @@ class IngestionAiState(SharedUploadState):
         # Loaded BEFORE the table so the table can fall back to the preview's
         # real headers when an upload predates the stored ingestion result.
         self._load_preview(upload)
+
+        # Real sample values per mapped field — the reviewer sees actual data.
+        self._build_sample_values(fields)
 
         headers = [str(h) for h in (stored.get("headers") or [])]
         if not headers:
@@ -779,9 +914,10 @@ class IngestionAiState(SharedUploadState):
         self.preview_headers = []
         self.preview_rows = []
         self.preview_note = ""
+        self._preview_df = None
         try:
             from src.documents import service as documents
-            from src.ingestion_ai import mapper
+            from src.ingestion_ai import normalizer
 
             doc = documents.get_document(upload["document_id"])
             if not doc or not doc.get("current_version_id"):
@@ -802,9 +938,19 @@ class IngestionAiState(SharedUploadState):
             path = Path(path_str)
             path.write_bytes(data)
             try:
-                df = mapper.read_with_detected_header(path)
+                # Use the SAME reader the ingestion pipeline used, so the
+                # preview shows the sheet that was actually ingested and its
+                # columns carry the identical flattened 'parent :: child'
+                # labels the mapping refers to. Reading with the plain
+                # single-row detector picked the wrong sheet on GSTR-2B/IMS
+                # exports and its headers could never match the mapped
+                # raw_column labels — which left the Mapped-values card and
+                # the raw preview blank.
+                raw = normalizer.read_raw_with_header_detection(path)
+                df = raw.df
             finally:
                 path.unlink(missing_ok=True)
+            self._preview_df = df
             self.preview_headers = [str(c) for c in df.columns]
             rows: list[list[str]] = []
             for _, r in df.head(8).iterrows():
@@ -814,6 +960,53 @@ class IngestionAiState(SharedUploadState):
                 self.preview_note = "The sheet has no data rows."
         except Exception as exc:  # noqa: BLE001
             self.preview_note = f"Source preview unavailable ({exc})."
+
+    def _build_sample_values(self, fields: list[dict]) -> None:
+        """Pull a REAL first non-blank value for each mapped canonical field
+        from the preview frame — so the reviewer sees actual data (a GSTIN,
+        an invoice number, rupee amounts), not just the column name. Values
+        are read, never invented; a field with no value shows as blank."""
+        self.sample_values = []
+        df = self._preview_df
+        if df is None or df.empty:
+            return
+        amount_fields = {
+            "taxable_value", "cgst", "sgst", "igst", "cess", "total_tax",
+            "invoice_value", "amount_paid_credited", "tax_deducted",
+            "tax_deposited", "amount", "rounding_adjustment",
+        }
+        priority = [
+            "gstin", "pan", "party_name", "deductee_name", "invoice_number",
+            "invoice_date", "taxable_value", "invoice_value", "total_tax",
+            "cgst", "sgst", "igst", "cess", "section", "reference", "date", "amount",
+        ]
+        by_field = {f["canonical_field"]: f for f in fields}
+        ordered = [f for f in priority if f in by_field] + [
+            f["canonical_field"] for f in fields if f["canonical_field"] not in priority
+        ]
+        seen: set[str] = set()
+        out: list[SampleValue] = []
+        for cf in ordered:
+            if cf in seen:
+                continue
+            seen.add(cf)
+            f = by_field[cf]
+            col = f.get("raw_column")
+            if not col or col not in df.columns:
+                continue
+            value = ""
+            for v in df[col].tolist():
+                if not _is_blank(v):
+                    value = str(v).strip()
+                    break
+            out.append(SampleValue(
+                canonical_field=cf,
+                label=cf.replace("_", " ").title(),
+                value=value,
+                raw_column=str(col),
+                is_amount=cf in amount_fields,
+            ))
+        self.sample_values = out
 
     def set_column_mapping(self, raw_column: str, canonical_field: str):
         """The user overrides which canonical field a source column maps to.
@@ -830,6 +1023,32 @@ class IngestionAiState(SharedUploadState):
         self.column_overrides[raw_column] = field
         self.mapping_error = ""
         self._recompute_field_overrides()
+
+    @rx.event
+    def start_edit_column(self, raw_column: str):
+        """Open the inline editor for one row of the mapping table."""
+        self.editing_column = raw_column
+        current = self.column_overrides.get(raw_column, "")
+        self.edit_draft_field = current if current else LEAVE_UNMAPPED
+
+    @rx.event
+    def cancel_edit_column(self):
+        self.editing_column = ""
+        self.edit_draft_field = ""
+
+    @rx.event
+    def set_edit_draft_field(self, v: str):
+        self.edit_draft_field = v
+
+    @rx.event
+    def save_edit_column(self):
+        """Commit the row edit and close the inline editor."""
+        if not self.editing_column:
+            self.editing_column = ""
+            return
+        self.set_column_mapping(self.editing_column, self.edit_draft_field)
+        self.editing_column = ""
+        self.edit_draft_field = ""
 
     def _recompute_field_overrides(self) -> None:
         """Invert column→field into the service's field→column shape, and
@@ -872,7 +1091,7 @@ class IngestionAiState(SharedUploadState):
         self.allow_empty_ack = v
 
     @rx.event
-    def confirm_mapping(self):
+    async def confirm_mapping(self):
         self.error = ""
         self.mapping_error = ""
         self._recompute_field_overrides()
@@ -887,6 +1106,9 @@ class IngestionAiState(SharedUploadState):
             self.confirm_open = False
             return
         override_map = {k: (None if v == "" else v) for k, v in self.field_overrides.items()}
+        self.confirm_open = False
+        self.busy_label = "Confirming the mapping and filing the source…"
+        yield
         try:
             ingestion_ai.confirm_mapping(
                 self.selected_upload_id,
@@ -896,13 +1118,17 @@ class IngestionAiState(SharedUploadState):
                 client_ref=self._client_ref(),
                 allow_empty=self.allow_empty_ack,
             )
-            self.flash = "Mapping confirmed — hard gate cleared, ready for reconciliation."
+            self.flash = (
+                "Mapping confirmed — the file is filed to the client's data folder and "
+                "can now be picked for reconciliation."
+            )
             self.selected_upload_id = 0
-            self.confirm_open = False
         except ingestion_ai.IngestionAIError as exc:
             self.error = str(exc)
-            self.confirm_open = False
+        finally:
+            self.busy_label = ""
         self._load_all()
+        yield
 
     # ------------------------------------------------------------------
     # Row selection + bulk confirm

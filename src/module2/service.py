@@ -361,6 +361,13 @@ def generate_exceptions_for_run(
 
         materiality = materiality_threshold_for(sub_type, client_id=client_id, db_path=db_path)
 
+        # Reviewer corrections made in the Review screen are applied on top of
+        # the engine's records, so an edit reaches the exceptions and the
+        # Action Center. Keyed by fingerprint (carried forward across runs).
+        from src import queries as _queries
+
+        override_map = _queries.get_field_overrides(_client, period, recon_type, db_path=db_path)
+
         created = 0
         ims_count = 0
         chain_count = 0
@@ -370,6 +377,13 @@ def generate_exceptions_for_run(
                 continue
             books = _load_record(r.get("books_record"))
             portal = _load_record(r.get("portal_record"))
+            by_side = override_map.get(r.get("fingerprint"))
+            if by_side:
+                for side, field_map in by_side.items():
+                    target = books if side == "books" else portal
+                    if isinstance(target, dict):
+                        for field, meta in field_map.items():
+                            target[field] = meta.get("value")
             value = _item_value(books, recon_type) or _item_value(portal, recon_type)
             above = value >= materiality if materiality else False
 

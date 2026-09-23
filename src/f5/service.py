@@ -336,8 +336,7 @@ def record_sync_health(
     """Record a REAL sync-health entry for the manual-upload path (source
     in _MANUAL_UPLOAD_SOURCES). For a genuinely API-fed source this would
     be dormant until C2 exists — this build only ever calls it from the
-    manual-upload flow (see src.ui.run_tab retrofit), so it's always real
-    data, never fabricated.
+    manual-upload flow, so it's always real data, never fabricated.
 
     Also checks for PERSISTENT_FAILURE_THRESHOLD consecutive
     attempted_failed entries and escalates directly to Partner when hit
