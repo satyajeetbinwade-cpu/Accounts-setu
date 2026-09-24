@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS ingestion_results (
     row_count_out       INTEGER NOT NULL DEFAULT 0,
     model_used          TEXT,
     llm_cached          INTEGER NOT NULL DEFAULT 0,
+    -- §8 guardrail outcomes for this file, as JSON [{check,result,detail,
+    -- affected_rows}]. Persisted so the confirm gate and the review screen
+    -- read the SAME verdict the pipeline enforced.
+    validation_json     TEXT    NOT NULL DEFAULT '[]',
+    -- Metadata captured from the rows above the header (entity, report
+    -- title, period, filter text, date-format evidence).
+    metadata_json       TEXT    NOT NULL DEFAULT '{}',
+    -- The head x rate matrix + per-column dispositions, for the UI cards.
+    rate_matrix_json    TEXT    NOT NULL DEFAULT '[]',
+    dispositions_json   TEXT    NOT NULL DEFAULT '[]',
+    -- 'deterministic' | 'ai' | 'cache' — how this result was produced.
+    ingestion_path      TEXT    NOT NULL DEFAULT '',
     created_at          TEXT    NOT NULL,
     created_by          TEXT    NOT NULL
 );
@@ -166,3 +178,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE ingestion_results ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'")
     if existing and "message" not in existing:
         conn.execute("ALTER TABLE ingestion_results ADD COLUMN message TEXT")
+    # §8 / §5 / §7 additions — additive, so pre-existing DBs gain the columns
+    # without a rebuild (CREATE TABLE IF NOT EXISTS will not add them).
+    for column, ddl in (
+        ("validation_json", "ALTER TABLE ingestion_results ADD COLUMN validation_json TEXT NOT NULL DEFAULT '[]'"),
+        ("metadata_json", "ALTER TABLE ingestion_results ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"),
+        ("rate_matrix_json", "ALTER TABLE ingestion_results ADD COLUMN rate_matrix_json TEXT NOT NULL DEFAULT '[]'"),
+        ("dispositions_json", "ALTER TABLE ingestion_results ADD COLUMN dispositions_json TEXT NOT NULL DEFAULT '[]'"),
+        ("ingestion_path", "ALTER TABLE ingestion_results ADD COLUMN ingestion_path TEXT NOT NULL DEFAULT ''"),
+    ):
+        if existing and column not in existing:
+            conn.execute(ddl)

@@ -361,6 +361,24 @@ class IngestionResult:
     # separate from `warnings` so "a mapping was reused from cache" doesn't
     # make an otherwise-perfect file look partial.
     notes: list[str] = field(default_factory=list)
+    # §8 guardrail outcomes for this file, when a deterministic path ran.
+    # Shape: [{check, result, detail, affected_rows}]. `result` is
+    # 'pass' | 'row_flag' | 'hard_stop'. Silence is never a pass signal —
+    # the UI renders every check, passing ones collapsed.
+    validation: list[dict[str, Any]] = field(default_factory=list)
+    # Metadata captured from the rows ABOVE the header (entity, report title,
+    # period, filter text) — lets a wrong-client / wrong-period upload be
+    # surfaced instead of silently accepted (§5 Part 3.1).
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # The head x rate matrix as rows, for the Tax-columns card (§7 item 4).
+    rate_bucket_matrix: list[dict[str, Any]] = field(default_factory=list)
+    # Every source column's disposition (§5 Part 1.2).
+    column_dispositions: list[dict[str, Any]] = field(default_factory=list)
+    # Which path produced this result: 'deterministic' (F6 parser, zero AI),
+    # 'ai' (model mapping), or 'cache' (a previously stored shape).
+    ingestion_path: str = ""
+    # True when a §8 hard-stop check failed — the run must not proceed.
+    hard_stopped: bool = False
 
     @property
     def is_usable(self) -> bool:
@@ -1255,6 +1273,15 @@ def apply_mapping(
         else:
             out[m.canonical_field] = None
 
+    # The mapping may cover FEWER fields than the slot's canonical set (a
+    # books register legitimately maps GST fields only, while the 'tally'
+    # slot's canonical set is the GST+TDS union). Ensure every canonical
+    # field exists as a column so the coercion passes below can never raise
+    # a KeyError on an unmapped union field.
+    for f in canonical_fields:
+        if f not in out.columns:
+            out[f] = None
+
     # Bookkeeping columns the engine expects.
     out["original_row"] = raw_df.apply(
         lambda row: json.dumps({str(k): (None if pd.isna(v) else str(v)) for k, v in row.items()}),
@@ -1390,6 +1417,122 @@ def set_preselect_threshold(value: float, *, actor: str, db_path=None) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Books-side slots that a rate-bucketed register can arrive in. These are the
+# source types whose files may split each tax head across rate buckets.
+_BOOKS_SOURCE_TYPES = {"tally", "tally_purchase_register"}
+
+# §5 Part 2.2 requiredness tier for the Purchase Register slot. The
+# deterministic path is authoritative for a books register, so its required
+# set (which DOES include the tax heads) is used instead of the generic
+# GST set (which omits them — see RC3/D13).
+from src.f6.books_register import BOOKS_REQUIRED_FIELDS as REQUIRED_BOOKS_FIELDS  # noqa: E402
+
+
+def _books_register_result(
+    path: Any, source_type: str, filename: str, client: str, period: Optional[str],
+    *, recon_type: Optional[str], signature: str, client_id: Optional[int],
+    actor: str, db_path=None,
+) -> Optional[IngestionResult]:
+    """Try the deterministic rate-bucket path for a books register.
+
+    Returns an IngestionResult (with §8 validation, metadata and the
+    rate-bucket matrix attached) or None when the file is not a
+    rate-bucketed register — in which case the caller falls through to the
+    generic model path.
+    """
+    try:
+        from src.f6.books_register import parse_books_register
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        parsed = parse_books_register(str(path), source_type, filename)
+    except Exception:  # noqa: BLE001
+        return None
+    if parsed is None:
+        return None
+
+    required = required_fields_for(source_type, recon_type) or list(REQUIRED_BOOKS_FIELDS)
+    outcome = parsed.run_validation(period=period, required_fields=required)
+    validation = outcome.to_json()
+    hard_stopped = outcome.hard_stopped
+
+    # Rule-sourced mappings: confidence None = RULE, never an AI percentage.
+    mapped_fields = {
+        r["canonical_field"]: r for r in parsed.rules
+    }
+    from src.ingestion import GST_CANONICAL_FIELDS
+
+    structural = {"source_type", "source_file", "original_row", "total_tax"}
+    mappings: list[FieldMapping] = []
+    for f in [x for x in GST_CANONICAL_FIELDS if x not in structural]:
+        rule = mapped_fields.get(f)
+        if rule is not None:
+            cols = rule.get("source_columns") or []
+            if rule["kind"] == "aggregate":
+                detail = f"Summed from {len(cols)} rate-bucket column(s): " + ", ".join(cols) + "."
+                if rule.get("excluded_mirrors"):
+                    detail += (
+                        " Excluded as mirrors (same base restated): "
+                        + ", ".join(rule["excluded_mirrors"]) + "."
+                    )
+            else:
+                detail = f"Mapped from {cols[0]!r}." if cols else "Mapped."
+            mappings.append(FieldMapping(
+                canonical_field=f, source_column=" + ".join(cols) if cols else None,
+                confidence=None, reason=detail, required=f in required,
+            ))
+        else:
+            reason = (
+                "Derived from the tax heads — not mapped from a column."
+                if f == "total_tax" else
+                "Not present in this file."
+            )
+            mappings.append(FieldMapping(
+                canonical_field=f, source_column=None, confidence=None,
+                reason=reason, required=f in required,
+            ))
+
+    unmapped_required = [
+        f for f in required if not any(m.canonical_field == f and m.mapped for m in mappings)
+    ]
+
+    warnings = list(parsed.warnings)
+    for c in outcome.results:
+        if c.result == "row_flag":
+            warnings.append(c.detail)
+    if hard_stopped:
+        for c in outcome.results:
+            if c.result == "hard_stop":
+                warnings.append(f"BLOCKED — {c.detail}")
+
+    status = STATUS_BLOCKED if hard_stopped else (
+        STATUS_PARTIAL if (unmapped_required or warnings) else STATUS_OK
+    )
+
+    result = IngestionResult(
+        source_type=source_type, filename=filename, client=client, period=period,
+        status=status, canonical_df=parsed.frame, field_mappings=mappings,
+        unmapped_required_fields=unmapped_required,
+        row_count_in=parsed.row_count_read, row_count_out=len(parsed.frame),
+        warnings=warnings, headers=[], header_row=parsed.metadata.header_row,
+        sheet_name=None, sheet_ambiguous=False, classification=None,
+        model_used=None, llm_cached=False, header_signature=signature,
+        notes=[
+            "Parsed with the deterministic rate-bucket engine (F6 §5.4) — "
+            "no model call was needed, and every figure was verified against the file."
+        ],
+        validation=validation,
+        metadata=parsed.metadata.to_dict(),
+        rate_bucket_matrix=parsed.matrix.to_report(),
+        column_dispositions=parsed.column_dispositions,
+        ingestion_path="deterministic",
+        hard_stopped=hard_stopped,
+    )
+    result.caveats = result.build_caveats(recon_type)
+    return result
+
+
 def normalize_source_file(
     file: Any,
     source_type: str,
@@ -1516,6 +1659,25 @@ def normalize_source_file(
                 result.caveats = result.build_caveats(recon_type)
                 _persist_result(result, client_id=client_id, actor=actor, db_path=db_path)
                 return result
+
+        # --- Deterministic books-register fast path (rate-bucketed) ---
+        # A books-side Purchase Register splits each tax head across rate
+        # buckets, so a canonical field is the SUM of N columns and the
+        # CGST/SGST taxable columns restate the same base. The generic
+        # mapper cannot express either (RC1/D01, RC2/D02), so use the
+        # deterministic rate-bucket engine (F6 §5.4) instead of asking a
+        # model to guess. Runs BEFORE the shape cache so a stale cached
+        # model mapping can never shadow it. Falls through when the file
+        # has no rate-bucketed columns at all.
+        if source_type in _BOOKS_SOURCE_TYPES:
+            books = _books_register_result(
+                path, source_type, filename, client, period,
+                recon_type=recon_type, signature=signature,
+                client_id=client_id, actor=actor, db_path=db_path,
+            )
+            if books is not None:
+                _persist_result(books, client_id=client_id, actor=actor, db_path=db_path)
+                return books
 
         conn = idb.connect(db_path)
         cached_shape = None
@@ -1778,6 +1940,9 @@ def _persist_result(
                 row_count_in=result.row_count_in, row_count_out=result.row_count_out,
                 model_used=result.model_used, llm_cached=result.llm_cached, actor=actor,
                 notes=result.notes, message=result.message,
+                validation=result.validation, metadata=result.metadata,
+                rate_matrix=result.rate_bucket_matrix, dispositions=result.column_dispositions,
+                ingestion_path=result.ingestion_path,
             )
         finally:
             conn.close()

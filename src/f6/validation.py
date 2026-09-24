@@ -27,6 +27,13 @@ _GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z][A-Z][0-9A-Z]$")
 _TAX_ARITHMETIC_ESCALATION_RATE = 0.20
 CONTROL_TOTAL_TOLERANCE = 1.0
 TAX_ARITHMETIC_TOLERANCE = 1.0
+# CGST/SGST mirror assertion — the two sides restate the same amount, so
+# only a rounding-level difference is acceptable (§5.4).
+MIRROR_TOLERANCE = 0.01
+# Implied rate = Tax / Taxable must match the header's rate within ₹1
+# (§5.4) — ₹1.00 per §8, NOT ±0.50: the specimen carries rounding
+# residuals of exactly ±0.50 that must not misfire.
+IMPLIED_RATE_TOLERANCE = 1.0
 
 
 @dataclass
@@ -171,6 +178,113 @@ def check_tax_arithmetic(rows: list[dict[str, Any]]) -> CheckResult:
     )
 
 
+def check_mirror_columns(
+    rows: list[dict[str, Any]], *, pairs: Optional[list[tuple[str, str]]] = None,
+) -> CheckResult:
+    """§5.4 mirror assertion — CGST Txbl = SGST Txbl and CGST Tax = SGST Tax.
+
+    A Purchase Register restates the SAME taxable base and the SAME tax
+    under both the CGST and SGST prefixes (an intra-state supply is split
+    equally). The de-duplication rule (only one side's Txbl buckets feed
+    `taxable_value`) is only SAFE while the two sides genuinely mirror each
+    other. If they diverge, the de-duplication silently drops real value, so
+    the divergence must be caught — row-flagged, escalating to a run-level
+    hard stop above 20% (same escalation shape as tax_arithmetic, for the
+    same reason: bulk-plausible wrong numbers).
+
+    `pairs` is a list of (left_field, right_field) canonical-field pairs to
+    compare; it is derived from the confirmed rate-bucket matrix by the
+    caller, so this check never hard-codes slabs.
+    """
+    if not pairs:
+        return CheckResult("mirror_columns", "pass", "No mirror column pairs to compare — check skipped.", [])
+    failed: list[int] = []
+    for idx, row in enumerate(rows):
+        for left, right in pairs:
+            lv, rv = row.get(left), row.get(right)
+            if lv in (None, "") and rv in (None, ""):
+                continue
+            try:
+                if abs(float(lv or 0) - float(rv or 0)) > MIRROR_TOLERANCE:
+                    failed.append(idx)
+                    break
+            except (TypeError, ValueError):
+                failed.append(idx)
+                break
+    if not failed:
+        return CheckResult(
+            "mirror_columns", "pass",
+            f"CGST and SGST mirror each other on every row ({len(pairs)} pair(s) checked).", [],
+        )
+    rate = len(failed) / len(rows) if rows else 0.0
+    if rate > _TAX_ARITHMETIC_ESCALATION_RATE:
+        return CheckResult(
+            "mirror_columns", "hard_stop",
+            f"{len(failed)}/{len(rows)} rows ({rate:.0%}) break the CGST=SGST mirror — exceeds the "
+            f"{_TAX_ARITHMETIC_ESCALATION_RATE:.0%} escalation threshold. The taxable-base de-duplication "
+            "would silently drop real value. Run-level hard stop.",
+            failed,
+        )
+    return CheckResult(
+        "mirror_columns", "row_flag",
+        f"{len(failed)}/{len(rows)} rows ({rate:.0%}) break the CGST=SGST mirror — flagged, run continues.",
+        failed,
+    )
+
+
+def check_implied_rate(
+    rows: list[dict[str, Any]], *, buckets: Optional[list[dict[str, Any]]] = None,
+) -> CheckResult:
+    """§5.4 implied-rate check — per row and bucket, |Tax − (rate/100) × Taxable| ≤ ₹1.
+
+    This proves each *Tax* column is paired with the RIGHT *Txbl* column and
+    that the rate printed in the header is real. It is the deterministic
+    catch for a Tax/Txbl column swap (a swap leaves both columns populated
+    and the totals plausible, so no other check would see it).
+
+    `buckets` is derived from the confirmed rate-bucket matrix by the caller:
+    each entry {"rate": float, "taxable": <source column>, "tax": <source column>}.
+    `rate` is the header PERCENTAGE (5, 18, 2.5, 9 …), so it is divided by
+    100 before multiplying.
+    """
+    if not buckets:
+        return CheckResult("implied_rate", "pass", "No rate buckets to check — check skipped.", [])
+    failed: list[int] = []
+    for idx, row in enumerate(rows):
+        for b in buckets:
+            try:
+                taxable = float(row.get(b["taxable"]) or 0)
+                tax = float(row.get(b["tax"]) or 0)
+                rate = float(b["rate"]) / 100.0
+            except (TypeError, ValueError, KeyError):
+                continue
+            if taxable == 0 and tax == 0:
+                continue
+            if abs(tax - rate * taxable) > IMPLIED_RATE_TOLERANCE:
+                failed.append(idx)
+                break
+    if not failed:
+        return CheckResult(
+            "implied_rate", "pass",
+            f"Tax equals rate × taxable within ±{IMPLIED_RATE_TOLERANCE:.2f} on every populated bucket "
+            f"({len(buckets)} bucket(s) checked).", [],
+        )
+    rate = len(failed) / len(rows) if rows else 0.0
+    if rate > _TAX_ARITHMETIC_ESCALATION_RATE:
+        return CheckResult(
+            "implied_rate", "hard_stop",
+            f"{len(failed)}/{len(rows)} rows ({rate:.0%}) fail the implied-rate check — exceeds the "
+            f"{_TAX_ARITHMETIC_ESCALATION_RATE:.0%} escalation threshold. A systematic failure usually means "
+            "a Tax column is paired with the wrong Txbl column (a swap). Run-level hard stop.",
+            failed,
+        )
+    return CheckResult(
+        "implied_rate", "row_flag",
+        f"{len(failed)}/{len(rows)} rows ({rate:.0%}) fail the implied-rate check — flagged, run continues.",
+        failed,
+    )
+
+
 def check_duplicate_detection(rows: list[dict[str, Any]], *, key_fields: tuple[str, ...] = ("gstin", "invoice_number", "invoice_date")) -> CheckResult:
     seen: dict[tuple, list[int]] = {}
     for idx, row in enumerate(rows):
@@ -207,6 +321,8 @@ def run_all_checks(
     date_field: Optional[str] = None, period: Optional[str] = None,
     file_hash: Optional[str] = None, prior_runs: Optional[list[dict[str, Any]]] = None,
     skip_re_upload_guard: bool = False,
+    mirror_pairs: Optional[list[tuple[str, str]]] = None,
+    rate_buckets: Optional[list[dict[str, Any]]] = None,
 ) -> ValidationOutcome:
     """Run every §8 guardrail and collect results. Hard-stop checks are
     still run in full (not short-circuited) so a Path B reviewer sees every
@@ -223,6 +339,12 @@ def run_all_checks(
     if date_field:
         outcome.results.append(check_date_sanity(rows, date_field=date_field, period=period))
     outcome.results.append(check_tax_arithmetic(rows))
+    # §5.4's two named protections — run only when the caller derived them
+    # from a confirmed rate-bucket matrix (so no slab is hard-coded here).
+    if mirror_pairs:
+        outcome.results.append(check_mirror_columns(rows, pairs=mirror_pairs))
+    if rate_buckets:
+        outcome.results.append(check_implied_rate(rows, buckets=rate_buckets))
     outcome.results.append(check_duplicate_detection(rows))
 
     if not skip_re_upload_guard and file_hash is not None:

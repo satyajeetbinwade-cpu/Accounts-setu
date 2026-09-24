@@ -12,7 +12,9 @@ import reflex as rx
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.client_state import BRANCH_STATUSES, ClientState
+from setu.state.documents_state import DocumentsState
 from setu.views import shell
+from setu.views.documents_page import embedded_vault
 
 _TABS = ["Branch details", "Contacts", "Chart of Accounts", "Historical Snapshot", "Documents"]
 
@@ -774,24 +776,12 @@ def _historical_tab() -> rx.Component:
 
 
 # ---------------------------------------------------------------------------
-# Documents tab (F3 retrofit placeholder until F3 is ported)
+# Documents tab — the scoped F3 document vault, embedded for this client.
 # ---------------------------------------------------------------------------
 
 
 def _documents_tab() -> rx.Component:
-    return c.card(
-        rx.vstack(
-            rx.hstack(c.placeholder_badge("Module F3"), rx.spacer(), width="100%"),
-            rx.text(
-                "The scoped document vault renders here once the Document & Data Repository is migrated.",
-                style=t.TEXT["body"],
-            ),
-            spacing="3",
-            align="start",
-            width="100%",
-        ),
-        width="100%",
-    )
+    return embedded_vault()
 
 
 # ---------------------------------------------------------------------------

@@ -119,7 +119,11 @@ def _upload_row(u) -> rx.Component:
             min_width="0",
         ),
         rx.text(u.client_label, style=t.TEXT["body"], flex="2"),
-        rx.text(rx.cond(u.period != "", u.period, "—"), style=t.TEXT["body"], flex="1"),
+        rx.cond(
+            u.is_unfiled,
+            c.pill("Unfiled", variant="danger"),
+            rx.text(rx.cond(u.period != "", u.period, "—"), style=t.TEXT["body"]),
+        ),
         rx.text(
             rx.cond(
                 u.counts_known,
@@ -154,6 +158,21 @@ def _upload_row(u) -> rx.Component:
             color=t.Color.TEXT_SECONDARY.value,
             border=f"1px solid {t.Color.BORDER.value}",
             border_radius="8px",
+        ),
+        rx.cond(
+            u.is_unfiled,
+            rx.button(
+                rx.icon("folder-input", size=14),
+                "File to period",
+                on_click=IngestionAiState.open_file_period(u.upload_id, u.filename),
+                size="1",
+                variant="soft",
+                background="transparent",
+                color=t.Color.DANGER.value,
+                border=f"1px solid {t.Color.DANGER.value}",
+                border_radius="8px",
+            ),
+            rx.fragment(),
         ),
         width="100%",
         align="center",
@@ -227,22 +246,43 @@ def _upload_zone() -> rx.Component:
             rx.hstack(
                 rx.vstack(
                     rx.text("Source type", style=t.TEXT["label"]),
-                    rx.select(
-                        IngestionAiState.source_type_options,
+                    rx.select.root(
+                        rx.select.trigger(width="240px", placeholder="Choose a source type"),
+                        rx.select.content(
+                            rx.select.group(
+                                rx.foreach(
+                                    IngestionAiState.source_type_choices,
+                                    lambda option: rx.select.item(option.label, value=option.key),
+                                ),
+                            ),
+                        ),
                         value=IngestionAiState.source_type,
                         on_change=IngestionAiState.set_source_type,
-                        width="240px",
                     ),
+                    rx.text(IngestionAiState.source_type_hint, style=t.TEXT["micro"]),
                     spacing="1",
                     align="start",
                 ),
                 rx.vstack(
-                    rx.text("Period (optional)", style=t.TEXT["label"]),
+                    rx.text("Period", style=t.TEXT["label"]),
                     rx.input(
                         value=IngestionAiState.period,
                         on_change=IngestionAiState.set_period,
-                        placeholder="e.g. 2026-08",
+                        placeholder="YYYY-MM, e.g. 2026-08",
                         width="180px",
+                    ),
+                    rx.cond(
+                        IngestionAiState.period_inferred_source != "",
+                        rx.text(
+                            "Defaulted from " + IngestionAiState.period_inferred_source
+                            + " — check it before uploading.",
+                            style=t.TEXT["micro"],
+                        ),
+                        rx.text(
+                            "Required — the file is filed under this period and must match "
+                            "the period you reconcile against.",
+                            style=t.TEXT["micro"],
+                        ),
                     ),
                     spacing="1",
                     align="start",
@@ -426,6 +466,79 @@ def _bulk_bar() -> rx.Component:
     )
 
 
+def _file_period_dialog() -> rx.Component:
+    """Re-file an upload that was filed without a period.
+
+    Such a file sits in `data/<client>/-/<source_type>/`, which no period
+    picker can select — so it exists but can never be reconciled. This
+    dialog moves it to a real period.
+    """
+    return rx.dialog.root(
+        rx.dialog.content(
+            rx.vstack(
+                rx.text("File this upload to a period", style=t.TEXT["card_title"]),
+                rx.text(IngestionAiState.file_period_filename, style=t.TEXT["body"], font_weight="600"),
+                c.warning_banner(
+                    "This file was filed without a period, so it cannot be picked for "
+                    "reconciliation. Filing it to a period moves it into the folder the "
+                    "engine reads."
+                ),
+                rx.cond(
+                    IngestionAiState.file_period_source != "",
+                    rx.text(
+                        "Suggested from " + IngestionAiState.file_period_source
+                        + " — check it before filing.",
+                        style=t.TEXT["micro"],
+                    ),
+                    rx.text(
+                        "No period could be derived from this file — enter the period it belongs to.",
+                        style=t.TEXT["micro"],
+                    ),
+                ),
+                rx.vstack(
+                    rx.text("Period", style=t.TEXT["label"]),
+                    rx.input(
+                        value=IngestionAiState.file_period_value,
+                        on_change=IngestionAiState.set_file_period_value,
+                        placeholder="YYYY-MM, e.g. 2026-08",
+                        width="200px",
+                    ),
+                    spacing="1",
+                    align="start",
+                ),
+                rx.cond(
+                    IngestionAiState.file_period_error != "",
+                    c.inline_reason(IngestionAiState.file_period_error),
+                    rx.fragment(),
+                ),
+                rx.hstack(
+                    rx.dialog.close(
+                        rx.button(
+                            "Cancel",
+                            variant="soft",
+                            background="transparent",
+                            color=t.Color.TEXT_SECONDARY.value,
+                            border=f"1px solid {t.Color.BORDER.value}",
+                            border_radius="9px",
+                        ),
+                    ),
+                    rx.button(
+                        "File to period",
+                        on_click=IngestionAiState.confirm_file_period,
+                        background=t.Color.ACCENT.value,
+                        color="#FFFFFF",
+                    ),
+                    spacing="2",
+                ),
+                spacing="3",
+                align="start",
+            ),
+        ),
+        open=IngestionAiState.file_period_open,
+        on_open_change=IngestionAiState.close_file_period,
+    )
+
+
 def _bulk_confirm_dialog() -> rx.Component:
     return rx.dialog.root(
         rx.dialog.content(
@@ -531,6 +644,7 @@ def _upload_and_list() -> rx.Component:
             width="100%",
         ),
         _bulk_confirm_dialog(),
+        _file_period_dialog(),
         _rerun_dialog(),
         spacing="4",
         width="100%",
@@ -541,18 +655,6 @@ def _upload_and_list() -> rx.Component:
 # ---------------------------------------------------------------------------
 # Mapping review — the real, editable review table
 # ---------------------------------------------------------------------------
-
-
-def _confidence_cell(row) -> rx.Component:
-    return rx.match(
-        row.status,
-        ("auto", c.confidence_badge("ai", pct=row.confidence)),
-        ("flagged", c.confidence_badge("ai", pct=row.confidence, label=f"AI — {row.confidence}% (review)")),
-        ("unavailable", c.pill("Unmapped — needs input", variant="danger")),
-        ("unavailable_review", c.pill("Below threshold — needs input", variant="danger")),
-        ("unmapped", c.pill("Not mapped to any field", variant="placeholder")),
-        c.pill("Needs input", variant="placeholder"),
-    )
 
 
 def _confidence_cell(row) -> rx.Component:
@@ -682,9 +784,16 @@ def _raw_preview() -> rx.Component:
             rx.hstack(
                 rx.text("Source file", style=t.TEXT["card_title"]),
                 rx.spacer(),
+                # §5.3 — the instruction library is shown ONLY when a model
+                # actually ran. On a deterministic parse or a cache hit there
+                # was no model call, so a "C5 context" badge would be a lie.
                 rx.cond(
-                    IngestionAiState.review_c5_used,
-                    c.accent_pill("C5 context"),
+                    IngestionAiState.review_provenance_path == "ai",
+                    rx.cond(
+                        IngestionAiState.review_c5_used,
+                        c.accent_pill("Instruction library applied"),
+                        rx.fragment(),
+                    ),
                     rx.fragment(),
                 ),
                 width="100%",
@@ -1031,6 +1140,637 @@ def _confirm_dialog() -> rx.Component:
     )
 
 
+def _identification_headline() -> rx.Component:
+    """§7 item 1 — what this file IS: report, entity, period, counts, total,
+    and its provenance (recognised / deterministic / AI proposal)."""
+    return c.card(
+        rx.vstack(
+            rx.hstack(
+                rx.vstack(
+                    rx.hstack(
+                        rx.text(IngestionAiState.review_title, style=t.TEXT["card_title"]),
+                        rx.cond(
+                            IngestionAiState.review_provenance_path == "deterministic",
+                            c.confidence_badge("rule", label=IngestionAiState.review_provenance_label),
+                            rx.cond(
+                                IngestionAiState.review_status == STATUS_CONFIRMED,
+                                c.confidence_badge("rule", label="Confirmed"),
+                                c.pill(IngestionAiState.review_provenance_label, variant="ai"),
+                            ),
+                        ),
+                        spacing="3",
+                        align="center",
+                    ),
+                    rx.cond(
+                        IngestionAiState.review_entity != "",
+                        rx.text(IngestionAiState.review_entity, style=t.TEXT["body"]),
+                        rx.fragment(),
+                    ),
+                    rx.text(
+                        IngestionAiState.review_period_label
+                        + rx.cond(
+                            IngestionAiState.review_invoice_count > 0,
+                            " · " + IngestionAiState.review_invoice_count.to_string() + " invoices",
+                            "",
+                        )
+                        + rx.cond(
+                            IngestionAiState.review_supplier_count > 0,
+                            " · " + IngestionAiState.review_supplier_count.to_string() + " suppliers",
+                            "",
+                        )
+                        + rx.cond(
+                            IngestionAiState.review_total_label != "",
+                            " · " + IngestionAiState.review_total_label,
+                            "",
+                        ),
+                        style=t.TEXT["body"],
+                        color=t.Color.TEXT_SECONDARY.value,
+                    ),
+                    spacing="1",
+                    align="start",
+                ),
+                rx.spacer(),
+                rx.vstack(
+                    rx.text(
+                        "Filed under " + IngestionAiState.review_client_label
+                        + rx.cond(
+                            IngestionAiState.review_period != "",
+                            " · " + IngestionAiState.review_period,
+                            "",
+                        ),
+                        style=t.TEXT["micro"],
+                        color=t.Color.TEXT_SECONDARY.value,
+                    ),
+                    rx.text(IngestionAiState.review_filename, style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
+                    spacing="0",
+                    align="end",
+                ),
+                width="100%",
+                align="start",
+            ),
+            rx.text(IngestionAiState.review_provenance_detail, style=t.TEXT["micro"]),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _summary_line() -> rx.Component:
+    """§7 item 2 — the headline summary, composed from live state."""
+    return c.card(
+        rx.hstack(
+            rx.hstack(
+                rx.icon("circle_check", size=16, color=t.Color.RULE.value),
+                rx.text(
+                    IngestionAiState.summary_verified.to_string() + " verified",
+                    style=t.TEXT["body"], font_weight="600",
+                ),
+                spacing="2", align="center",
+            ),
+            rx.hstack(
+                rx.icon("circle_alert", size=16, color=t.Color.AI.value),
+                rx.text(
+                    IngestionAiState.summary_review.to_string() + " need your review",
+                    style=t.TEXT["body"], font_weight="600",
+                ),
+                spacing="2", align="center",
+            ),
+            rx.hstack(
+                rx.icon("circle_slash", size=16, color=t.Color.NEUTRAL.value),
+                rx.text(
+                    IngestionAiState.summary_absent.to_string() + " not in this file",
+                    style=t.TEXT["body"], font_weight="600",
+                ),
+                spacing="2", align="center",
+            ),
+            rx.spacer(),
+            rx.text(IngestionAiState.gate_summary, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
+            spacing="5",
+            align="center",
+            width="100%",
+            wrap="wrap",
+        ),
+        width="100%",
+    )
+
+
+def _check_row(r) -> rx.Component:
+    return rx.hstack(
+        rx.icon(
+            rx.cond(r.failed, "triangle_alert", "circle_check"),
+            size=15,
+            color=rx.cond(r.failed, t.Color.DANGER.value, t.Color.RULE.value),
+        ),
+        rx.text(r.label, style=t.TEXT["body"], font_weight="600", min_width="170px"),
+        rx.text(r.detail, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value, flex="1"),
+        width="100%",
+        align="start",
+        spacing="3",
+        padding="6px 0",
+    )
+
+
+def _what_we_checked() -> rx.Component:
+    """§7 item 3 — every §8 check. Failures first; passing checks collapsed.
+    Silence is never a pass signal, so the passing list is always present."""
+    return c.card(
+        rx.vstack(
+            rx.hstack(
+                rx.text("What we checked", style=t.TEXT["card_title"]),
+                rx.spacer(),
+                rx.cond(
+                    IngestionAiState.checks_failed.length() > 0,
+                    c.pill(
+                        IngestionAiState.checks_failed.length().to_string() + " flagged",
+                        variant="danger",
+                    ),
+                    c.confidence_badge("rule", label="All checks passed"),
+                ),
+                width="100%",
+                align="center",
+            ),
+            rx.cond(
+                IngestionAiState.checks.length() == 0,
+                rx.text(
+                    "No independent checks ran for this upload — nothing has been verified.",
+                    style=t.TEXT["micro"],
+                    color=t.Color.TEXT_SECONDARY.value,
+                ),
+                rx.vstack(
+                    rx.foreach(IngestionAiState.checks_failed, _check_row),
+                    rx.cond(
+                        IngestionAiState.checks_passed.length() > 0,
+                        rx.vstack(
+                            rx.button(
+                                rx.cond(
+                                    IngestionAiState.show_passed_checks,
+                                    "Hide passing checks (" + IngestionAiState.checks_passed.length().to_string() + ")",
+                                    "Show passing checks (" + IngestionAiState.checks_passed.length().to_string() + ")",
+                                ),
+                                on_click=IngestionAiState.toggle_passed_checks,
+                                size="1",
+                                variant="soft",
+                                background="transparent",
+                                color=t.Color.TEXT_SECONDARY.value,
+                                border=f"1px solid {t.Color.BORDER.value}",
+                                border_radius="8px",
+                            ),
+                            rx.cond(
+                                IngestionAiState.show_passed_checks,
+                                rx.vstack(
+                                    rx.foreach(IngestionAiState.checks_passed, _check_row),
+                                    spacing="0", width="100%",
+                                ),
+                                rx.fragment(),
+                            ),
+                            spacing="2", align="start", width="100%",
+                        ),
+                        rx.fragment(),
+                    ),
+                    spacing="1",
+                    width="100%",
+                ),
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _rate_row(r) -> rx.Component:
+    """One head x rate row. Laid out as fixed-width columns so the source
+    column names stay on one line — a wrapping column name is unreadable."""
+    return rx.hstack(
+        rx.text(r.head + " @ " + r.rate_label, style=t.TEXT["body"], font_weight="600", width="110px", flex_shrink="0"),
+        rx.text("Taxable", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value, width="60px", flex_shrink="0"),
+        rx.vstack(
+            rx.text(r.taxable_column, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value, no_of_lines=1),
+            rx.cond(
+                r.mirror_note != "",
+                rx.text(r.mirror_note, style=t.TEXT["micro"], color=t.Color.AI_ON.value, no_of_lines=1),
+                rx.fragment(),
+            ),
+            spacing="0", align="start", flex="1", min_width="0",
+        ),
+        rx.text("Tax", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value, width="36px", flex_shrink="0"),
+        rx.text(r.tax_column, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value, flex="1", min_width="0", no_of_lines=1),
+        rx.box(
+            rx.cond(
+                r.setu_field != "",
+                c.pill("→ " + r.setu_field.upper(), variant="accent"),
+                rx.fragment(),
+            ),
+            width="90px",
+            flex_shrink="0",
+        ),
+        width="100%",
+        align="center",
+        spacing="3",
+        padding="6px 0",
+        border_bottom=f"1px solid {t.Color.BORDER.value}",
+    )
+
+
+def _tax_columns_card() -> rx.Component:
+    """§7 item 4 — the head x rate matrix, so the aggregation is visible and
+    the mirror exclusion is explained rather than silent."""
+    return rx.cond(
+        IngestionAiState.rate_rows.length() > 0,
+        c.card(
+            rx.vstack(
+                rx.text("Tax columns — how the rate buckets add up", style=t.TEXT["card_title"]),
+                rx.text(IngestionAiState.rate_note, style=t.TEXT["micro"]),
+                rx.foreach(IngestionAiState.rate_rows, _rate_row),
+                spacing="3",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        rx.fragment(),
+    )
+
+
+def _evidence_row(f) -> rx.Component:
+    return rx.hstack(
+        rx.vstack(
+            rx.hstack(
+                rx.text(f.label, style=t.TEXT["body"], font_weight="600"),
+                rx.cond(
+                    f.tier == "required",
+                    c.pill("required", variant="danger"),
+                    rx.cond(
+                        f.tier == "recommended",
+                        c.pill("recommended", variant="ai"),
+                        c.pill("optional", variant="placeholder"),
+                    ),
+                ),
+                spacing="2",
+                align="center",
+            ),
+            rx.cond(
+                f.source_summary != "",
+                rx.text(f.source_summary, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
+                rx.fragment(),
+            ),
+            spacing="0",
+            align="start",
+            flex="1",
+            min_width="0",
+        ),
+        rx.box(
+            rx.match(
+                f.status,
+                ("verified", c.confidence_badge("rule", label="Verified")),
+                ("failed", c.pill("Blocked", variant="danger")),
+                ("missing", c.pill("Not in this file", variant="placeholder")),
+                c.confidence_badge("ai", label="Needs review"),
+            ),
+            flex_shrink="0",
+        ),
+        width="100%",
+        align="start",
+        spacing="3",
+        padding="6px 0",
+    )
+
+
+def _field_evidence_card() -> rx.Component:
+    """§7 item 6 — fields grouped Verified / Needs review / Not in this file,
+    with the EVIDENCE that justifies each verdict (never a bare percentage)."""
+    return c.card(
+        rx.vstack(
+            rx.text("Setu fields", style=t.TEXT["card_title"]),
+            rx.text(
+                "Every field Setu will read, with the evidence that verifies it. "
+                "Confidence alone never passes a field — the checks do.",
+                style=t.TEXT["micro"],
+            ),
+            rx.cond(
+                IngestionAiState.verified_fields.length() > 0,
+                rx.vstack(
+                    rx.text("Verified", style=t.TEXT["label"], color=t.Color.RULE_ON.value),
+                    rx.foreach(IngestionAiState.verified_fields, _evidence_row),
+                    spacing="0", width="100%",
+                ),
+                rx.fragment(),
+            ),
+            rx.cond(
+                IngestionAiState.review_fields.length() > 0,
+                rx.vstack(
+                    rx.text("Needs your review", style=t.TEXT["label"], color=t.Color.AI_ON.value),
+                    rx.foreach(IngestionAiState.review_fields, _evidence_row),
+                    spacing="0", width="100%",
+                ),
+                rx.fragment(),
+            ),
+            rx.cond(
+                IngestionAiState.absent_fields.length() > 0,
+                rx.vstack(
+                    rx.text("Not in this file", style=t.TEXT["label"], color=t.Color.TEXT_SECONDARY.value),
+                    rx.foreach(IngestionAiState.absent_fields, _evidence_row),
+                    spacing="0", width="100%",
+                ),
+                rx.fragment(),
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _normalised_preview() -> rx.Component:
+    """§7 item 5 — what SETU WILL READ, with a totals row set against the
+    file's own Total row. This is how a reviewer judges the mapping."""
+    return c.card(
+        rx.vstack(
+            rx.hstack(
+                rx.text("What Setu will read", style=t.TEXT["card_title"]),
+                rx.spacer(),
+                rx.cond(
+                    IngestionAiState.normalised_rows.length() > 0,
+                    rx.button(
+                        rx.cond(
+                            IngestionAiState.show_all_preview, "Show first 20", "Show all rows",
+                        ),
+                        on_click=IngestionAiState.toggle_all_preview,
+                        size="1",
+                        variant="soft",
+                        background="transparent",
+                        color=t.Color.TEXT_SECONDARY.value,
+                        border=f"1px solid {t.Color.BORDER.value}",
+                        border_radius="8px",
+                    ),
+                    rx.fragment(),
+                ),
+                width="100%",
+                align="center",
+            ),
+            rx.cond(
+                IngestionAiState.normalised_note != "",
+                rx.text(IngestionAiState.normalised_note, style=t.TEXT["micro"]),
+                rx.vstack(
+                    rx.text(
+                        "The normalised rows the pipeline produced. The totals row is set against "
+                        "the file's own Total row — if they disagree, the mapping is wrong.",
+                        style=t.TEXT["micro"],
+                    ),
+                    rx.box(
+                        rx.el.table(
+                            rx.el.thead(
+                                rx.el.tr(
+                                    rx.foreach(
+                                        IngestionAiState.normalised_headers,
+                                        lambda h: rx.el.th(
+                                            h,
+                                            style={
+                                                "text_align": "left",
+                                                "padding": "6px 10px",
+                                                "font_size": "11px",
+                                                "color": t.Color.TEXT_SECONDARY.value,
+                                                "border_bottom": f"1px solid {t.Color.BORDER.value}",
+                                                "white_space": "nowrap",
+                                            },
+                                        ),
+                                    ),
+                                ),
+                            ),
+                            rx.el.tbody(
+                                rx.foreach(
+                                    IngestionAiState.normalised_rows,
+                                    lambda row: rx.el.tr(
+                                        rx.foreach(
+                                            row,
+                                            lambda cell: rx.el.td(
+                                                cell,
+                                                style={
+                                                    "padding": "5px 10px",
+                                                    "font_size": "12px",
+                                                    "border_bottom": f"1px solid {t.Color.BORDER.value}",
+                                                    "white_space": "nowrap",
+                                                    "font_variant_numeric": "tabular-nums",
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                                rx.cond(
+                                    IngestionAiState.normalised_total_row.length() > 0,
+                                    rx.el.tr(
+                                        rx.foreach(
+                                            IngestionAiState.normalised_total_row,
+                                            lambda cell: rx.el.td(
+                                                cell,
+                                                style={
+                                                    "padding": "6px 10px",
+                                                    "font_size": "12px",
+                                                    "font_weight": "700",
+                                                    "border_top": f"2px solid {t.Color.BORDER.value}",
+                                                    "white_space": "nowrap",
+                                                    "font_variant_numeric": "tabular-nums",
+                                                },
+                                            ),
+                                        ),
+                                    ),
+                                    rx.fragment(),
+                                ),
+                            ),
+                            style={"border_collapse": "collapse", "width": "100%"},
+                        ),
+                        overflow_x="auto",
+                        width="100%",
+                    ),
+                    spacing="3",
+                    align="start",
+                    width="100%",
+                ),
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _ignored_columns_card() -> rx.Component:
+    """§5 Part 1.2 — every column's disposition, so nothing is an unexplained
+    "Not mapped"."""
+    return rx.cond(
+        IngestionAiState.ignored_columns.length() > 0,
+        c.card(
+            rx.vstack(
+                rx.text("Columns Setu set aside", style=t.TEXT["card_title"]),
+                rx.text(
+                    "These columns are not mapped to a Setu field, and here is why.",
+                    style=t.TEXT["micro"],
+                ),
+                rx.foreach(
+                    IngestionAiState.ignored_columns,
+                    lambda d: rx.hstack(
+                        rx.text(d.column, style=t.TEXT["body"], font_weight="600", min_width="170px"),
+                        rx.box(
+                            rx.match(
+                                d.disposition,
+                                ("validation-signal", c.pill("validation signal", variant="ai")),
+                                c.pill("ignored", variant="placeholder"),
+                            ),
+                            flex_shrink="0",
+                        ),
+                        rx.text(d.detail, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value, flex="1"),
+                        width="100%",
+                        align="center",
+                        spacing="3",
+                        padding="5px 0",
+                    ),
+                ),
+                spacing="2",
+                align="start",
+                width="100%",
+            ),
+            width="100%",
+        ),
+        rx.fragment(),
+    )
+
+
+def _sticky_action_bar() -> rx.Component:
+    """§7 item 8 — the action bar with a live summary and the Save-as-layout
+    choice, so the reviewer always knows what confirming will do."""
+    return c.card(
+        rx.vstack(
+            rx.cond(
+                IngestionAiState.gate_blocked,
+                c.inline_reason("Confirm is blocked — " + IngestionAiState.gate_reasons),
+                rx.fragment(),
+            ),
+            rx.cond(
+                IngestionAiState.mismatch_banner != "",
+                rx.vstack(
+                    c.warning_banner(IngestionAiState.mismatch_banner),
+                    rx.hstack(
+                        rx.checkbox(
+                            checked=IngestionAiState.mismatch_ack,
+                            on_change=IngestionAiState.set_mismatch_ack,
+                        ),
+                        rx.text(
+                            "I have checked this file belongs to this client and period",
+                            style=t.TEXT["label"],
+                        ),
+                        spacing="2",
+                        align="center",
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
+            rx.hstack(
+                rx.vstack(
+                    rx.text("Save this layout for future files", style=t.TEXT["label"]),
+                    rx.text(
+                        "Future files with this exact column layout will parse without AI and are "
+                        "still validated every time.",
+                        style=t.TEXT["micro"],
+                    ),
+                    spacing="0",
+                    align="start",
+                ),
+                rx.select(
+                    ["Do not save", "This client only", "Firm-wide"],
+                    value=rx.match(
+                        IngestionAiState.layout_scope,
+                        ("client", "This client only"),
+                        ("firmwide", "Firm-wide"),
+                        "Do not save",
+                    ),
+                    on_change=IngestionAiState.set_layout_scope_value,
+                    width="220px",
+                ),
+                spacing="4",
+                align="center",
+                width="100%",
+            ),
+            rx.hstack(
+                rx.button(
+                    "Confirm mapping",
+                    on_click=IngestionAiState.open_confirm,
+                    disabled=IngestionAiState.gate_blocked,
+                    background=t.Color.ACCENT.value,
+                    color="#FFFFFF",
+                ),
+                rx.text(IngestionAiState.gate_summary, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
+                rx.spacer(),
+                # §5.6 — the correction/confirmation audit trail (F4).
+                c.view_history(
+                    "View history",
+                    IngestionAiState.mapping_history,
+                    count=IngestionAiState.mapping_edit_count,
+                ),
+                _back_button("Cancel", IngestionAiState.back_to_uploads),
+                spacing="3",
+                align="center",
+                width="100%",
+                wrap="wrap",
+            ),
+            spacing="3",
+            align="start",
+            width="100%",
+        ),
+        width="100%",
+    )
+
+
+def _discard_edits_dialog() -> rx.Component:
+    """§6 (D21) — leaving the review screen with unsaved edits asks first."""
+    return rx.dialog.root(
+        rx.dialog.content(
+            rx.vstack(
+                rx.text("Discard your unsaved edits?", style=t.TEXT["card_title"]),
+                rx.text(
+                    "You have changed the mapping but not confirmed it. Leaving now discards "
+                    "those changes.",
+                    style=t.TEXT["body"],
+                ),
+                rx.hstack(
+                    rx.dialog.close(
+                        rx.button(
+                            "Keep editing",
+                            on_click=IngestionAiState.cancel_discard_edits,
+                            variant="soft",
+                            background="transparent",
+                            color=t.Color.TEXT_SECONDARY.value,
+                            border=f"1px solid {t.Color.BORDER.value}",
+                            border_radius="9px",
+                        ),
+                    ),
+                    rx.dialog.close(
+                        rx.button(
+                            "Discard edits",
+                            on_click=IngestionAiState.confirm_discard_edits,
+                            background=t.Color.DANGER.value,
+                            color="#FFFFFF",
+                        ),
+                    ),
+                    spacing="2",
+                ),
+                spacing="3",
+                align="start",
+            ),
+            max_width="460px",
+        ),
+        open=IngestionAiState.discard_prompt_open,
+        on_open_change=IngestionAiState.cancel_discard_edits,
+    )
+
+
 def _mapping_review() -> rx.Component:
     return rx.vstack(
         rx.hstack(
@@ -1059,110 +1799,40 @@ def _mapping_review() -> rx.Component:
             rx.fragment(),
         ),
         rx.cond(
-            IngestionAiState.warning_banner != "",
-            c.warning_banner(IngestionAiState.warning_banner),
-            rx.fragment(),
-        ),
-        rx.cond(
             IngestionAiState.blocked_banner != "",
             c.inline_reason(IngestionAiState.blocked_banner),
             rx.fragment(),
         ),
-        # Visible "AI is working" indicator — a model call takes ~15-25s and
-        # would otherwise look like a frozen screen.
         c.ai_progress(
             rx.cond(IngestionAiState.busy_label != "", IngestionAiState.busy_label, "Working…"),
             visible=IngestionAiState.busy_label != "",
         ),
-        # --- header card: what this file is + its status ---
-        c.card(
-            rx.vstack(
-                rx.hstack(
-                    rx.vstack(
-                        rx.text(IngestionAiState.review_filename, style=t.TEXT["card_title"]),
-                        rx.text(
-                            f"{IngestionAiState.review_source_label}"
-                            + rx.cond(
-                                IngestionAiState.review_period != "",
-                                " · " + IngestionAiState.review_period,
-                                "",
-                            ),
-                            style=t.TEXT["micro"],
-                        ),
-                        spacing="1",
-                        align="start",
-                    ),
-                    rx.spacer(),
-                    rx.cond(
-                        IngestionAiState.review_status == STATUS_CONFIRMED,
-                        c.confidence_badge("rule", label="Confirmed"),
-                        rx.cond(
-                            IngestionAiState.review_status == STATUS_BLOCKED,
-                            c.pill("Blocked", variant="danger"),
-                            c.pill("Needs review", variant="ai"),
-                        ),
-                    ),
-                    width="100%",
-                    align="center",
-                ),
-                rx.cond(
-                    IngestionAiState.row_count_note != "",
-                    rx.text(IngestionAiState.row_count_note, style=t.TEXT["micro"]),
-                    rx.fragment(),
-                ),
-                rx.cond(
-                    IngestionAiState.header_row_note != "",
-                    rx.text(IngestionAiState.header_row_note, style=t.TEXT["micro"]),
-                    rx.fragment(),
-                ),
-                spacing="2",
-                align="start",
-                width="100%",
-            ),
-            width="100%",
-        ),
-        # --- source file preview (full width; the mapping table needs the
-        # whole 1200px shell width — a side-by-side split collapses it) ---
-        _raw_preview(),
-        _sample_values(),
-        _mapping_table(),
-        _mapping_checklist(),
+        # 1. Identification headline
+        _identification_headline(),
+        # 2. Summary line
+        _summary_line(),
+        # 3. What we checked
+        _what_we_checked(),
+        # 4. Tax columns (rate-bucket matrix)
+        _tax_columns_card(),
+        # 5. What Setu will read (normalised preview + totals)
+        _normalised_preview(),
+        # 6. Setu fields, grouped with evidence
+        _field_evidence_card(),
+        # 7. Source file + set-aside columns
+        _ignored_columns_card(),
         rx.cond(
             IngestionAiState.can_review,
-            c.card(
-                rx.vstack(
-                    rx.hstack(
-                        rx.checkbox(
-                            checked=IngestionAiState.trust_reuse,
-                            on_change=IngestionAiState.set_trust_reuse,
-                        ),
-                        rx.text(
-                            "Trust this mapping for future reuse (this client + source type)",
-                            style=t.TEXT["label"],
-                        ),
-                        spacing="2",
-                        align="center",
-                    ),
-                    rx.text(
-                        "Trusting creates a reusable profile that affects future uploads — "
-                        "you'll be asked to confirm that before it is saved.",
-                        style=t.TEXT["micro"],
-                    ),
-                    rx.button(
-                        "Confirm mapping",
-                        on_click=IngestionAiState.open_confirm,
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
-                    ),
-                    spacing="3",
-                    align="start",
-                    width="100%",
-                ),
-                width="100%",
-            ),
+            _raw_preview(),
+            rx.fragment(),
+        ),
+        rx.cond(
+            IngestionAiState.can_review,
+            _sticky_action_bar(),
             rx.fragment(),
         ),
         _confirm_dialog(),
+        _discard_edits_dialog(),
         _rerun_dialog(),
         spacing="4",
         width="100%",

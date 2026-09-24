@@ -18,6 +18,7 @@ from src.config_loader import CONFIG_PATH, load_config
 from src.export import export_run
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
+from src.ingestion_ai import periods as period_utils
 from src.runner import RunExecutionError, execute_run
 from src.shared import discovery
 from setu.state.auth_state import AuthState
@@ -277,6 +278,17 @@ class Phase1State(AuthState):
         return bool(self.ctx_client and self.ctx_period and self.ctx_recon_type)
 
     @rx.var
+    def period_options(self) -> list[ContextOption]:
+        """Periods with human labels — the unfiled sentinel reads as
+        "Unfiled (not reconcilable)" rather than a bare "-", so a file filed
+        without a period is visibly unusable instead of mysteriously absent."""
+        return [ContextOption(value=p, label=period_utils.period_label(p)) for p in self.periods]
+
+    @rx.var
+    def period_is_unfiled(self) -> bool:
+        return period_utils.is_unfiled(self.ctx_period)
+
+    @rx.var
     def run_ids(self) -> list[str]:
         return [str(r.run_id) for r in self.runs]
 
@@ -360,6 +372,11 @@ class Phase1State(AuthState):
     @rx.var
     def run_blockers(self) -> list[str]:
         out: list[str] = []
+        if period_utils.is_unfiled(self.ctx_period):
+            out = out + [
+                "This period holds files filed without a period. Set a period for them "
+                "from Smart Ingestion (File to period) before reconciling."
+            ]
         if not self.books_ready:
             out = out + ["Select a file for the books side."]
         if not self.portal_ready:
@@ -377,6 +394,12 @@ class Phase1State(AuthState):
         self.run_caveats = []
         if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
             self.error = "Pick a client, period, and recon type first."
+            return
+        if period_utils.is_unfiled(self.ctx_period):
+            self.error = (
+                "This period holds files filed without a period — they cannot be "
+                "reconciled. File them to a period from Smart Ingestion first."
+            )
             return
         selected_files = {s.source_type: s.selected for s in self.slots if s.selected}
         client_id = _client_id_for_folder(self.ctx_client)

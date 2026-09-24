@@ -87,6 +87,11 @@ class DocumentsState(SharedUploadState):
 
     client_options: list[ClientOption] = []
     vault_client_id: int = 0
+    # True when the vault is rendered INSIDE another screen (F2's client
+    # profile Documents tab) rather than the standalone /documents route.
+    # The embedded render hides the client picker — the client is fixed by
+    # the profile the user is already looking at.
+    embedded: bool = False
 
     # vault filters
     filter_type: str = "All"
@@ -141,6 +146,10 @@ class DocumentsState(SharedUploadState):
     error: str = ""
 
     # ------------------------------------------------------------------
+    @rx.var
+    def can_view(self) -> bool:
+        return "documents.view" in self._codes()
+
     @rx.var
     def can_upload(self) -> bool:
         return "documents.upload" in self._codes()
@@ -212,6 +221,23 @@ class DocumentsState(SharedUploadState):
     def load(self):
         if (deny := self._gate("documents.view")):
             return rx.redirect(deny)
+        self.embedded = False
+        self.client_options = [
+            ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
+            for c in clients.list_clients(include_inactive=False)
+        ]
+        self._load_all()
+
+    @rx.event
+    def load_for_client(self, client_id: int):
+        """Load the vault scoped to ONE client, for embedding inside F2's
+        client profile Documents tab. No redirect: the caller (ClientState)
+        has already passed its own permission gate, and the embedded view
+        renders an inline reason instead when documents.view is absent."""
+        self.embedded = True
+        self.section = "Document Vault"
+        self.selected_document_id = 0
+        self.vault_client_id = int(client_id or 0)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)

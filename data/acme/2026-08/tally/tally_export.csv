@@ -1,4 +1,0 @@
-Party GSTIN,Party Name,Voucher No.,Voucher Date,Taxable Value,CGST Amount,SGST Amount,IGST Amount,Cess Amount,Invoice Value,Party PAN,Ledger Name,TDS Section,Amount,TDS Amount
-27AAAPL1234C1Z5, Acme Traders ,INV-001,01-08-2026,10000,900,900,0,0,11800,AAAPL1234C,Acme Traders,194C,10000,200
-29BBBCS5678D2Z3,Beta Supplies,INV-002,05-08-2026,,720,720,0,0,,BBBCS5678D,Beta Supplies,194J,20000,2000
-27AAAPL1234C1Z5, Acme Traders ,INV-001,01-08-2026,10000,900,900,0,0,11800,AAAPL1234C,Acme Traders,194C,10000,200

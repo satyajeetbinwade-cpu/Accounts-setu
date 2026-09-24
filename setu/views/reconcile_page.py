@@ -102,11 +102,18 @@ def _context_stage() -> rx.Component:
                     ),
                     rx.vstack(
                         rx.text("Period", style=t.TEXT["label"]),
-                        rx.select(
-                            ReconcileState.periods,
+                        rx.select.root(
+                            rx.select.trigger(width="160px", placeholder="No periods yet"),
+                            rx.select.content(
+                                rx.select.group(
+                                    rx.foreach(
+                                        ReconcileState.period_options,
+                                        lambda option: rx.select.item(option.label, value=option.value),
+                                    ),
+                                ),
+                            ),
                             value=ReconcileState.ctx_period,
                             on_change=ReconcileState.set_ctx_period,
-                            width="160px",
                         ),
                         spacing="1",
                         align="start",

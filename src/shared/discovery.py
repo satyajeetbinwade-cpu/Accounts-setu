@@ -12,6 +12,13 @@ from typing import Optional
 
 from src.data_paths import DATA_ROOT
 from src import queries
+from src.ingestion_ai.periods import (
+    PERIOD_UNFILED,
+    UNFILED_LABEL,
+    is_unfiled,
+    is_valid_period,
+    period_label,
+)
 
 # Which source_type directories are relevant to each recon type. "tally"
 # feeds both (books side); portal sources are recon-type specific.
@@ -92,7 +99,12 @@ def list_clients() -> list[str]:
 
 def list_periods(client: str) -> list[str]:
     """Periods (newest first, lexicographic desc works for YYYY-MM) for a
-    client, from disk and DB."""
+    client, from disk and DB.
+
+    Includes the unfiled sentinel (``"-"``) when files were filed without a
+    period, so those files are never silently invisible — the UI labels it
+    via ``period_label()`` and explains why it cannot be reconciled.
+    """
     on_disk = set()
     client_dir = DATA_ROOT / client
     if client_dir.exists():
@@ -107,6 +119,12 @@ def list_periods(client: str) -> list[str]:
         pass
 
     return sorted(on_disk | in_db, reverse=True)
+
+
+def reconcilable_periods(client: str) -> list[str]:
+    """Periods that can actually be reconciled — the unfiled sentinel
+    excluded. Use this wherever a period is chosen to RUN against."""
+    return [p for p in list_periods(client) if is_valid_period(p)]
 
 
 def list_recon_types(client: str, period: str) -> list[str]:

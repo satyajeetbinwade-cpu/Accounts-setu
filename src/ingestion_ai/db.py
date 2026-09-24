@@ -292,6 +292,28 @@ def delete_ingestion_result(conn: sqlite3.Connection, upload_key: str) -> int:
     return cur.rowcount or 0
 
 
+def rekey_ingestion_result(
+    conn: sqlite3.Connection, *, old_upload_key: str, new_upload_key: str, period: Optional[str],
+) -> int:
+    """Move a stored ingestion result to a new period.
+
+    The upload key EMBEDS the period (``"<client>/<period>/<source_type>/
+    <filename>"``), so re-filing a document under a different period must
+    re-key its result row as well. Moving the bytes on disk alone would
+    leave the Reconcile slot reading "not ingested yet", because the slot
+    looks the result up by the NEW key.
+
+    Returns how many rows were updated (0 when there was no stored result,
+    which is fine — the file simply has not been ingested yet).
+    """
+    cur = conn.execute(
+        "UPDATE ingestion_results SET upload_key = ?, period = ? WHERE upload_key = ?",
+        (new_upload_key, period, old_upload_key),
+    )
+    conn.commit()
+    return cur.rowcount or 0
+
+
 # ---------------------------------------------------------------------------
 # ingestion_shape_cache — the unified layer's shape-keyed cache + learned
 # trusted mappings (see schema.py for why the key includes the header set).
@@ -423,6 +445,11 @@ def upsert_ingestion_result(
     classification: Optional[dict[str, Any]], unmapped_required: list[str], warnings: list[str],
     row_count_in: int, row_count_out: int, model_used: Optional[str], llm_cached: bool, actor: str,
     notes: Optional[list[str]] = None, message: Optional[str] = None,
+    validation: Optional[list[dict[str, Any]]] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    rate_matrix: Optional[list[dict[str, Any]]] = None,
+    dispositions: Optional[list[dict[str, Any]]] = None,
+    ingestion_path: str = "",
 ) -> int:
     now = _now()
     conn.execute(
@@ -431,8 +458,9 @@ def upsert_ingestion_result(
             (upload_key, client_ref, client_id, period, source_type, filename, status, header_row,
              sheet_name, sheet_ambiguous, headers_json, mapping_json, classification_json,
              unmapped_required_json, warnings_json, notes_json, message, row_count_in, row_count_out,
-             model_used, llm_cached, created_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             model_used, llm_cached, validation_json, metadata_json, rate_matrix_json,
+             dispositions_json, ingestion_path, created_at, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(upload_key) DO UPDATE SET
             client_id = excluded.client_id,
             period = excluded.period,
@@ -451,6 +479,11 @@ def upsert_ingestion_result(
             row_count_out = excluded.row_count_out,
             model_used = excluded.model_used,
             llm_cached = excluded.llm_cached,
+            validation_json = excluded.validation_json,
+            metadata_json = excluded.metadata_json,
+            rate_matrix_json = excluded.rate_matrix_json,
+            dispositions_json = excluded.dispositions_json,
+            ingestion_path = excluded.ingestion_path,
             created_at = excluded.created_at,
             created_by = excluded.created_by
         """,
@@ -459,7 +492,10 @@ def upsert_ingestion_result(
             sheet_name, int(sheet_ambiguous), json.dumps(headers), json.dumps(mapping),
             json.dumps(classification) if classification else None,
             json.dumps(unmapped_required), json.dumps(warnings), json.dumps(notes or []),
-            message, row_count_in, row_count_out, model_used, int(llm_cached), now, actor,
+            message, row_count_in, row_count_out, model_used, int(llm_cached),
+            json.dumps(validation or []), json.dumps(metadata or {}),
+            json.dumps(rate_matrix or []), json.dumps(dispositions or []),
+            ingestion_path, now, actor,
         ),
     )
     conn.commit()
@@ -480,6 +516,10 @@ def get_ingestion_result(conn: sqlite3.Connection, upload_key: str) -> Optional[
         ("unmapped_required_json", "unmapped_required"),
         ("warnings_json", "warnings"),
         ("notes_json", "notes"),
+        ("validation_json", "validation"),
+        ("metadata_json", "metadata"),
+        ("rate_matrix_json", "rate_matrix"),
+        ("dispositions_json", "dispositions"),
     ):
         if row.get(src):
             try:
@@ -519,6 +559,10 @@ def find_ingestion_result(
         ("unmapped_required_json", "unmapped_required"),
         ("warnings_json", "warnings"),
         ("notes_json", "notes"),
+        ("validation_json", "validation"),
+        ("metadata_json", "metadata"),
+        ("rate_matrix_json", "rate_matrix"),
+        ("dispositions_json", "dispositions"),
     ):
         if row.get(src):
             try:

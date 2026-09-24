@@ -55,9 +55,14 @@ auth.init_auth()
 
 from src.f6 import service as f6  # noqa: E402
 from src.invoice_extract import service as invoice_extract  # noqa: E402
+from src.ingestion_ai import service as ingestion_ai  # noqa: E402
 
 f6.init_f6()
 invoice_extract.init_invoice_extract()
+# F3-AI's schema init also runs the additive migrations (validation_json,
+# metadata_json, rate_matrix_json, dispositions_json, ingestion_path), which
+# the corrective build's gate and review screen read.
+ingestion_ai.init_ingestion_ai()
 
 
 def _boot() -> None:

@@ -22,6 +22,7 @@ from src.data_paths import source_data_path
 from src.export import export_run
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
+from src.ingestion_ai import periods as period_utils
 from src.runner import RunExecutionError, execute_run
 from src.shared import discovery
 from setu.state.auth_state import AuthState
@@ -49,6 +50,15 @@ class StageChip:
     label: str
     reachable: bool
     active: bool
+
+
+@dataclass
+class ContextOption:
+    """A select option whose label is human-facing and whose value is the
+    raw period key (so the unfiled sentinel can read as a real sentence)."""
+
+    value: str
+    label: str
 
 
 @dataclass
@@ -127,6 +137,12 @@ class ReconcileState(AuthState):
     portal_ok: bool = False
     ready: bool = False
     blockers: list[str] = []
+
+    @rx.var
+    def period_options(self) -> list[ContextOption]:
+        """Periods with human labels — the unfiled sentinel reads as
+        "Unfiled (not reconcilable)" rather than a bare "-"."""
+        return [ContextOption(value=p, label=period_utils.period_label(p)) for p in self.periods]
     upload_error: str = ""
 
     # stage 2 — re-run through model (per-file, confirm-gated)
@@ -417,6 +433,11 @@ class ReconcileState(AuthState):
         self.books_ok = all(by_type.get(b) and by_type[b].resolved for b in books)
         self.portal_ok = any(by_type.get(p) and by_type[p].resolved for p in portals)
         blockers: list[str] = []
+        if period_utils.is_unfiled(self.ctx_period):
+            blockers.append(
+                "This period holds files filed without a period — file them to a period "
+                "from Smart Ingestion before reconciling."
+            )
         for src in books + portals:
             s = by_type.get(src)
             if s and s.code in ("wrong", "not_ingested"):
@@ -518,6 +539,14 @@ class ReconcileState(AuthState):
                 break
         if not source_type:
             self.upload_error = "Pick a slot for this file first."
+            return
+        # The period is the folder the engine reads. Stage 1 requires it, so
+        # this is a defensive backstop against writing an unreachable file.
+        if not period_utils.is_valid_period(self.ctx_period):
+            self.upload_error = (
+                "Choose a real period (YYYY-MM) in Stage 1 before uploading — "
+                "files filed without one cannot be reconciled."
+            )
             return
         f = files[0]
         data = await f.read()

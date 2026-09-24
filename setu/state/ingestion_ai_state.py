@@ -24,10 +24,19 @@ from src.auth import service as auth
 from src.clients import service as clients
 from src.data_paths import VALID_SOURCE_TYPES
 from src.ingestion_ai import service as ingestion_ai
+from src.ingestion_ai import periods as period_utils
+from src.shared import discovery
+from setu.state.history import HistoryEntry
 from setu.state.shared_upload import SharedUploadState
 
+# The dropdown must speak the accountant's vocabulary, not our folder keys,
+# and it must be displayed in a sensible order. The books slot in particular
+# is NOT "a Tally export" — Tally is merely one FORMAT the internal books /
+# purchase register can arrive in (an ERP export or a hand-prepared register
+# are equally valid), so it is labelled for what it IS. The raw key stays
+# "tally" (the data/ folder name and every downstream module key off it).
 SOURCE_TYPE_LABELS = {
-    "tally": "Tally export (books)",
+    "tally": "Books / Purchase Register",
     "gstr2b": "GSTR-2B (portal)",
     "ims": "IMS export (portal)",
     "form26as": "Form 26AS (portal)",
@@ -39,8 +48,33 @@ SOURCE_TYPE_LABELS = {
     "salary": "Salary register",
 }
 
+# Display order for the pickers above — books first (it feeds every recon),
+# then the portal sources, then the 2C "Other" sources. Anything a future
+# source-type adds but doesn't list here still appears (appended, A–Z).
+SOURCE_TYPE_ORDER = [
+    "tally",
+    "gstr2b",
+    "ims",
+    "form26as",
+    "tds",
+    "bank",
+    "vendor_ledger",
+    "opening_balances",
+    "loan_sheet",
+    "salary",
+]
+
+
+def _ordered_source_types() -> list[str]:
+    """Raw source_type keys in display order: books first (it feeds every
+    recon), then the portal sources, then the 2C "Other" sources. Any key a
+    future release adds but doesn't list still appears (appended, A–Z)."""
+    known = [s for s in SOURCE_TYPE_ORDER if s in VALID_SOURCE_TYPES]
+    extra = sorted(s for s in VALID_SOURCE_TYPES if s not in SOURCE_TYPE_ORDER)
+    return known + extra
+
+
 _STATUS_LABELS = {
-    "pending": "Pending",
     "blocked": "Blocked",
     "needs_confirm": "Ready for review",
     "confirmed": "Confirmed",
@@ -60,11 +94,168 @@ STATUS_CONFIRMED = "confirmed"
 ALL_CLIENTS = "All clients"
 LEAVE_UNMAPPED = "(leave unmapped)"
 
+# §7 — display labels. NEVER snake_case in the UI; the reviewer is an
+# accountant, not a developer.
+_FIELD_LABELS: dict[str, str] = {
+    "gstin": "Supplier GSTIN",
+    "party_name": "Supplier name",
+    "invoice_number": "Invoice number",
+    "invoice_date": "Invoice date",
+    "taxable_value": "Taxable value",
+    "igst": "IGST",
+    "cgst": "CGST",
+    "sgst": "SGST",
+    "cess": "Cess",
+    "total_tax": "Total tax",
+    "rounding_adjustment": "Rounding adjustment",
+    "invoice_value": "Invoice value",
+}
+
+# §8 check names in plain language.
+_CHECK_LABELS: dict[str, str] = {
+    "row_accounting": "Row accounting",
+    "required_fields": "Required fields",
+    "control_total": "Control total",
+    "gstin_validity": "GSTIN structure",
+    "date_sanity": "Dates within the period",
+    "tax_arithmetic": "Tax arithmetic",
+    "mirror_columns": "CGST = SGST mirror",
+    "implied_rate": "Implied tax rate",
+    "duplicate_detection": "Duplicate invoices",
+    "re_upload_guard": "Re-upload guard",
+}
+
+# Canonical display order — GST fields first, in reading order.
+_CANONICAL_ORDER: list[str] = [
+    "gstin", "party_name", "invoice_number", "invoice_date",
+    "taxable_value", "igst", "cgst", "sgst", "cess", "total_tax",
+    "rounding_adjustment", "invoice_value",
+]
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _pretty_date(iso: str) -> str:
+    """ISO yyyy-mm-dd -> '01 Aug 2026' (unambiguous, never 01/08/2026)."""
+    try:
+        y, m, d = str(iso).split("-")
+        return f"{int(d):02d} {_MONTHS[int(m) - 1]} {y}"
+    except Exception:  # noqa: BLE001
+        return str(iso)
+
+
+def _field_tier(canonical_field: str) -> str:
+    """§5 Part 2.2 requiredness tier (C1 owns these in production)."""
+    try:
+        from src.f6.books_register import field_tier
+
+        return field_tier(canonical_field)
+    except Exception:  # noqa: BLE001
+        return "optional"
+
+
+_MONEY_FIELDS = {
+    "taxable_value", "igst", "cgst", "sgst", "cess", "total_tax",
+    "rounding_adjustment", "invoice_value",
+}
+
+
+def _format_money(value) -> str:
+    """Indian digit grouping, 2 dp — ₹1,23,456.78 style (no symbol here)."""
+    if value is None:
+        return ""
+    try:
+        from decimal import Decimal
+
+        d = Decimal(str(value))
+    except Exception:  # noqa: BLE001
+        return str(value)
+    negative = d < 0
+    q = abs(d).quantize(Decimal("0.01"))
+    whole, _, frac = str(q).partition(".")
+    # Indian grouping: last 3 digits, then groups of 2.
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        head = ",".join([head[max(0, i - 2):i] for i in range(len(head), 0, -2)][::-1])
+        whole = head + "," + tail
+    return ("-" if negative else "") + whole + "." + (frac or "00")
+
+
+def _format_cell(field: str, value) -> str:
+    """One canonical cell, formatted for a reviewer: money with Indian
+    grouping, dates unambiguous, nothing showing 'None' or 'nan'."""
+    if value is None:
+        return ""
+    if field in _MONEY_FIELDS:
+        return _format_money(value)
+    if field == "invoice_date":
+        return _pretty_date(str(value)) if str(value) else ""
+    s = str(value)
+    return "" if s.strip().lower() in ("none", "nan") else s
+
 
 @dataclass
 class ClientOption:
     client_id: int
     legal_name: str
+
+
+@dataclass
+class SourceOption:
+    """One choice in the upload source-type picker: the human label shown
+    and the raw source_type key it maps to (value must stay the raw key —
+    the pipeline and the data/ folder both key off it)."""
+
+    key: str
+    label: str
+
+
+@dataclass
+class CheckRow:
+    """One §8 guardrail outcome, for the "What we checked" card."""
+
+    check: str
+    label: str
+    result: str          # 'pass' | 'row_flag' | 'hard_stop'
+    detail: str
+    failed: bool
+
+
+@dataclass
+class RateRow:
+    """One head x rate row of the Tax-columns card."""
+
+    head: str
+    rate_label: str
+    taxable_column: str
+    tax_column: str
+    setu_field: str
+    mirror_of: str
+    mirror_note: str
+
+
+@dataclass
+class DispositionRow:
+    """One source column's disposition (§5 Part 1.2)."""
+
+    column: str
+    disposition: str     # used-in | validation-signal | ignored | needs-decision
+    detail: str
+    variant: str
+
+
+@dataclass
+class FieldEvidence:
+    """A canonical field's verification evidence (§5 Part 4)."""
+
+    canonical_field: str
+    label: str
+    tier: str            # required | recommended | derived | optional
+    source_summary: str
+    evidence_chip: str
+    status: str          # verified | failed | ai_only | missing
+    mapped: bool
 
 
 @dataclass
@@ -84,6 +275,9 @@ class UploadRow:
     # Every field at/above the auto-apply threshold AND at least one row
     # actually read — the only uploads eligible for bulk confirm.
     bulk_eligible: bool
+    # Filed without a period → unreachable by every reconciliation. Drives
+    # the "File to period" repair action on the row.
+    is_unfiled: bool
 
 
 @dataclass
@@ -175,9 +369,26 @@ class IngestionAiState(SharedUploadState):
     client_id: int = 0
 
     # upload form
-    source_type: str = "gstr2b"
+    source_type: str = "tally"
     period: str = ""
     upload_error: str = ""
+    # The period is REQUIRED: the engine reads
+    # data/<client>/<period>/<source_type>/, so a file filed without one is
+    # unreachable by every reconciliation. These carry the best-effort
+    # suggestion and the evidence behind it, so the field is pre-filled
+    # rather than blank — but the human still confirms it.
+    period_inferred: str = ""
+    period_inferred_source: str = ""
+
+    # "File to period" — the repair action for uploads filed before the
+    # period was required (they sit in data/<client>/-/<source_type>/).
+    file_period_open: bool = False
+    file_period_upload_id: int = 0
+    file_period_filename: str = ""
+    file_period_value: str = ""
+    file_period_suggestion: str = ""
+    file_period_source: str = ""
+    file_period_error: str = ""
 
     uploads: list[UploadRow] = []
 
@@ -221,6 +432,60 @@ class IngestionAiState(SharedUploadState):
     # Confirmation dialog state.
     confirm_open: bool = False
     allow_empty_ack: bool = False
+    # §6 (D21) — leaving with unsaved edits asks first.
+    discard_prompt_open: bool = False
+
+    # --- Corrective build (§5 Parts 2-7): evidence-first review screen ---
+    # The identification headline: report title, entity, period, counts.
+    review_title: str = ""
+    review_entity: str = ""
+    review_period_label: str = ""
+    # The client the upload belongs to (NOT the list filter — showing the
+    # filter here read "Filed under All clients", which is meaningless).
+    review_client_label: str = ""
+    review_invoice_count: int = 0
+    review_supplier_count: int = 0
+    review_total_label: str = ""
+    # Truthful provenance (§5.3) — never claims AI shaped a deterministic parse.
+    review_provenance_label: str = ""
+    review_provenance_detail: str = ""
+    review_provenance_path: str = ""
+    # Period/entity mismatch → an explicit acknowledgement is required.
+    mismatch_banner: str = ""
+    mismatch_ack: bool = False
+    # The summary line: "N verified · M need review · K not in this file".
+    summary_verified: int = 0
+    summary_review: int = 0
+    summary_absent: int = 0
+    # §5.6 — the F4 correction/confirmation history for the open upload.
+    mapping_history: list[HistoryEntry] = []
+
+    # §8 checks, so "silence is never a pass signal".
+    checks: list[CheckRow] = []
+    checks_failed: list[CheckRow] = []
+    checks_passed: list[CheckRow] = []
+    show_passed_checks: bool = False
+    # Tax-columns card.
+    rate_rows: list[RateRow] = []
+    rate_note: str = ""
+    # Field evidence (§5 Part 4).
+    verified_fields: list[FieldEvidence] = []
+    review_fields: list[FieldEvidence] = []
+    absent_fields: list[FieldEvidence] = []
+    # Ignored / signal columns.
+    ignored_columns: list[DispositionRow] = []
+    # Normalised preview (what Setu will read) — §7 item 5.
+    normalised_headers: list[str] = []
+    normalised_rows: list[list[str]] = []
+    normalised_total_row: list[str] = []
+    normalised_note: str = ""
+    show_all_preview: bool = False
+    # The confirm gate verdict (§6) — drives the disabled-with-inline-reason.
+    gate_blocked: bool = False
+    gate_reasons: str = ""
+    gate_summary: str = ""
+    # Save-as-layout choice (§5.5) — replaces the bare "Trust" checkbox.
+    layout_scope: str = "none"   # none | client | firmwide
 
     # Per-row editing on the mapping table: the raw_column currently being
     # edited ("" = none) and the dropdown draft. Editing one row at a time
@@ -293,7 +558,37 @@ class IngestionAiState(SharedUploadState):
 
     @rx.var
     def source_type_options(self) -> list[str]:
-        return sorted(VALID_SOURCE_TYPES)
+        """The raw upload keys, in display order (used by any caller that
+        needs the underlying value list)."""
+        return _ordered_source_types()
+
+    @rx.var
+    def source_type_options_by_label(self) -> list[str]:
+        """Display LABELS only — used by the source FILTER, which matches
+        rows through the label map and so needs no raw keys."""
+        return [SOURCE_TYPE_LABELS.get(s, s) for s in _ordered_source_types()]
+
+    @rx.var
+    def source_type_choices(self) -> list[SourceOption]:
+        """The upload source-type picker's choices: human label + raw key,
+        in display order (books first). The control shows the label but
+        carries the raw key as its value, so the pipeline and the data/
+        folder keep keying off `tally`/`gstr2b`/… unchanged."""
+        return [
+            SourceOption(key=s, label=SOURCE_TYPE_LABELS.get(s, s))
+            for s in _ordered_source_types()
+        ]
+
+    @rx.var
+    def source_type_label(self) -> str:
+        """Label for the currently-selected upload slot, for the in-upload
+        context readout."""
+        return SOURCE_TYPE_LABELS.get(self.source_type, self.source_type)
+
+    @rx.var
+    def source_type_hint(self) -> str:
+        """One-line "what does this slot want" text for the selected slot."""
+        return discovery.source_type_hint(self.source_type)
 
     @rx.var
     def client_names(self) -> list[str]:
@@ -310,7 +605,7 @@ class IngestionAiState(SharedUploadState):
 
     @rx.var
     def source_filter_options(self) -> list[str]:
-        return ["All sources"] + sorted(VALID_SOURCE_TYPES)
+        return ["All sources"] + self.source_type_options_by_label
 
     @rx.var
     def status_filter_options(self) -> list[str]:
@@ -474,6 +769,7 @@ class IngestionAiState(SharedUploadState):
                         and all_confident
                         and int(u.get("row_count_out") or 0) > 0
                     ),
+                    is_unfiled=period_utils.is_unfiled(u.get("period")),
                 )
             )
         self.uploads = self._apply_list_filters(out)
@@ -483,7 +779,12 @@ class IngestionAiState(SharedUploadState):
         if self.filter_client != ALL_CLIENTS:
             out = [r for r in out if r.client_label == self.filter_client]
         if self.filter_source != "All sources":
-            out = [r for r in out if r.source_type == self.filter_source]
+            # The filter control carries the human LABEL; the rows carry the
+            # raw source_type key — match through the label map.
+            out = [
+                r for r in out
+                if SOURCE_TYPE_LABELS.get(r.source_type, r.source_type) == self.filter_source
+            ]
         if self.filter_status != "All statuses":
             out = [r for r in out if r.status_label == self.filter_status]
         if self.search.strip():
@@ -555,14 +856,95 @@ class IngestionAiState(SharedUploadState):
         self.selected_upload_ids = []
         self._load_all()
 
-    def set_source_type(self, v: str):
-        self.source_type = v
+    def set_source_type(self, key: str):
+        """The picker carries the raw source_type key as its value (only the
+        label is human-facing), so this stores it directly."""
+        if key in VALID_SOURCE_TYPES:
+            self.source_type = key
 
     def set_period(self, v: str):
         self.period = v
+        # A human edit supersedes the suggestion — stop claiming it.
+        self.period_inferred_source = ""
+
+    # ------------------------------------------------------------------
+    # "File to period" — repair an upload filed without a period
+    # ------------------------------------------------------------------
+    @rx.event
+    def open_file_period(self, upload_id: int, filename: str):
+        """Open the re-file dialog, pre-filled with the best suggestion."""
+        self.file_period_upload_id = upload_id
+        self.file_period_filename = filename
+        self.file_period_error = ""
+        suggested, source = ingestion_ai.suggest_period_for_upload(upload_id)
+        self.file_period_suggestion = suggested or ""
+        self.file_period_source = source
+        self.file_period_value = suggested or ""
+        self.file_period_open = True
+
+    @rx.event
+    def close_file_period(self):
+        self.file_period_open = False
+        self.file_period_error = ""
+
+    def set_file_period_value(self, v: str):
+        self.file_period_value = v
+
+    @rx.event
+    def confirm_file_period(self):
+        """Re-file the upload under the chosen period.
+
+        Moves the bytes, updates the document's period, re-keys the stored
+        ingestion result and writes an F4 audit entry — all four, because
+        doing only some leaves the file half-visible.
+        """
+        self.file_period_error = ""
+        if not period_utils.is_valid_period(self.file_period_value):
+            self.file_period_error = "Enter a period as YYYY-MM (for example 2026-08)."
+            return
+        try:
+            out = ingestion_ai.set_upload_period(
+                self.file_period_upload_id,
+                self.file_period_value.strip(),
+                actor=self.username,
+                client_ref=self._client_ref(),
+            )
+        except ingestion_ai.IngestionAIError as exc:
+            self.file_period_error = str(exc)
+            return
+        moved = " and moved on disk" if out.get("moved") else ""
+        self.flash = (
+            f"'{self.file_period_filename}' is now filed under {out['period']}{moved} — "
+            "it can be picked for reconciliation."
+        )
+        self.file_period_open = False
+        self._load_all()
 
     def set_trust_reuse(self, v: bool):
         self.trust_reuse = v
+
+    def set_layout_scope(self, v: str):
+        """§5.5 — the Save-as-layout choice that replaces the bare Trust
+        checkbox, with one sentence of consequence shown next to it."""
+        self.layout_scope = v
+        self.trust_reuse = v in ("client", "firmwide")
+
+    def set_layout_scope_value(self, label: str):
+        """The select emits a human label; map it to the internal scope."""
+        self.layout_scope = {
+            "This client only": "client",
+            "Firm-wide": "firmwide",
+        }.get(label, "none")
+        self.trust_reuse = self.layout_scope in ("client", "firmwide")
+
+    def set_mismatch_ack(self, v: bool):
+        self.mismatch_ack = v
+
+    def toggle_passed_checks(self):
+        self.show_passed_checks = not self.show_passed_checks
+
+    def toggle_all_preview(self):
+        self.show_all_preview = not self.show_all_preview
 
     def set_show_confident(self, v: bool):
         self.show_confident = v
@@ -592,6 +974,33 @@ class IngestionAiState(SharedUploadState):
             if c.client_id == self.client_id:
                 return c.legal_name
         return str(self.client_id)
+
+    # ------------------------------------------------------------------
+    # Period (required) — suggestion + evidence
+    # ------------------------------------------------------------------
+    def _infer_period(self) -> None:
+        """Pre-fill the required Period field from the staged file's own
+        evidence (its stated period, its return period, then its filename).
+
+        Never overwrites a value the human has already typed, and never
+        invents one: when there is no signal the field stays empty and the
+        upload is blocked until a period is supplied.
+        """
+        if self.period.strip() or not self.pending:
+            return
+        first = self.pending[0]
+        suggested, source = period_utils.suggest_period(first.filename, None)
+        if suggested:
+            self.period = suggested
+            self.period_inferred = suggested
+            self.period_inferred_source = source
+
+    @rx.event
+    async def stage(self, files: list[rx.UploadFile]):
+        """Stage dropped files, then pre-fill the required Period field from
+        the first file's own evidence."""
+        await super().stage(files)
+        self._infer_period()
 
     # ------------------------------------------------------------------
     # Upload — staged (FilePreviewChip) then per-file progress
@@ -624,6 +1033,17 @@ class IngestionAiState(SharedUploadState):
         if not self.client_id:
             self.upload_error = "Select a client before uploading."
             return
+        # The period is REQUIRED. The engine reads
+        # data/<client>/<period>/<source_type>/, so a file filed without one
+        # lands in a folder no period picker can select and is permanently
+        # invisible to reconciliation. Blocking here is the whole point.
+        if not period_utils.is_valid_period(self.period):
+            self.upload_error = (
+                "A period is required — the file is filed under "
+                "data/<client>/<period>/<source_type>/ and must match the period "
+                "you reconcile against. Enter one as YYYY-MM (for example 2026-08)."
+            )
+            return
 
         staged = list(self.pending)
         self.upload_progress = [
@@ -648,7 +1068,7 @@ class IngestionAiState(SharedUploadState):
                     source_type=self.source_type,
                     filename=pf.filename,
                     file_bytes=self._pending_bytes(pf.key),
-                    period=self.period or None,
+                    period=self.period.strip(),
                     actor=self.username,
                     client_ref=self._client_ref(),
                 )
@@ -694,6 +1114,8 @@ class IngestionAiState(SharedUploadState):
                 self.selected_upload_id = first["upload_id"]
                 self._load_review()
         self.period = ""
+        self.period_inferred = ""
+        self.period_inferred_source = ""
         self.clear_pending()
         self._load_all()
 
@@ -706,15 +1128,81 @@ class IngestionAiState(SharedUploadState):
         self.overrides = {}
         self.column_overrides = {}
         self.trust_reuse = False
+        self.layout_scope = "none"
+        self.mismatch_ack = False
+        self.show_passed_checks = False
+        self.show_all_preview = False
         self.mapping_error = ""
         self.allow_empty_ack = False
         self._load_review()
 
     @rx.event
+    @rx.event
     def back_to_uploads(self):
+        """Leave the review screen. §6 (D21): if there are unsaved edits, the
+        first attempt asks for confirmation rather than silently discarding
+        them; the second (the dialog's own button) proceeds."""
+        if self._has_unsaved_edits() and not self.discard_prompt_open:
+            self.discard_prompt_open = True
+            return
+        self.discard_prompt_open = False
         self.selected_upload_id = 0
         self.confirm_open = False
         self._load_uploads()
+
+    @rx.event
+    def confirm_discard_edits(self):
+        self.discard_prompt_open = False
+        self.selected_upload_id = 0
+        self.confirm_open = False
+        self._load_uploads()
+
+    @rx.event
+    def cancel_discard_edits(self):
+        self.discard_prompt_open = False
+
+    def _has_unsaved_edits(self) -> bool:
+        """True when the reviewer moved a field WITHOUT confirming — i.e. the
+        mapping table no longer matches what was stored."""
+        try:
+            stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+            proposal = {
+                m["canonical_field"]: (m.get("source_column") or None)
+                for m in (stored.get("mapping") or [])
+            }
+            if not proposal:
+                return False
+            for field_name, value in self.field_overrides.items():
+                if (proposal.get(field_name) or None) != (value or None):
+                    return True
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def load_history(self, record_type: str, record_id: str):
+        """F4 history rows for a record (mapping edits / confirmations)."""
+        try:
+            from setu.state.history import load_history as _load
+
+            return _load(record_type, record_id)
+        except Exception:  # noqa: BLE001
+            return []
+
+    @rx.var
+    def mapping_edit_count(self) -> int:
+        """How many field corrections / confirmations exist for the open
+        upload — shown on the View History trigger."""
+        return len(self.mapping_history)
+
+    @rx.var
+    def history_record_id(self) -> str:
+        try:
+            upload = ingestion_ai.get_upload(self.selected_upload_id)
+            if upload is None:
+                return ""
+            return f"{upload['source_type']}:{upload['filename']}"
+        except Exception:  # noqa: BLE001
+            return ""
 
     # ------------------------------------------------------------------
     # Re-run through model (per-file, confirm-gated)
@@ -785,16 +1273,32 @@ class IngestionAiState(SharedUploadState):
         self.review_filename = upload["filename"]
         self.review_source_label = SOURCE_TYPE_LABELS.get(upload["source_type"], upload["source_type"])
         self.review_status = upload["status"]
+        self.review_period = upload.get("period") or ""
 
         threshold = ingestion_ai.get_preselect_threshold()
         fields = report["field_mapping"] if report else []
         self.review_c5_used = bool(report.get("c5_context_used")) if report else False
 
+        # --- Corrective build: evidence-first model -----------------------
+        self._load_review_headline(upload, report)
+        self._load_review_checks(upload)
+        self._load_review_matrix(upload)
+        self._load_review_evidence(upload, report)
+        self._load_review_gate(upload)
+        # §5.6 — the correction/confirmation audit trail (F4, append-only).
+        try:
+            self.mapping_history = self.load_history(
+                "ingestion_mapping", f"{upload['source_type']}:{upload['filename']}"
+            )
+        except Exception:  # noqa: BLE001
+            self.mapping_history = []
+        self._load_normalised_preview(upload)
+
         needs: list[FieldRow] = []
         confident: list[FieldRow] = []
         for f in fields:
             # A mapped field with NO confidence is RULE-sourced (the
-            # deterministic GSTR-2B/IMS parser, or a trusted profile) — not a
+            # deterministic parser, or a trusted profile) — not a
             # low-confidence guess. Only an explicit numeric confidence below
             # the threshold counts as needing attention.
             conf = f.get("confidence")
@@ -906,6 +1410,238 @@ class IngestionAiState(SharedUploadState):
             )
         elif stored.get("status") == "wrong_slot":
             self.warning_banner = stored.get("message") or "This file looks like it belongs in a different upload slot."
+
+    # ------------------------------------------------------------------
+    # Corrective build (§5 Parts 2-7): evidence-first review helpers
+    # ------------------------------------------------------------------
+    def _load_review_headline(self, upload: dict, report: Optional[dict]) -> None:
+        """§7 item 1 — the identification headline: what this file IS."""
+        stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+        meta = stored.get("metadata") or {}
+        self.review_title = meta.get("report_title") or self.review_source_label
+        self.review_entity = meta.get("entity_name") or ""
+        # The upload's OWN client — never the list filter.
+        self.review_client_label = self._client_label(upload.get("client_id"))
+        period_start, period_end = meta.get("period_start"), meta.get("period_end")
+        if period_start and period_end:
+            self.review_period_label = f"{_pretty_date(period_start)} – {_pretty_date(period_end)}"
+        else:
+            self.review_period_label = self.review_period
+
+        rows = stored.get("mapping") or []
+        self.review_invoice_count = int(stored.get("row_count_out") or 0)
+
+        prov = ingestion_ai.provenance(self.selected_upload_id)
+        self.review_provenance_label = prov.get("label") or ""
+        self.review_provenance_detail = prov.get("detail") or ""
+        self.review_provenance_path = prov.get("path") or ""
+
+        # Period / entity mismatch → an explicit acknowledgement is required
+        # (§5 Part 3.1). Name matching alone must never hard-block: the file
+        # carries no buyer GSTIN, so this can only ever be a confirm.
+        msgs: list[str] = []
+        filed = self.review_period or ""
+        if filed and period_start and period_end and not period_start.startswith(filed):
+            msgs.append(
+                f"The file covers {_pretty_date(period_start)} to {_pretty_date(period_end)}, "
+                f"but it is filed under {filed}."
+            )
+        self.mismatch_banner = " ".join(msgs)
+        self.mismatch_ack = not msgs
+
+    def _load_review_checks(self, upload: dict) -> None:
+        """§7 item 3 — every §8 check, failures first. Silence is never a pass."""
+        stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+        validation = stored.get("validation") or []
+        rows: list[CheckRow] = []
+        for c in validation:
+            name = c.get("check") or ""
+            rows.append(CheckRow(
+                check=name,
+                label=_CHECK_LABELS.get(name, name.replace("_", " ").title()),
+                result=c.get("result") or "",
+                detail=c.get("detail") or "",
+                failed=c.get("result") in ("hard_stop", "row_flag"),
+            ))
+        self.checks = rows
+        self.checks_failed = [r for r in rows if r.failed]
+        self.checks_passed = [r for r in rows if not r.failed]
+
+    def _load_review_matrix(self, upload: dict) -> None:
+        """§7 item 4 — the head x rate matrix, so the grouping is visible."""
+        stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+        matrix = stored.get("rate_matrix") or []
+        self.rate_rows = [
+            RateRow(
+                head=m.get("head") or "",
+                rate_label=f"{m.get('rate'):g}%" if m.get("rate") is not None else "",
+                taxable_column=m.get("taxable_column") or "—",
+                tax_column=m.get("tax_column") or "—",
+                setu_field=m.get("canonical_field") or "",
+                mirror_of=m.get("mirror_of") or "",
+                mirror_note=(
+                    f"Mirror of {m['mirror_of']} — not added again"
+                    if m.get("mirror_of") else ""
+                ),
+            )
+            for m in matrix
+        ]
+        self.rate_note = (
+            "Each tax head is split across rate buckets, so Setu sums the buckets. "
+            "CGST and SGST restate the same taxable base, so only one side is added — "
+            "summing both would double-count it."
+            if self.rate_rows else ""
+        )
+        # Column dispositions (§5 Part 1.2) — signals + ignored.
+        self.ignored_columns = [
+            DispositionRow(
+                column=d.get("column") or "",
+                disposition=d.get("disposition") or "",
+                detail=d.get("detail") or "",
+                variant=(
+                    "ai" if d.get("disposition") == "validation-signal"
+                    else "placeholder"
+                ),
+            )
+            for d in (stored.get("dispositions") or [])
+            if d.get("disposition") in ("ignored", "validation-signal")
+        ]
+
+    def _load_review_evidence(self, upload: dict, report: Optional[dict]) -> None:
+        """§5 Part 4 — evidence chips, grouped Verified / Needs review / Not in this file."""
+        evidence = ingestion_ai.field_evidence(self.selected_upload_id)
+        stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+        mapping = {m["canonical_field"]: m for m in (stored.get("mapping") or [])}
+        if report:
+            for m in report.get("field_mapping") or []:
+                mapping.setdefault(m["canonical_field"], m)
+
+        verified: list[FieldEvidence] = []
+        review: list[FieldEvidence] = []
+        absent: list[FieldEvidence] = []
+        for f, m in mapping.items():
+            ev = evidence.get(f) or {}
+            # The STORED mapping uses `source_column`; the report's
+            # field_mapping uses `raw_column`. Accept either — a mismatch here
+            # silently renders every field as "Not in this file".
+            source_col = m.get("source_column") or m.get("raw_column") or ""
+            mapped = bool(source_col)
+            tier = _field_tier(f)
+            if not mapped:
+                status = "missing"
+            else:
+                status = ev.get("status") or "ai_only"
+            row = FieldEvidence(
+                canonical_field=f,
+                label=_FIELD_LABELS.get(f, f.replace("_", " ").title()),
+                tier=tier,
+                source_summary=source_col,
+                evidence_chip=ev.get("chip") or (
+                    "Not present in this file" if not mapped else "AI only"
+                ),
+                status=status,
+                mapped=mapped,
+            )
+            if not mapped:
+                absent.append(row)
+            elif status == "failed":
+                review.append(row)
+            elif status == "verified":
+                verified.append(row)
+            else:
+                review.append(row)
+
+        order = {f: i for i, f in enumerate(_CANONICAL_ORDER)}
+        key = lambda r: order.get(r.canonical_field, 999)
+        self.verified_fields = sorted(verified, key=key)
+        self.review_fields = sorted(review, key=key)
+        self.absent_fields = sorted(absent, key=key)
+        self.summary_verified = len(self.verified_fields)
+        self.summary_review = len(self.review_fields)
+        self.summary_absent = len(self.absent_fields)
+
+    def _load_review_gate(self, upload: dict) -> None:
+        """§6 — the confirm gate verdict, so the button and the pipeline agree."""
+        gate = ingestion_ai.confirm_gate(self.selected_upload_id)
+        self.gate_blocked = bool(gate.get("blocked"))
+        reasons = gate.get("reasons") or []
+        self.gate_reasons = " · ".join(reasons)
+        counts = gate.get("counts") or {}
+        parts = []
+        if counts.get("rows_out"):
+            parts.append(f"{counts['rows_out']} invoices")
+        if self.review_total_label:
+            parts.append(self.review_total_label)
+        parts.append(
+            "0 blocking issues" if not reasons
+            else f"{len(reasons)} blocking issue(s)"
+        )
+        self.gate_summary = " · ".join(parts)
+
+    def _load_normalised_preview(self, upload: dict) -> None:
+        """§7 item 5 — a preview of what SETU WILL READ, not the raw file.
+
+        This is the reviewer's real check: the canonical rows the pipeline
+        produced, with a totals row set against the file's own Total row.
+        A mapping that looks plausible column-by-column can be judged in one
+        glance here.
+        """
+        self.normalised_headers = []
+        self.normalised_rows = []
+        self.normalised_total_row = []
+        self.normalised_note = ""
+        try:
+            stored = ingestion_ai.stored_result_for_upload(self.selected_upload_id) or {}
+            mapping = stored.get("mapping") or []
+            if not mapping:
+                self.normalised_note = "No normalised rows available for this upload yet."
+                return
+            df = ingestion_ai.canonical_frame_for_upload(self.selected_upload_id)
+            if df is None or df.empty:
+                self.normalised_note = "No normalised rows available for this upload yet."
+                return
+
+            display = [f for f in _CANONICAL_ORDER if f in df.columns]
+            self.normalised_headers = [_FIELD_LABELS.get(f, f) for f in display]
+            limit = len(df) if self.show_all_preview else 20
+            rows: list[list[str]] = []
+            for _, r in df.head(limit).iterrows():
+                rows.append([_format_cell(f, r.get(f)) for f in display])
+            self.normalised_rows = rows
+
+            # Totals row — sums the money columns, so it can be set against
+            # the file's own Total row (already verified by control_total).
+            totals: list[str] = []
+            for f in display:
+                if f in _MONEY_FIELDS:
+                    try:
+                        from decimal import Decimal
+
+                        vals = [v for v in df[f].tolist() if v is not None]
+                        s = sum(vals, Decimal("0.00"))
+                        totals.append(_format_money(s))
+                    except Exception:  # noqa: BLE001
+                        totals.append("")
+                elif f == "invoice_number":
+                    totals.append(f"Total ({len(df)} invoices)")
+                else:
+                    totals.append("")
+            self.normalised_total_row = totals
+
+            # Supplier count from the normalised frame.
+            if "gstin" in df.columns:
+                self.review_supplier_count = int(df["gstin"].nunique(dropna=True))
+            if "invoice_value" in df.columns:
+                try:
+                    from decimal import Decimal
+
+                    vals = [v for v in df["invoice_value"].tolist() if v is not None]
+                    total = sum(vals, Decimal("0.00"))
+                    self.review_total_label = "₹" + _format_money(total)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            self.normalised_note = f"Normalised preview unavailable ({exc})."
 
     def _load_preview(self, upload: dict) -> None:
         """First several rows of the ACTUAL sheet, so the mapping can be
@@ -1098,6 +1834,19 @@ class IngestionAiState(SharedUploadState):
         if self.mapping_error:
             self.confirm_open = False
             return
+        # §6 — refuse at the UI layer too, with the SAME reasons the service
+        # will use, so the button and the pipeline can never disagree.
+        if self.gate_blocked:
+            self.mapping_error = "Confirm is blocked — " + self.gate_reasons
+            self.confirm_open = False
+            return
+        # A period/entity mismatch must be explicitly acknowledged (§5.3.1).
+        if self.mismatch_banner and not self.mismatch_ack:
+            self.mapping_error = (
+                "Acknowledge the period/client mismatch before confirming."
+            )
+            self.confirm_open = False
+            return
         if self.review_is_empty and not self.allow_empty_ack:
             self.mapping_error = (
                 "This file read 0 rows. Tick the acknowledgement to confirm it as a "
@@ -1114,6 +1863,7 @@ class IngestionAiState(SharedUploadState):
                 self.selected_upload_id,
                 field_overrides=override_map,
                 trust_for_reuse=self.trust_reuse,
+                layout_scope=self.layout_scope,
                 actor=self.username,
                 client_ref=self._client_ref(),
                 allow_empty=self.allow_empty_ack,

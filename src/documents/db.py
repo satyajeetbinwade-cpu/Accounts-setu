@@ -116,6 +116,18 @@ def set_document_notes(conn: sqlite3.Connection, document_id: int, notes: str) -
     conn.commit()
 
 
+def set_document_period(conn: sqlite3.Connection, document_id: int, period: Optional[str]) -> None:
+    """Re-file a document under a different period.
+
+    The period is the folder key the reconciliation engine reads
+    (``data/<client>/<period>/<source_type>/``), so correcting it is what
+    makes a previously unfiled upload reachable by the Run/Reconcile
+    pickers.
+    """
+    conn.execute("UPDATE documents SET period = ? WHERE document_id = ?", (period, document_id))
+    conn.commit()
+
+
 def discard_document(conn: sqlite3.Connection, document_id: int, actor: str) -> None:
     """Hard path for the Unified Review Queue's explicit 'discard' resolution.
     Removes the document row (and, via FK cascade-less explicit deletes, its

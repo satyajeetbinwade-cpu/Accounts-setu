@@ -398,6 +398,8 @@ class ClientState(AuthState):
         self.selected_branch_id = 0
         self.snapshot_year = ""
         self._load_profile()
+        if self.profile_tab == "Documents":
+            return self._load_documents_vault()
 
     @rx.event
     def back_to_roster(self):
@@ -407,6 +409,22 @@ class ClientState(AuthState):
     @rx.event
     def set_profile_tab(self, tab: str):
         self.profile_tab = tab
+        if tab == "Documents":
+            return self._load_documents_vault()
+
+    def _load_documents_vault(self) -> None:
+        """Load the embedded F3 document vault for the selected client.
+
+        The vault is a separate state (DocumentsState); this hands it the
+        client id so the profile's Documents tab shows exactly the files
+        filed for THIS client — including uploads made from Smart Document
+        Ingestion, which file into F3 under the same client id.
+        """
+        if not self.selected_client_id:
+            return
+        from setu.state.documents_state import DocumentsState
+
+        return DocumentsState.load_for_client(self.selected_client_id)
 
     # ------------------------------------------------------------------
     # Branch actions

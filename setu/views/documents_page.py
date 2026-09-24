@@ -193,17 +193,21 @@ def _vault() -> rx.Component:
             DocumentsState.selected_document_id != 0,
             _document_detail(),
             rx.vstack(
-                rx.hstack(
-                    rx.text("Client:", style=t.TEXT["micro"]),
-                    rx.select(
-                        DocumentsState.vault_client_names,
-                        value=DocumentsState.vault_client_name,
-                        on_change=DocumentsState.set_vault_client_by_name,
-                        placeholder="Select a client",
-                        width="320px",
+                rx.cond(
+                    DocumentsState.embedded,
+                    rx.fragment(),
+                    rx.hstack(
+                        rx.text("Client:", style=t.TEXT["micro"]),
+                        rx.select(
+                            DocumentsState.vault_client_names,
+                            value=DocumentsState.vault_client_name,
+                            on_change=DocumentsState.set_vault_client_by_name,
+                            placeholder="Select a client",
+                            width="320px",
+                        ),
+                        spacing="2",
+                        align="center",
                     ),
-                    spacing="2",
-                    align="center",
                 ),
                 rx.cond(DocumentsState.can_upload, _upload_widget(), rx.fragment()),
                 c.card(
@@ -897,6 +901,19 @@ def _recently_deleted() -> rx.Component:
             width="100%",
         ),
         width="100%",
+    )
+
+
+def embedded_vault() -> rx.Component:
+    """The scoped document vault, rendered INSIDE another screen (F2's
+    client profile Documents tab). The client is fixed by the caller via
+    ``DocumentsState.load_for_client``, so the client picker is hidden.
+    Renders an inline reason instead of redirecting when the signed-in user
+    lacks documents.view — the caller has already passed its own gate."""
+    return rx.cond(
+        DocumentsState.can_view,
+        _vault(),
+        c.inline_reason("You do not have permission to view documents."),
     )
 
 

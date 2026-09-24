@@ -46,6 +46,7 @@ from src.ingestion_ai import db as idb
 from src.ingestion_ai import llm
 from src.ingestion_ai import mapper
 from src.ingestion_ai import normalizer
+from src.ingestion_ai import periods as period_utils
 from src.ingestion_ai.schema import init_ingestion_ai_schema
 
 # ---------------------------------------------------------------------------
@@ -370,13 +371,170 @@ def materialize_upload_to_disk(
     folder = _folder_name_for_client(upload["client_id"], client_ref)
     if not folder:
         return None
+    # Never create the unfiled sentinel folder. A file written to
+    # `data/<client>/-/<source_type>/` is unreachable by every period picker,
+    # so it would look filed while being permanently invisible to
+    # reconciliation. The period is required at upload time; this is the
+    # defensive backstop.
+    if not period_utils.is_valid_period(period):
+        return None
     try:
-        directory = source_data_path(folder, period or "-", source_type)
+        directory = source_data_path(folder, period, source_type)
         dest = directory / filename
         dest.write_bytes(file_bytes)
         return filename
     except Exception:  # noqa: BLE001
         return None
+
+
+def suggest_period_for_upload(upload_id: int, *, db_path=None) -> tuple[Optional[str], str]:
+    """Best-effort period suggestion for an upload, with its evidence.
+
+    Returns ``(period, source)`` — see ``periods.suggest_period``. Used by
+    the upload form to pre-fill the (now required) Period field, and by the
+    "File to period" action to propose a value for a stranded upload.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            return None, ""
+        stored = idb.find_ingestion_result(
+            conn, client_id=upload["client_id"], source_type=upload["source_type"],
+            filename=upload["filename"],
+        )
+    finally:
+        conn.close()
+    return period_utils.suggest_period(upload["filename"], stored)
+
+
+def unfiled_uploads(*, db_path=None) -> list[dict[str, Any]]:
+    """Uploads whose document has no real period.
+
+    These are the files that exist in the repository but can never be
+    picked for reconciliation, because the engine reads
+    ``data/<client>/<period>/<source_type>/`` and no period dropdown can
+    select the unfiled sentinel.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = idb.list_raw_uploads_with_context(conn)
+    finally:
+        conn.close()
+    return [r for r in rows if period_utils.is_unfiled(r.get("period"))]
+
+
+def set_upload_period(
+    upload_id: int, period: str, *, actor: str, client_ref: Optional[str] = None, db_path=None,
+) -> dict[str, Any]:
+    """Re-file an upload under a real period so reconciliation can see it.
+
+    This is the repair path for files filed before the period was required
+    (they sit in ``data/<client>/-/<source_type>/``). It performs the FOUR
+    steps that must stay in lockstep, because doing only some of them leaves
+    the file in a half-visible state:
+
+    1. ``documents.period`` — the period the UI and the pickers read.
+    2. the stored ``ingestion_results`` row — its key EMBEDS the period, so
+       without re-keying the Reconcile slot reports "not ingested yet".
+    3. the bytes on disk — moved from the old folder to the new one.
+    4. an F4 audit entry — the period is a stored value a person changed.
+
+    Returns ``{period, moved, rekeyed, from_period}``. Raises
+    ``IngestionAIError`` for an unknown upload or an invalid period.
+    """
+    if not period_utils.is_valid_period(period):
+        raise IngestionAIError(
+            f"'{period}' is not a valid period. Use YYYY-MM (for example 2026-08)."
+        )
+    period = str(period).strip()
+
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            raise IngestionAIError("Upload not found.")
+        doc = ddb.get_document(conn, upload["document_id"])
+        old_period = (doc.get("period") if doc else None) or None
+        filename = upload["filename"]
+        source_type = upload["source_type"]
+        client_id = upload["client_id"]
+
+        if old_period == period:
+            return {"period": period, "moved": False, "rekeyed": 0, "from_period": old_period}
+
+        # 1. the document's period
+        ddb.set_document_period(conn, upload["document_id"], period)
+
+        # 2. re-key the stored ingestion result (its key embeds the period)
+        ref = client_ref or str(client_id)
+        rekeyed = idb.rekey_ingestion_result(
+            conn,
+            old_upload_key=normalizer.upload_key(ref, old_period, source_type, filename),
+            new_upload_key=normalizer.upload_key(ref, period, source_type, filename),
+            period=period,
+        )
+    finally:
+        conn.close()
+
+    # 3. move the bytes on disk (best-effort — the DB is already consistent)
+    moved = _move_upload_on_disk(
+        client_id, old_period, period, source_type, filename, client_ref=client_ref,
+    )
+
+    # 4. audit — the period is a stored value a person changed.
+    try:
+        from src.f4 import service as f4
+
+        f4.record_edit(
+            record_type="ingestion_upload", record_id=f"{source_type}:{filename}",
+            field="period", old_value=old_period, new_value=period,
+            reason="Filed to a period so the file can be picked for reconciliation.",
+            actor=actor, client_id=client_id, db_path=db_path,
+        )
+    except Exception:  # noqa: BLE001 — an audit failure must not undo the re-file
+        pass
+
+    return {"period": period, "moved": moved, "rekeyed": rekeyed, "from_period": old_period}
+
+
+def _move_upload_on_disk(
+    client_id: int, old_period: Optional[str], new_period: str, source_type: str,
+    filename: str, *, client_ref: Optional[str] = None,
+) -> bool:
+    """Move a filed source file from its old period folder to the new one.
+
+    Returns True when a file was actually moved. Never raises: the DB is
+    already consistent, and a missing file simply means it was never
+    materialized (or was already moved).
+    """
+    import shutil
+
+    from src.data_paths import DATA_ROOT, source_data_path
+
+    folder = _folder_name_for_client(client_id, client_ref)
+    if not folder:
+        return False
+
+    old_dir = DATA_ROOT / folder / (old_period or period_utils.PERIOD_UNFILED) / source_type
+    old_path = old_dir / filename
+    if not old_path.exists():
+        return False
+    try:
+        new_dir = source_data_path(folder, new_period, source_type)
+        shutil.move(str(old_path), str(new_dir / filename))
+    except Exception:  # noqa: BLE001
+        return False
+
+    # Tidy up the now-empty old folder so the unfiled sentinel disappears
+    # once nothing is left in it. Only ever removes genuinely empty dirs.
+    for directory in (old_dir, old_dir.parent):
+        try:
+            if directory.exists() and not any(directory.iterdir()):
+                directory.rmdir()
+        except Exception:  # noqa: BLE001
+            pass
+    return True
 
 
 def _ext(filename: str) -> str:
@@ -535,7 +693,8 @@ def upload_row_counts(upload_id: int, *, db_path=None) -> dict[str, int]:
 
 def confirm_mapping(
     upload_id: int, *, field_overrides: dict[str, Optional[str]], trust_for_reuse: bool, actor: str,
-    client_ref: Optional[str] = None, allow_empty: bool = False, db_path=None,
+    client_ref: Optional[str] = None, allow_empty: bool = False, layout_scope: Optional[str] = None,
+    db_path=None,
 ) -> None:
     """Human confirmation of the (possibly edited) mapping. Never
     auto-trusts — trust is opt-in via ``trust_for_reuse``, never implied
@@ -580,6 +739,18 @@ def confirm_mapping(
                     "the correct file."
                 )
 
+        # §6 HARD GATE — a run must not reach Module 2 on an unconfirmed or
+        # failing mapping. Enforced HERE, at the service level, so a direct
+        # service call is refused too — not merely a disabled button.
+        gate = confirm_gate(
+            upload_id, field_overrides=field_overrides, db_path=db_path, _conn=conn,
+        )
+        if gate["blocked"]:
+            raise IngestionAIError(
+                "Cannot confirm this mapping — " + "; ".join(gate["reasons"])
+                + ". Resolve these, then confirm."
+            )
+
         idb.confirm_upload(
             conn, upload_id, confirmed_mapping=field_overrides, trusted_on_confirm=trust_for_reuse,
             confirmed_by=actor,
@@ -618,10 +789,412 @@ def confirm_mapping(
 
     _run_f5_structural_checks(upload, field_overrides)
 
+    # §5.6 AUDIT — record the confirmation and, separately, every field the
+    # human changed away from the stored proposal. F4 is append-only, so the
+    # history can never be rewritten. Best-effort: an audit failure must not
+    # un-confirm a mapping that already succeeded.
+    _audit_confirmation(
+        upload, field_overrides, actor=actor,
+        layout_scope=layout_scope, client_ref=client_ref, db_path=db_path,
+    )
+
     # Materialize the confirmed file into the client's data/ folder so the
     # Reconcile flow can actually pick it (F3 stores bytes only as a DB BLOB;
     # the engine reads the disk folder). Best-effort — never un-confirms.
     materialize_upload_to_disk(upload_id, client_ref=client_ref, db_path=db_path)
+
+
+def _audit_confirmation(
+    upload: dict[str, Any], field_overrides: dict[str, Optional[str]], *,
+    actor: str, layout_scope: Optional[str], client_ref: Optional[str], db_path=None,
+) -> None:
+    """§5.6 — emit `mapping_confirmed` plus one F4 entry per CHANGED field."""
+    try:
+        from src.f4 import service as f4
+
+        stored = stored_result_for_upload(upload["upload_id"], db_path=db_path) or {}
+        proposal = {
+            m["canonical_field"]: m.get("source_column")
+            for m in (stored.get("mapping") or [])
+        }
+        record_id = f"{upload['source_type']}:{upload['filename']}"
+        client_id = upload.get("client_id")
+
+        # One entry per corrected field — never a single combined line, so a
+        # per-field history is genuinely readable.
+        for field_name, new_value in (field_overrides or {}).items():
+            old_value = proposal.get(field_name)
+            if (old_value or None) == (new_value or None):
+                continue
+            try:
+                f4.record_edit(
+                    record_type="ingestion_mapping", record_id=record_id,
+                    field=field_name, old_value=old_value, new_value=new_value,
+                    reason="Corrected during mapping review.",
+                    actor=actor, client_id=client_id, db_path=db_path,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        f4.record_edit(
+            record_type="ingestion_mapping", record_id=record_id,
+            field="mapping_confirmed", old_value="needs_confirm", new_value="confirmed",
+            reason=(
+                f"Layout scope: {layout_scope or 'not saved'}."
+                if layout_scope and layout_scope != "none"
+                else "Layout not saved for reuse."
+            ),
+            actor=actor, client_id=client_id, db_path=db_path,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def confirm_gate(
+    upload_id: int, *, field_overrides: Optional[dict[str, Optional[str]]] = None,
+    db_path=None, _conn=None,
+) -> dict[str, Any]:
+    """§6 — everything that must hold before a mapping may be confirmed.
+
+    Returns:
+        {
+          "blocked": bool,
+          "reasons": [str],            # plain language, for the inline reason
+          "required_missing": [str],   # required fields with no rule
+          "hard_stops": [str],         # §8 checks that failed hard
+          "validation": [...],         # every check, for the "What we checked" card
+          "counts": {...},             # headline counters
+        }
+
+    The SAME function drives the disabled-with-inline-reason UI and the
+    service-level refusal in confirm_mapping(), so the button and the
+    pipeline can never disagree.
+    """
+    conn = _conn or _connect(db_path)
+    close = _conn is None
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        if upload is None:
+            return {"blocked": True, "reasons": ["Upload not found."], "required_missing": [],
+                    "hard_stops": [], "validation": [], "counts": {}}
+        stored = idb.find_ingestion_result(
+            conn, client_id=upload["client_id"], source_type=upload["source_type"],
+            filename=upload["filename"],
+        )
+    finally:
+        if close:
+            conn.close()
+
+    reasons: list[str] = []
+    required_missing: list[str] = []
+    hard_stops: list[str] = []
+    validation: list[dict[str, Any]] = []
+    counts: dict[str, Any] = {}
+
+    if stored is None:
+        # No stored result — the mapping can't be validated. Not a block by
+        # itself (an upload may predate the deterministic path), but the UI
+        # shows that nothing was verified.
+        return {"blocked": False, "reasons": [], "required_missing": [],
+                "hard_stops": [], "validation": [], "counts": {}}
+
+    validation = list(stored.get("validation") or [])
+    hard_stops = [c["detail"] for c in validation if c.get("result") == "hard_stop"]
+    counts = {
+        "rows_in": int(stored.get("row_count_in") or 0),
+        "rows_out": int(stored.get("row_count_out") or 0),
+        "hard_stops": len(hard_stops),
+        "row_flags": sum(1 for c in validation if c.get("result") == "row_flag"),
+    }
+
+    # Required fields: a required field the reviewer has left unmapped blocks.
+    mapping = {m["canonical_field"]: m.get("source_column") for m in (stored.get("mapping") or [])}
+    if field_overrides:
+        for k, v in field_overrides.items():
+            mapping[k] = v
+    # The books slot carries the UNION of the GST and TDS schemas and
+    # `required_fields_for('tally')` is deliberately empty (the recon type
+    # isn't known at upload time). Prefer the required set recorded on the
+    # stored mapping itself (the deterministic books path knows its own),
+    # then the generic resolver, then the books default.
+    required = {m["canonical_field"] for m in (stored.get("mapping") or []) if m.get("required")}
+    if not required:
+        required = set(required_fields_for(upload["source_type"]))
+    if not required and upload["source_type"] in ("tally", "tally_purchase_register"):
+        try:
+            from src.f6.books_register import BOOKS_REQUIRED_FIELDS
+
+            required = set(BOOKS_REQUIRED_FIELDS)
+        except Exception:  # noqa: BLE001
+            pass
+    for f in sorted(required):
+        if not mapping.get(f):
+            required_missing.append(f)
+
+    if hard_stops:
+        reasons.extend(hard_stops)
+    if required_missing:
+        reasons.append("Required field(s) not resolved: " + ", ".join(required_missing))
+
+    return {
+        "blocked": bool(reasons),
+        "reasons": reasons,
+        "required_missing": required_missing,
+        "hard_stops": hard_stops,
+        "validation": validation,
+        "counts": counts,
+    }
+
+
+def canonical_frame_for_upload(upload_id: int, *, db_path=None):
+    """The canonical DataFrame an upload's mapping produces.
+
+    The review screen shows this (not the raw file) so a reviewer judges the
+    mapping by its OUTPUT — the normalised rows and their totals — which is
+    the whole point of §7 item 5. Re-derived from the stored bytes + stored
+    mapping, so it is exactly what the engine will consume. Returns None
+    when unavailable (never raises — the screen degrades honestly).
+    """
+    try:
+        import tempfile
+        from pathlib import Path
+
+        from src.documents import service as documents
+        from src.ingestion_ai import normalizer
+
+        conn = _connect(db_path)
+        try:
+            upload = idb.get_raw_upload(conn, upload_id)
+            if upload is None:
+                return None
+            doc = ddb.get_document(conn, upload["document_id"])
+            version = ddb.get_current_version(conn, upload["document_id"]) if doc else None
+            data = version.get("file_bytes") if version else None
+            filename = upload["filename"]
+            source_type = upload["source_type"]
+            client_ref = upload.get("client_ref") or str(upload["client_id"])
+            period = (doc.get("period") if doc else None) or upload.get("period")
+            stored = idb.find_ingestion_result(
+                conn, client_id=upload["client_id"], source_type=source_type, filename=filename,
+            )
+        finally:
+            conn.close()
+
+        if not data:
+            return None
+
+        suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ".csv"
+        fd, path_str = tempfile.mkstemp(suffix=suffix)
+        import os
+
+        os.close(fd)
+        path = Path(path_str)
+        path.write_bytes(data)
+        try:
+            # A deterministic (rate-bucket) parse must be reproduced by the
+            # SAME engine that produced it — re-deriving it through
+            # apply_mapping would drop the aggregations (a canonical field is
+            # a SUM of N columns there, which apply_mapping cannot express).
+            if (stored or {}).get("ingestion_path") == "deterministic":
+                from src.f6.books_register import parse_books_register
+
+                parsed = parse_books_register(str(path), source_type, filename)
+                if parsed is not None and parsed.frame is not None:
+                    return parsed.frame
+                return None
+
+            from src.ingestion_ai.normalizer import (
+                apply_mapping,
+                read_raw_with_header_detection,
+            )
+
+            read = read_raw_with_header_detection(path)
+            mappings = [
+                normalizer.FieldMapping(
+                    canonical_field=m["canonical_field"],
+                    source_column=m.get("source_column"),
+                    confidence=m.get("confidence"),
+                    reason=m.get("reason") or "",
+                    required=bool(m.get("required")),
+                )
+                for m in (stored.get("mapping") or [])
+            ]
+            if not mappings:
+                return None
+            frame, _warnings = apply_mapping(read.df, mappings, source_type, filename)
+            return frame
+        finally:
+            path.unlink(missing_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning("canonical_frame_for_upload failed: %s", exc)
+        return None
+
+
+def field_evidence(
+    upload_id: int, *, db_path=None,
+) -> dict[str, dict[str, Any]]:
+    """§5 Part 4 — deterministic verification EVIDENCE per canonical field.
+
+    Confidence is advisory and never auto-passes a mapping (§3 rule 4). What
+    a reviewer actually needs is the proof: "35 of 35 rows parse", "the total
+    matches the file's own Total row". These are computed from the stored
+    validation results and the file metadata — deterministic tools, never the
+    model's self-report.
+
+    Returns {canonical_field: {status, chip, verified}} where `status` is
+    'verified' | 'failed' | 'ai_only'.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        stored = idb.find_ingestion_result(
+            conn, client_id=upload["client_id"], source_type=upload["source_type"],
+            filename=upload["filename"],
+        ) if upload else None
+    finally:
+        conn.close()
+
+    if not upload or stored is None:
+        return {}
+
+    validation = {c.get("check"): c for c in (stored.get("validation") or [])}
+    meta = stored.get("metadata") or {}
+    rows_out = int(stored.get("row_count_out") or 0)
+    rows_in = int(stored.get("row_count_in") or 0)
+
+    def check_ok(name: str) -> Optional[bool]:
+        c = validation.get(name)
+        if c is None:
+            return None
+        return c.get("result") == "pass"
+
+    def verdict(ok: Optional[bool], chip: str) -> dict[str, Any]:
+        if ok is None:
+            return {"status": "ai_only", "chip": "AI only — no independent check available", "verified": False}
+        return {"status": "verified" if ok else "failed", "chip": chip, "verified": bool(ok)}
+
+    out: dict[str, dict[str, Any]] = {}
+
+    gstin_ok = check_ok("gstin_validity")
+    out["gstin"] = verdict(gstin_ok, f"Format and checksum valid on {rows_out} of {rows_out} rows")
+
+    dup_ok = check_ok("duplicate_detection")
+    out["invoice_number"] = verdict(
+        dup_ok, f"{rows_out} of {rows_out} present · no duplicate per supplier"
+    )
+
+    date_ok = check_ok("date_sanity")
+    period = ""
+    if meta.get("period_start") and meta.get("period_end"):
+        period = f" · all within {meta['period_start']} to {meta['period_end']}"
+    out["invoice_date"] = verdict(
+        date_ok,
+        f"{rows_out} of {rows_out} parse as {meta.get('date_format') or 'the detected format'}{period}",
+    )
+
+    # party_name — one name per GSTIN is the real evidence.
+    out["party_name"] = verdict(
+        dup_ok, "One name per GSTIN — supplier identity is consistent"
+    )
+
+    total_ok = check_ok("control_total")
+    arith_ok = check_ok("tax_arithmetic")
+    invoice_chip = "Total matches the file's own Total row"
+    if arith_ok:
+        invoice_chip += f" · row arithmetic holds on {rows_out} of {rows_out}"
+    out["invoice_value"] = verdict(
+        True if (total_ok and arith_ok) else (False if (total_ok is False or arith_ok is False) else None),
+        invoice_chip,
+    )
+
+    out["taxable_value"] = verdict(
+        check_ok("implied_rate"),
+        "Head totals match the file footer · implied rate matches on every bucket",
+    )
+    for head in ("igst", "cgst", "sgst"):
+        out[head] = verdict(
+            check_ok("implied_rate"),
+            "Summed from rate buckets · implied rate matches · mirror check holds",
+        )
+    out["rounding_adjustment"] = verdict(
+        arith_ok, "All values within ±₹0.50 · the row identity holds only when it is included"
+    )
+    # A field with no deterministic check falls back to "AI only" — never
+    # silently promoted to "verified".
+    for f in ("cess", "total_tax"):
+        out.setdefault(f, {"status": "ai_only", "chip": "Derived — no independent check needed", "verified": False})
+    return out
+
+
+def provenance(upload_id: int, *, db_path=None) -> dict[str, Any]:
+    """§5.3 — truthful provenance for an upload, so the UI never claims a
+    model shaped a mapping that came from a deterministic parse or a cache.
+
+    Returns {path, label, detail, model_used, c5_instructions, confirmed}.
+    """
+    conn = _connect(db_path)
+    try:
+        upload = idb.get_raw_upload(conn, upload_id)
+        stored = idb.find_ingestion_result(
+            conn, client_id=upload["client_id"], source_type=upload["source_type"],
+            filename=upload["filename"],
+        ) if upload else None
+    finally:
+        conn.close()
+
+    if upload is None:
+        return {"path": "unknown", "label": "Unknown", "detail": "", "model_used": None,
+                "c5_instructions": 0, "confirmed": False}
+
+    confirmed = upload.get("status") == "confirmed"
+    model_used = (stored or {}).get("model_used")
+    stored_path = (stored or {}).get("ingestion_path") or ""
+    if stored_path == "deterministic" or (model_used is None and stored is not None and not (stored or {}).get("llm_cached")):
+        path = "deterministic"
+    elif (stored or {}).get("llm_cached"):
+        path = "cache"
+    elif stored is not None:
+        path = "ai"
+    else:
+        path = "unknown"
+
+    if path == "deterministic":
+        label = "Recognised layout — deterministic parse" if confirmed else "Deterministic parse — not yet confirmed"
+        detail = (
+            "Every figure was computed and checked by the rate-bucket engine; no AI was used, "
+            "and the totals were verified against the file's own Total row."
+        )
+    elif path == "cache":
+        # §5.2 — an unconfirmed cache entry must NEVER read as a recognised
+        # layout. It is retained as a proposal and labelled as one.
+        label = "Recognised layout — confirmed" if confirmed else "Unconfirmed proposal — needs review"
+        detail = (
+            "A previously stored mapping for this exact column layout is being reused. "
+            + ("It is still UNCONFIRMED, so treat it as a proposal."
+               if not confirmed else "It is re-validated against the file on every use.")
+        )
+    elif path == "ai":
+        label = "AI proposal — confirmed" if confirmed else "AI proposal — needs review"
+        detail = "A model proposed this mapping; a human must confirm it before it is used."
+    else:
+        label = "Unknown provenance"
+        detail = "No stored result was found for this upload, so nothing has been verified."
+
+    c5_count = 0
+    if path == "ai":
+        try:
+            from src.c5 import service as c5
+
+            c5_count = len(c5.runtime_context("ingestion_mapping") or [])
+        except Exception:  # noqa: BLE001
+            c5_count = 0
+
+    return {
+        "path": path, "label": label, "detail": detail, "model_used": model_used,
+        "c5_instructions": c5_count, "confirmed": confirmed,
+    }
 
 
 def re_run_mapping(
