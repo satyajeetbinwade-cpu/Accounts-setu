@@ -61,17 +61,40 @@ def _run_gst(
     *,
     client_id: int | None = None,
     actor: str = "system",
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     if USE_CANONICAL_INGESTION:
-        books_df, portal_df, source_files, caveats = load_canonical_pair(
+        books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
             client, period, "GST", selected_files, client_id=client_id, actor=actor
         )
     else:
         books_df, portal_df = load_gst_pair(client, period, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
+        run_notes = []
     results = match_gst(books_df, portal_df, gst_config)
-    return results, source_files, caveats
+    # Invoice-number keys that collide within one GSTIN are REPORTED, never
+    # silently used (D3) — surfaced as run notes.
+    try:
+        from src.matching.gst_matcher import invoice_key_collisions
+
+        for c in invoice_key_collisions(books_df, portal_df, gst_config):
+            run_notes.append({
+                "code": "invoice_key_collision",
+                "kind": "data_quality",
+                "title": (
+                    f"Invoice-number key '{c['key']}' collides within GSTIN "
+                    f"{c['gstin']} on the {c['side']} side"
+                ),
+                "detail": (
+                    f"These {c['side']}-side invoice numbers all normalise to the same key "
+                    f"'{c['key']}': {', '.join(c['numbers'])}. The key cannot tell them apart, "
+                    "so it was not used as an exact match for this supplier."
+                ),
+                "count": len(c["numbers"]),
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    return results, source_files, caveats, run_notes
 
 
 def _run_tds(
@@ -82,21 +105,22 @@ def _run_tds(
     *,
     client_id: int | None = None,
     actor: str = "system",
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     if USE_CANONICAL_INGESTION:
-        books_df, portal_df, source_files, caveats = load_canonical_pair(
+        books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
             client, period, "TDS", selected_files, client_id=client_id, actor=actor
         )
     else:
         books_df, portal_df = load_tds_pair(client, period, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
+        run_notes = []
 
     results: list[dict[str, Any]] = []
     results.extend(match_tds_deductor(books_df, portal_df, tds_config))
     results.extend(match_tds_deductee(books_df, portal_df, tds_config))
     results.extend(validate_section_rates(books_df, tds_config))
-    return results, source_files, caveats
+    return results, source_files, caveats, run_notes
 
 
 def _run_other(
@@ -136,9 +160,8 @@ def _run_other(
         raise FileNotFoundError(
             f"No 2C source file found for client={client!r} period={period!r}"
         )
-
     if USE_CANONICAL_INGESTION:
-        books_df, portal_df, source_files, caveats = load_canonical_pair(
+        books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
             client, period, "OTHER", {**(selected_files or {}), "__source_key": source_key},
             client_id=client_id, actor=actor,
         )
@@ -146,8 +169,9 @@ def _run_other(
         books_df, portal_df = load_other_pair(client, period, source_key, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
+        run_notes = []
     results = match_other(books_df, portal_df, other_config)
-    return results, source_files, caveats
+    return results, source_files, caveats, run_notes
 
 
 def execute_run(
@@ -200,17 +224,17 @@ def execute_run(
     try:
         try:
             if recon_type == "GST":
-                results, used_files, caveats = _run_gst(
+                results, used_files, caveats, run_notes = _run_gst(
                     client, period, config["gst"], selected_files,
                     client_id=client_id, actor=actor,
                 )
             elif recon_type == "TDS":
-                results, used_files, caveats = _run_tds(
+                results, used_files, caveats, run_notes = _run_tds(
                     client, period, config["tds"], selected_files,
                     client_id=client_id, actor=actor,
                 )
             else:
-                results, used_files, caveats = _run_other(
+                results, used_files, caveats, run_notes = _run_other(
                     client, period, config["other"], selected_files,
                     client_id=client_id, actor=actor,
                 )
@@ -249,6 +273,7 @@ def execute_run(
             config_snapshot=config_snapshot,
             source_file_names=final_source_files,
             caveats=caveats,
+            run_notes=run_notes,
         )
 
         for r in results:

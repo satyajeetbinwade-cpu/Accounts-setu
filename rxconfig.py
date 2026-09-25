@@ -30,7 +30,7 @@ os.environ.setdefault(
 
 config = rx.Config(
     app_name="setu",
-    frontend_port=3000,
+    frontend_port=int(os.environ.get('FRONTEND_PORT', 3000)),
     backend_port=8000,
     # Remote testers hit this app through the server's IP/hostname (not
     # "localhost"), so the browser's websocket handshake to the backend must

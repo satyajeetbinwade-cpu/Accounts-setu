@@ -775,17 +775,55 @@ def _row_value(books, portal) -> float:
     return 0.0
 
 
+# Provenance fields describe WHERE a value came from, not the value itself —
+# they must never appear as a "changed field" (D5).
+_PROVENANCE_FIELDS = {"source_type", "source_file", "original_row"}
+
+
 def _diff_fields(books, portal) -> set[str]:
+    """Fields whose values genuinely differ between the two sides.
+
+    Numerics compare AS NUMBERS within tolerance, so 0.0 vs 0 and
+    26066 vs 26066.0 are NOT differences. Provenance fields are never
+    compared, and a field empty on BOTH sides is not a difference.
+    """
     if not isinstance(books, dict) or not isinstance(portal, dict):
         return set()
-    keys = (set(books) | set(portal)) - {"original_row"}
+    keys = (set(books) | set(portal)) - _PROVENANCE_FIELDS
     out = set()
     for k in keys:
+        if str(k).startswith("_"):
+            continue
         bv, pv = books.get(k), portal.get(k)
-        bs, ps = ("" if bv is None else str(bv)), ("" if pv is None else str(pv))
-        if bs != ps:
+        b_empty = bv is None or str(bv).strip() in ("", "nan", "None")
+        p_empty = pv is None or str(pv).strip() in ("", "nan", "None")
+        if b_empty and p_empty:
+            continue
+        bn, pn = _to_number(bv), _to_number(pv)
+        if bn is not None or pn is not None:
+            if abs((bn or 0.0) - (pn or 0.0)) > _COMPARE_TOLERANCE:
+                out.add(k)
+            continue
+        if str(bv).strip() != str(pv).strip():
             out.add(k)
     return out
+
+
+def _to_number(v):
+    if v is None:
+        return None
+    try:
+        s = str(v).strip().replace(",", "").replace("₹", "")
+        if s in ("", "nan", "None"):
+            return None
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+# Mirrors the C1 GST amount tolerance the engine uses; a numeric difference
+# at or below this is not a "changed field".
+_COMPARE_TOLERANCE = 10.0
 
 
 def _record_fields(record, differing: set[str]) -> list[RecordField]:

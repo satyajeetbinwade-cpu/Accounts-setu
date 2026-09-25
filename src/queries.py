@@ -21,7 +21,8 @@ from src import db
 _RESULT_COLUMNS = [
     "result_id", "run_id", "fingerprint", "classification", "confidence_score",
     "confidence_band", "books_record", "portal_record", "match_reason",
-    "difference_type", "matched_record_ids", "reviewed", "reviewer_note",
+    "difference_type", "matched_record_ids", "difference", "itc_at_risk",
+    "gross_value", "reviewed", "reviewer_note",
 ]
 
 
@@ -284,6 +285,16 @@ def get_run(run_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
                 result["caveats"] = []
         else:
             result["caveats"] = []
+        # Run notes (D7): sources deliberately NOT reconciled, and coverage
+        # declarations (e.g. IMS statuses). Distinct from caveats.
+        raw_notes = result.get("run_notes")
+        if raw_notes:
+            try:
+                result["run_notes"] = json.loads(raw_notes)
+            except (TypeError, ValueError):
+                result["run_notes"] = []
+        else:
+            result["run_notes"] = []
         return result
     finally:
         conn.close()

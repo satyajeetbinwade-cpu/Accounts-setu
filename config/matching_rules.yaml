@@ -37,6 +37,21 @@ gst:
   # force the result to Low confidence.
   ambiguity_margin: 5.0
 
+  # --- Invoice-number normalisation ---
+  # Financial-year tokens that a portal export appends to an invoice number
+  # ("T11439/26-27", "RL/2915/26-27") but the books export omits ("T11439",
+  # "2915"). These are STRIPPED before any matching key is derived, so the
+  # trailing-numeric key can never pick the "27" out of the FY suffix.
+  # Patterns are Python regexes, applied case-insensitively to the raw value.
+  # Kept in config (not code) so a new FY format is a config change.
+  invoice_number_fy_patterns:
+    - '(?<![0-9])[0-9]{2}-[0-9]{2}(?![0-9])'   # 26-27
+    - '(?<![0-9])[0-9]{4}-[0-9]{2}(?![0-9])'   # 2026-27
+    - '(?<![0-9])[0-9]{2}/[0-9]{2}(?![0-9])'   # 26/27
+    - '(?<![0-9])[0-9]{4}/[0-9]{2}(?![0-9])'   # 2026/27
+    - '(?<![0-9])FY[0-9]{2,4}(?![0-9])'        # FY26 / FY2026
+    - '(?<![0-9])[0-9]{2}-[0-9]{2}-[0-9]{2}(?![0-9])'  # 26-27-28 (rare)
+
   # --- Confidence bands ---
   confidence_thresholds:
     high: 92
