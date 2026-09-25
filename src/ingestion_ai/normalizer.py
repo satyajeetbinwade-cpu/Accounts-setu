@@ -297,7 +297,16 @@ def _capability_detail(capability: str, missing: list[str]) -> str:
 
 @dataclass
 class FieldMapping:
-    """One canonical field's mapping decision, with its explanation."""
+    """One canonical field's mapping decision, with its explanation.
+
+    ``source_column`` is the human-readable source of the value (for an
+    aggregate it is a display summary such as ``"A + B + C"``). When a field
+    is the SUM of several source columns — a rate-bucketed books register
+    splits each tax head across rate buckets (F6 §5.4) — ``aggregate_columns``
+    carries the actual columns to sum. Without it the mapping cannot be
+    re-applied from storage: the display summary is not a real column, so a
+    re-derivation would silently zero the field (RC1/D01).
+    """
 
     canonical_field: str
     source_column: Optional[str]
@@ -306,10 +315,11 @@ class FieldMapping:
     required: bool = False
     from_cache: bool = False
     from_trusted_profile: bool = False
+    aggregate_columns: Optional[list[str]] = None
 
     @property
     def mapped(self) -> bool:
-        return bool(self.source_column)
+        return bool(self.source_column or self.aggregate_columns)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -320,6 +330,7 @@ class FieldMapping:
             "required": self.required,
             "from_cache": self.from_cache,
             "from_trusted_profile": self.from_trusted_profile,
+            "aggregate_columns": self.aggregate_columns,
         }
 
 
@@ -1268,7 +1279,17 @@ def apply_mapping(
 
     out = pd.DataFrame(index=raw_df.index)
     for m in mappings:
-        if m.mapped and m.source_column in raw_df.columns:
+        if m.aggregate_columns:
+            # A rate-bucketed field is the SUM of N source columns (F6 §5.4).
+            # The display summary in `source_column` is not a real column, so
+            # summing the actual columns is the only correct re-derivation.
+            present = [c for c in m.aggregate_columns if c in raw_df.columns]
+            if present:
+                numeric = raw_df[present].apply(pd.to_numeric, errors="coerce")
+                out[m.canonical_field] = numeric.sum(axis=1, min_count=1)
+            else:
+                out[m.canonical_field] = None
+        elif m.mapped and m.source_column in raw_df.columns:
             out[m.canonical_field] = raw_df[m.source_column]
         else:
             out[m.canonical_field] = None
@@ -1481,6 +1502,7 @@ def _books_register_result(
             mappings.append(FieldMapping(
                 canonical_field=f, source_column=" + ".join(cols) if cols else None,
                 confidence=None, reason=detail, required=f in required,
+                aggregate_columns=list(cols) if rule["kind"] == "aggregate" and cols else None,
             ))
         else:
             reason = (
@@ -1618,7 +1640,7 @@ def normalize_source_file(
         if f6_bridge.supports(source_type):
             bridged = f6_bridge.parse_portal_export(path, source_type, filename)
             if bridged is not None:
-                bridge_df, bridge_maps, bridge_warnings = bridged
+                bridge_df, bridge_maps, bridge_warnings, bridge_validation = bridged
                 warnings.extend(bridge_warnings)
                 notes.append(
                     "Parsed with the deterministic GSTR-2B/IMS layout (F6 format registry) — "
@@ -1641,10 +1663,15 @@ def normalize_source_file(
                 bridge_unmapped_optional = [
                     m.canonical_field for m in bridge_mappings if not m.required and not m.mapped
                 ]
+                bridge_hard_stopped = any(
+                    v.get("result") == "hard_stop" for v in bridge_validation
+                )
                 bridge_status = (
-                    STATUS_PARTIAL
-                    if (bridge_unmapped_required or bridge_unmapped_optional or warnings)
-                    else STATUS_OK
+                    STATUS_BLOCKED if bridge_hard_stopped else (
+                        STATUS_PARTIAL
+                        if (bridge_unmapped_required or bridge_unmapped_optional or warnings)
+                        else STATUS_OK
+                    )
                 )
                 result = IngestionResult(
                     source_type=source_type, filename=filename, client=client, period=period,
@@ -1654,7 +1681,8 @@ def normalize_source_file(
                     headers=headers, header_row=read.header_row, sheet_name=read.sheet_name,
                     sheet_ambiguous=read.sheet_ambiguous, classification=None,
                     model_used=None, llm_cached=False, header_signature=signature,
-                    notes=notes,
+                    notes=notes, validation=bridge_validation,
+                    hard_stopped=bridge_hard_stopped, ingestion_path="deterministic",
                 )
                 result.caveats = result.build_caveats(recon_type)
                 _persist_result(result, client_id=client_id, actor=actor, db_path=db_path)
@@ -2079,12 +2107,29 @@ def _canonical_frame_for(
     """
     stored = get_stored_result(client, period, source_type, filename, db_path=db_path)
     if stored is not None and stored.get("status") in (STATUS_OK, STATUS_PARTIAL, STATUS_BLOCKED):
-        # Already normalized — re-derive the frame from the file using the
-        # stored mapping, so the engine gets exactly what the user confirmed.
-        result = _renormalize_from_stored(
-            client, period, source_type, filename, stored,
-            recon_type=recon_type, client_id=client_id, actor=actor, db_path=db_path,
-        )
+        # A stored result written by an OLDER build may carry a mapping the
+        # current code can no longer re-apply faithfully — most importantly a
+        # rate-bucket aggregate stored as a display string ("A + B + C")
+        # before `aggregate_columns` existed, which re-derives as all-zero
+        # (D1). Re-normalize from the file in that case rather than silently
+        # consuming a broken frame.
+        if _stored_mapping_is_stale(stored, source_type):
+            from src.data_paths import source_data_path
+
+            path = source_data_path(client, period, source_type) / filename
+            if not path.exists():
+                raise IngestionBlockedError(f"Source file not found: {path}")
+            result = normalize_source_file(
+                path, source_type, client, period, client_id=client_id,
+                recon_type=recon_type, actor=actor, db_path=db_path,
+            )
+        else:
+            # Already normalized — re-derive the frame from the file using the
+            # stored mapping, so the engine gets exactly what the user confirmed.
+            result = _renormalize_from_stored(
+                client, period, source_type, filename, stored,
+                recon_type=recon_type, client_id=client_id, actor=actor, db_path=db_path,
+            )
     else:
         from src.data_paths import source_data_path
 
@@ -2103,11 +2148,62 @@ def _canonical_frame_for(
             result.message
             or f"{_SLOT_LABELS.get(source_type, source_type)} doesn't look like reconciliation data."
         )
+    # §8 hard stop — a file whose own guardrails failed must never reach the
+    # engine. This is the defence-in-depth gate: even if a caller bypassed
+    # the ingestion-time refusal, Module 2 cannot start on unvalidated data.
+    if result.hard_stopped:
+        raise IngestionBlockedError(_hard_stop_message(result, source_type, filename))
     if result.canonical_df is None or result.canonical_df.empty:
         raise IngestionBlockedError(
             f"{_SLOT_LABELS.get(source_type, source_type)} ({filename}) produced no usable rows."
         )
     return result.canonical_df, list(result.caveats or [])
+
+
+def _hard_stop_message(result: IngestionResult, source_type: str, filename: str) -> str:
+    """A named, plain-language hard-stop reason with the delta and the first
+    contributing rows — never a bare "validation failed"."""
+    slot = _SLOT_LABELS.get(source_type, source_type)
+    stops = [v for v in (result.validation or []) if v.get("result") == "hard_stop"]
+    if not stops:
+        return f"{slot} ({filename}) failed validation and cannot be reconciled."
+    parts = [f"{slot} ({filename}) failed validation — the run was stopped."]
+    for v in stops:
+        parts.append(f"{v.get('check')}: {v.get('detail')}")
+        rows = v.get("affected_rows") or []
+        if rows:
+            shown = ", ".join(str(r + 1) for r in rows[:5])
+            more = f" (+{len(rows) - 5} more)" if len(rows) > 5 else ""
+            parts.append(f"First contributing rows: {shown}{more}.")
+    return " ".join(parts)
+
+
+def _stored_mapping_is_stale(stored: dict[str, Any], source_type: str) -> bool:
+    """Whether a stored mapping can no longer be re-applied faithfully.
+
+    The one case that matters today: a rate-bucketed books register whose
+    aggregate fields were stored as a display summary ("A + B + C") before
+    `aggregate_columns` existed. Re-applying that mapping yields all-zero
+    taxable value and tax — a silent, plausible-looking wrong number — so the
+    file must be re-parsed instead. Detected structurally (a mapped field
+    whose source_column is not a real column of the file), never by a version
+    string that could drift.
+    """
+    if source_type not in _BOOKS_SOURCE_TYPES:
+        return False
+    mapping = stored.get("mapping") or []
+    for m in mapping:
+        if not isinstance(m, dict):
+            continue
+        col = m.get("source_column")
+        if not col:
+            continue
+        if m.get("aggregate_columns"):
+            continue
+        # A display summary of several columns is not a real column name.
+        if " + " in str(col):
+            return True
+    return False
 
 
 def _renormalize_from_stored(
@@ -2132,6 +2228,7 @@ def _renormalize_from_stored(
             reason=m.get("reason") or "",
             required=m.get("required", False),
             from_cache=True,
+            aggregate_columns=m.get("aggregate_columns") or None,
         )
         for m in stored.get("mapping", [])
     ]
@@ -2146,6 +2243,15 @@ def _renormalize_from_stored(
     # normalize_source_file(). `blocked` is retained only for a stored result
     # written by an older build, where it genuinely meant "cannot proceed".
     status = STATUS_PARTIAL if (unmapped_required or unmapped_optional) else STATUS_OK
+    # A stored §8 hard stop is a property of the FILE, not of this
+    # re-derivation — it must survive the re-derivation or the run would
+    # proceed on data the guardrails already refused (D2).
+    stored_validation = stored.get("validation") or []
+    hard_stopped = any(
+        (v.get("result") == "hard_stop") for v in stored_validation if isinstance(v, dict)
+    )
+    if hard_stopped:
+        status = STATUS_BLOCKED
     result = IngestionResult(
         source_type=source_type, filename=filename, client=client, period=period,
         status=status, canonical_df=canonical_df, field_mappings=mappings,
@@ -2156,6 +2262,8 @@ def _renormalize_from_stored(
         sheet_name=stored.get("sheet_name"), sheet_ambiguous=bool(stored.get("sheet_ambiguous")),
         classification=stored.get("classification"), model_used=stored.get("model_used"),
         llm_cached=True, header_signature="",
+        validation=stored_validation,
+        hard_stopped=hard_stopped,
     )
     result.caveats = result.build_caveats(recon_type)
     return result
@@ -2170,24 +2278,30 @@ def load_canonical_pair(
     client_id: Optional[int] = None,
     actor: str = "system",
     db_path=None,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[dict[str, Any]]]:
-    """Return (books_df, portal_df, source_files, caveats) as CANONICAL frames.
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (books_df, portal_df, source_files, caveats, run_notes) as
+    CANONICAL frames.
 
     This is the runner's ingestion entry point. Every frame returned here
     has been through `normalize_source_file()` — the engine never receives
     a raw uploaded file.
 
     Raises IngestionBlockedError only when the run genuinely cannot proceed:
-    a selected file is the wrong type / not financial data, or there is no
-    books side at all (nothing to reconcile against). A missing portal source
-    or missing columns is NOT fatal — the run proceeds and returns caveats
-    describing what couldn't be checked, so the report can state its own
-    limits.
+    a selected file is the wrong type / not financial data, a file failed its
+    own §8 guardrails, or there is no books side at all (nothing to reconcile
+    against). A missing portal source or missing columns is NOT fatal — the
+    run proceeds and returns caveats describing what couldn't be checked, so
+    the report can state its own limits.
+
+    `run_notes` DECLARE what was deliberately not reconciled (e.g. portal
+    credit notes) — distinct from caveats, which describe checks that could
+    not run.
     """
     from src.data_paths import source_data_path
 
     sel = dict(selected_files or {})
     caveats: list[dict[str, Any]] = []
+    run_notes: list[dict[str, Any]] = []
 
     def _pick(source_types: list[str]) -> Optional[tuple[str, str]]:
         for st in source_types:
@@ -2251,7 +2365,24 @@ def load_canonical_pair(
         )
         caveats.extend(portal_caveats)
 
+    # Declare what the supplied portal files carry but this run does not
+    # reconcile (credit notes, IMS coverage) — never silently omitted. Every
+    # supplied portal source is scanned, not just the one picked for matching,
+    # so an IMS export alongside a GSTR-2B still contributes its coverage.
+    try:
+        from src.ingestion_ai.portal_coverage import portal_run_notes
+
+        for st in portal_sources:
+            fn = sel.get(st)
+            if not fn:
+                continue
+            p = source_data_path(client, period, st) / fn
+            if p.exists():
+                run_notes.extend(portal_run_notes(p, st))
+    except Exception:  # noqa: BLE001
+        pass
+
     source_files = sorted(
         {books_pick[1]} | ({portal_pick[1]} if portal_pick else set())
     )
-    return books_df, portal_df, source_files, caveats
+    return books_df, portal_df, source_files, caveats, run_notes

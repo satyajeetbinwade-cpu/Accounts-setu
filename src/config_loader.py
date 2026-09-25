@@ -19,6 +19,7 @@ REQUIRED_GST_KEYS = [
     "ambiguity_margin",
     "document_type_map",
     "valid_rate_slabs",
+    "invoice_number_fy_patterns",
 ]
 
 REQUIRED_GST_BASELINE_KEYS = [
@@ -102,6 +103,8 @@ def _validate_gst(block: dict[str, Any]) -> None:
             _fail_missing(f"gst.confidence_baselines.{key}")
     if not isinstance(block["valid_rate_slabs"], list) or not block["valid_rate_slabs"]:
         _fail_missing("gst.valid_rate_slabs (must be a non-empty list)")
+    if not isinstance(block["invoice_number_fy_patterns"], list) or not block["invoice_number_fy_patterns"]:
+        _fail_missing("gst.invoice_number_fy_patterns (must be a non-empty list)")
 
 
 def _validate_other(block: dict[str, Any]) -> None:

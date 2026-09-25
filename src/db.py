@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS match_results (
     match_reason     TEXT,    -- plain-language explanation of classification
     difference_type  TEXT,    -- nullable; e.g. Short Deduction, Rounding, etc.
     matched_record_ids TEXT,  -- nullable JSON text; group members for aggregated matches
+    -- Value-at-risk semantics (D6). Stored so the Review UI reads them
+    -- rather than re-deriving them, and so run-level aggregates are exact.
+    difference       REAL,    -- signed (portal − books) on the differing field
+    itc_at_risk      REAL,    -- tax at risk (Not in Books/Portal) or |tax diff|
+    gross_value      REAL,    -- invoice value, kept for Not in Books/Portal only
     reviewed         INTEGER NOT NULL DEFAULT 0,
     reviewer_note    TEXT
 );
@@ -136,6 +141,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "caveats" not in existing:
         conn.execute("ALTER TABLE runs ADD COLUMN caveats TEXT")
         conn.commit()
+    # Run notes (D7): unreconciled sources and coverage declarations. Kept
+    # separate from `caveats` (which describe checks that could not run) —
+    # a note DECLARES something that was deliberately not reconciled.
+    if "run_notes" not in existing:
+        conn.execute("ALTER TABLE runs ADD COLUMN run_notes TEXT")
+        conn.commit()
+
+    result_cols = {row[1] for row in conn.execute("PRAGMA table_info(match_results)")}
+    for col in ("difference", "itc_at_risk", "gross_value"):
+        if col not in result_cols:
+            conn.execute(f"ALTER TABLE match_results ADD COLUMN {col} REAL")
+    conn.commit()
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -171,12 +188,13 @@ def insert_run(
     config_snapshot: str,
     source_file_names: list[str],
     caveats: Optional[list[dict[str, Any]]] = None,
+    run_notes: Optional[list[dict[str, Any]]] = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO runs
-            (client, period, recon_type, run_timestamp, config_snapshot, source_file_names, caveats)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (client, period, recon_type, run_timestamp, config_snapshot, source_file_names, caveats, run_notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             client,
@@ -186,6 +204,7 @@ def insert_run(
             config_snapshot,
             json.dumps(source_file_names),
             json.dumps(caveats or []),
+            json.dumps(run_notes or []),
         ),
     )
     return cur.lastrowid
@@ -217,8 +236,9 @@ def insert_match_results(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
                 (run_id, fingerprint, classification, confidence_score, confidence_band,
                  books_record, portal_record, match_reason,
                  difference_type, matched_record_ids,
+                 difference, itc_at_risk, gross_value,
                  reviewed, reviewer_note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 r["run_id"],
@@ -231,6 +251,9 @@ def insert_match_results(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -
                 r.get("match_reason"),
                 r.get("difference_type"),
                 _as_json_text(r.get("matched_record_ids")),
+                r.get("difference"),
+                r.get("itc_at_risk"),
+                r.get("gross_value"),
                 int(r.get("reviewed", False)),
                 r.get("reviewer_note"),
             ),

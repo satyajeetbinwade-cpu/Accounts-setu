@@ -82,15 +82,21 @@ LAYOUT = {
 # ---------------------------------------------------------------------------
 
 def tokens_css() -> str:
-    """Return a ``<style>`` block defining the canonical ``--setu-*`` CSS
-    custom properties.
+    """Return ONLY the canonical ``--setu-*`` custom properties as a bare
+    ``:root { … }`` rule (no ``<style>`` wrapper).
 
-    Consuming modules (and ``theme.py``'s component CSS) reference
-    ``var(--setu-surface)`` etc. rather than hard-coding hex values, so a
-    token shift in the polish phase propagates everywhere without touching
-    per-module styles. This is the *single* source of truth for token values:
-    the names are the canonical short form already referenced across the code
-    base.
+    Consuming modules reference ``var(--setu-surface)`` etc. rather than
+    hard-coding hex values, so a token shift in the polish phase propagates
+    everywhere without touching per-module styles. This is the *single* source
+    of truth for token values: the names are the canonical short form already
+    referenced across the code base.
+
+    GOTCHA (fixed): this used to be wrapped in ``<style>`` tags, but the one
+    consumer passes it to ``rx.el.style(...)`` — which already emits the
+    element. React rendered the nested ``<style>`` as escaped text, which
+    invalidated the leading selector and silently stopped EVERY ``--setu-*``
+    property from applying. A full document string is available via
+    ``setu.foundation.tokens.global_css()``.
     """
     vars_: list[tuple[str, str]] = [
         ("--setu-font-family", FONT_FAMILY),
@@ -121,4 +127,4 @@ def tokens_css() -> str:
         ("--setu-spacing-internal", f"{LAYOUT['spacing_internal']}px"),
     ]
     rules = "\n".join(f"    {name}: {value};" for name, value in vars_)
-    return f"<style>\n:root {{\n{rules}\n}}\n</style>"
+    return f":root {{\n{rules}\n}}\n"

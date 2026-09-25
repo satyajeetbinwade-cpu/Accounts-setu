@@ -11,6 +11,7 @@ import reflex as rx
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.reconcile_state import ReconcileState
+from setu.views import review_components as rc
 from setu.views import shell
 
 _ACCEPT = {
@@ -608,365 +609,68 @@ def _reconcile_stage() -> rx.Component:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — Review
+# Stage 4 — Review (upgraded presentation; see setu/views/review_components.py)
 # ---------------------------------------------------------------------------
 
 
-def _exception_row(e) -> rx.Component:
-    return rx.hstack(
-        rx.box(c.pill(e.classification, variant="danger"), flex="3"),
-        rx.box(
-            rx.cond(e.difference_type != "", c.pill(e.difference_type, variant="accent"), rx.text("—", style=t.TEXT["micro"])),
-            flex="2",
-        ),
-        rx.box(c.confidence_badge("rule", label=e.confidence_band), flex="2"),
-        rx.box(
-            rx.cond(e.reviewed, c.pill("Reviewed", variant="rule"), c.pill("Not reviewed", variant="ai")),
-            flex="2",
-        ),
-        rx.box(rx.text(e.match_reason, style=t.TEXT["micro"]), flex="6"),
-        rx.button(
-            "Open",
-            on_click=ReconcileState.open_exception(e.result_id),
-            size="1",
-            variant="soft",
-            background="transparent",
-            color=t.Color.TEXT_PRIMARY.value,
-            border=f"1px solid {t.Color.BORDER.value}",
-            border_radius="8px",
-        ),
-        width="100%",
-        align="center",
-        spacing="3",
-        padding="8px 0",
-        border_bottom=f"1px solid {t.Color.BORDER.value}",
-    )
-
-
-def _record_panel(title, fields) -> rx.Component:
-    return rx.vstack(
-        rx.text(title, style=t.TEXT["label"], font_weight="700"),
-        rx.cond(
-            fields.length() > 0,
-            rx.vstack(
-                rx.foreach(
-                    fields,
-                    lambda f: rx.hstack(
-                        rx.text(f.label, style=t.TEXT["micro"], min_width="120px"),
-                        rx.text(f.value, style=t.TEXT["body"], flex="1"),
-                        rx.cond(
-                            f.overridden,
-                            c.pill("Corrected", variant="accent"),
-                            rx.fragment(),
-                        ),
-                        rx.button(
-                            rx.icon("pencil", size=13),
-                            on_click=ReconcileState.open_edit(f.side, f.key, f.value),
-                            size="1",
-                            variant="ghost",
-                            color=t.Color.TEXT_MUTED.value,
-                            title="Correct this value",
-                        ),
-                        rx.cond(
-                            f.overridden,
-                            rx.button(
-                                rx.icon("undo-2", size=13),
-                                on_click=ReconcileState.revert_edit(f.side, f.key),
-                                size="1",
-                                variant="ghost",
-                                color=t.Color.TEXT_MUTED.value,
-                                title="Revert to the engine's value",
-                            ),
-                            rx.fragment(),
-                        ),
-                        spacing="2",
-                        align="center",
-                        width="100%",
-                    ),
-                ),
-                spacing="1",
-                width="100%",
-            ),
-            rx.text("(no record on this side)", style=t.TEXT["micro"]),
-        ),
-        spacing="2",
-        align="start",
-        width="100%",
-    )
-
-
-def _edit_dialog() -> rx.Component:
-    """Inline correction of one field of a matched record. A reason is
-    required — a correction to a matched record is a sensitive change."""
-    return rx.dialog.root(
-        rx.dialog.content(
-            rx.vstack(
-                rx.text("Correct this value", style=t.TEXT["card_title"]),
-                rx.text(
-                    f"{ReconcileState.edit_side} · {ReconcileState.edit_field}",
-                    style=t.TEXT["micro"],
-                ),
-                rx.vstack(
-                    rx.text("New value", style=t.TEXT["label"]),
-                    rx.input(
-                        value=ReconcileState.edit_value,
-                        on_change=ReconcileState.set_edit_value,
-                        width="100%",
-                    ),
-                    spacing="1",
-                    align="start",
-                    width="100%",
-                ),
-                c.reason_capture(
-                    label="Reason (required)",
-                    value=ReconcileState.edit_reason,
-                    on_change=ReconcileState.set_edit_reason,
-                    placeholder="Why is this value being corrected?",
-                ),
-                rx.cond(
-                    ReconcileState.edit_error != "",
-                    c.inline_reason(ReconcileState.edit_error),
-                    rx.fragment(),
-                ),
-                rx.text(
-                    "The correction is logged, carried forward across re-runs, and applied to "
-                    "the reconciliation exceptions and Action Center.",
-                    style=t.TEXT["micro"],
-                ),
-                rx.hstack(
-                    rx.button(
-                        "Save correction",
-                        on_click=ReconcileState.save_edit,
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
-                        disabled=ReconcileState.edit_reason == "",
-                    ),
-                    rx.button(
-                        "Cancel",
-                        on_click=ReconcileState.close_edit,
-                        variant="soft",
-                        background="transparent",
-                        color=t.Color.TEXT_SECONDARY.value,
-                        border=f"1px solid {t.Color.BORDER.value}",
-                        border_radius="9px",
-                    ),
-                    spacing="2",
-                ),
-                spacing="3",
-                align="start",
-                width="100%",
-            ),
-            max_width="520px",
-        ),
-        open=ReconcileState.edit_open,
-        on_open_change=ReconcileState.close_edit,
-    )
-
-
 def _review_stage() -> rx.Component:
+    """Headline → grouped → detail, with the evidence drawer and bulk bar.
+
+    Every figure is derived by ``src.reconciliation.review`` through
+    ``ReconcileState`` — nothing is computed in a component.
+    """
     return rx.vstack(
-        c.section_title("4. Review"),
         rx.cond(
             ReconcileState.run_id == 0,
-            c.empty_state("No run yet for this context — go back to Reconcile.", icon="search-check"),
+            rc.review_empty("No run yet for this context — go back to Reconcile.", icon="search-check"),
             rx.cond(
-                ReconcileState.selected_result_id != 0,
+                ReconcileState.review_total == 0,
+                rc.review_empty("This run produced no records — nothing to review.", icon="inbox"),
                 rx.vstack(
-                    rx.button(
-                        "← Back to exceptions",
-                        on_click=ReconcileState.close_exception,
-                        variant="soft",
-                        background="transparent",
-                        color=t.Color.TEXT_SECONDARY.value,
-                        border=f"1px solid {t.Color.BORDER.value}",
-                        border_radius="9px",
-                        size="2",
-                    ),
-                    c.card(
-                        rx.vstack(
-                            rx.hstack(
-                                c.pill(ReconcileState.detail_classification, variant="danger"),
-                                rx.cond(
-                                    ReconcileState.detail_difference_type != "",
-                                    c.pill(ReconcileState.detail_difference_type, variant="accent"),
-                                    rx.fragment(),
-                                ),
-                                rx.cond(
-                                    ReconcileState.detail_reviewed,
-                                    c.pill("Reviewed", variant="rule"),
-                                    c.pill("Not reviewed", variant="ai"),
-                                ),
-                                rx.spacer(),
-                                c.view_history(
-                                    "Edit history",
-                                    ReconcileState.detail_history,
-                                    count=ReconcileState.detail_history.length(),
-                                ),
-                                spacing="2",
-                                align="center",
-                                wrap="wrap",
-                                width="100%",
-                            ),
-                            rx.text(ReconcileState.detail_reason, style=t.TEXT["body"]),
-                            c.divider(),
-                            rx.hstack(
-                                rx.box(_record_panel("Books side", ReconcileState.detail_books), flex="1"),
-                                rx.box(_record_panel("Portal side", ReconcileState.detail_portal), flex="1"),
-                                spacing="5",
-                                width="100%",
-                                align="start",
-                            ),
-                            spacing="3",
-                            align="start",
-                            width="100%",
+                    # 0. context bar
+                    rc.context_bar(),
+                    # 1. headline
+                    rc.summary_headline(),
+                    # 2. KPI row
+                    rc.kpi_row(),
+                    # 3. accountant's read
+                    rc.accountants_read(),
+                    # 4. charts
+                    rc.charts_row(),
+                    # 5. items to review
+                    rx.vstack(
+                        c.section_title(
+                            "Items to review",
+                            "Filter, sort and group the exceptions. Open any row for the full evidence.",
                         ),
-                        width="100%",
-                    ),
-                    _edit_dialog(),
-                    c.card(
-                        rx.vstack(
-                            rx.text("Wrong column mapping?", style=t.TEXT["label"], font_weight="700"),
-                            rx.text(
-                                "If a field was mapped from the wrong source column, correct the "
-                                "mapping in Smart Ingestion — the fix is remembered for this file "
-                                "shape and applied on the next run.",
-                                style=t.TEXT["micro"],
-                            ),
-                            rx.button(
-                                "Correct mapping in Smart Ingestion →",
-                                on_click=rx.redirect("/smart-ingestion"),
-                                variant="soft",
-                                background="transparent",
-                                color=t.Color.TEXT_PRIMARY.value,
-                                border=f"1px solid {t.Color.BORDER.value}",
-                                border_radius="9px",
-                                size="2",
-                            ),
-                            spacing="2",
-                            align="start",
-                            width="100%",
+                        rc.filter_bar(),
+                        rc.exception_table(),
+                        rx.cond(
+                            ReconcileState.review_exceptions == 0,
+                            c.info_banner("Nothing needs a human decision on this run."),
+                            rx.fragment(),
                         ),
-                        width="100%",
+                        spacing="3", width="100%", align="start",
                     ),
-                    spacing="4",
-                    width="100%",
-                    align="start",
-                ),
-                rx.vstack(
-                    c.card(
-                        rx.vstack(
-                            rx.text(
-                                f"{ReconcileState.review_matched} matched automatically · "
-                                f"{ReconcileState.review_exceptions} need your attention",
-                                font_size="20px",
-                                font_weight="700",
-                                color=t.Color.TEXT_PRIMARY.value,
-                            ),
-                            rx.text(
-                                f"Run {ReconcileState.run_id} · {ReconcileState.ctx_client} · "
-                                f"{ReconcileState.ctx_period} · {ReconcileState.ctx_recon_type}",
-                                style=t.TEXT["micro"],
-                            ),
-                            c.divider(),
-                            rx.hstack(
-                                rx.vstack(c.stat(ReconcileState.review_total.to_string(), "total records"), spacing="0", align="start"),
-                                rx.vstack(c.stat(ReconcileState.review_matched.to_string(), "matched"), spacing="0", align="start"),
-                                rx.vstack(c.stat(ReconcileState.review_exceptions.to_string(), "exceptions"), spacing="0", align="start"),
-                                spacing="6",
-                                wrap="wrap",
-                            ),
-                            spacing="3",
-                            align="start",
-                            width="100%",
-                        ),
-                        width="100%",
-                    ),
-                    rx.cond(
-                        ReconcileState.caveats.length() > 0,
-                        c.card(
-                            rx.vstack(
-                                c.warning_banner(
-                                    f"This is a partial report. {ReconcileState.caveats.length()} "
-                                    "check(s) could not be performed with the files and columns provided."
-                                ),
-                                rx.foreach(
-                                    ReconcileState.caveats,
-                                    lambda cv: rx.vstack(
-                                        rx.text(cv.label, style=t.TEXT["body"], font_weight="600"),
-                                        rx.text(cv.detail, style=t.TEXT["micro"]),
-                                        spacing="0",
-                                        align="start",
-                                    ),
-                                ),
-                                spacing="2",
-                                align="start",
-                                width="100%",
-                            ),
-                            width="100%",
-                        ),
-                        rx.fragment(),
-                    ),
-                    rx.cond(
-                        ReconcileState.review_exceptions == 0,
-                        c.info_banner("Nothing needs a human decision on this run."),
-                        c.card(
-                            rx.vstack(
-                                rx.hstack(
-                                    rx.text("Show", style=t.TEXT["label"]),
-                                    rx.select(
-                                        ["All exceptions", "Not in Books", "Not in Portal", "Amount Difference"],
-                                        value=ReconcileState.exception_filter,
-                                        on_change=ReconcileState.set_exception_filter,
-                                        width="200px",
-                                    ),
-                                    rx.spacer(),
-                                    rx.text(
-                                        f"{ReconcileState.exception_rows.length()} shown",
-                                        style=t.TEXT["micro"],
-                                    ),
-                                    spacing="2",
-                                    align="center",
-                                    width="100%",
-                                ),
-                                rx.cond(
-                                    ReconcileState.exception_rows.length() > 0,
-                                    rx.vstack(
-                                        rx.hstack(
-                                            rx.text("Classification", style=t.TEXT["label"], flex="3"),
-                                            rx.text("Difference", style=t.TEXT["label"], flex="2"),
-                                            rx.text("Confidence", style=t.TEXT["label"], flex="2"),
-                                            rx.text("Status", style=t.TEXT["label"], flex="2"),
-                                            rx.text("Why", style=t.TEXT["label"], flex="6"),
-                                            rx.box(width="60px"),
-                                            width="100%",
-                                            padding="0 0 6px 0",
-                                            border_bottom=f"1px solid {t.Color.BORDER.value}",
-                                        ),
-                                        rx.foreach(ReconcileState.exception_rows, _exception_row),
-                                        spacing="0",
-                                        width="100%",
-                                    ),
-                                    c.empty_state("No exceptions match this filter.", icon="circle_check"),
-                                ),
-                                spacing="3",
-                                align="start",
-                                width="100%",
-                            ),
-                            width="100%",
-                        ),
-                    ),
+                    # 7. data quality & scope notes
+                    rc.notes_list(),
+                    # 8. integrity strip
+                    rc.integrity_strip(),
                     rx.button(
                         "Continue to export →",
                         on_click=ReconcileState.continue_forward,
                         background=t.Color.ACCENT.value,
                         color="#FFFFFF",
                     ),
-                    spacing="4",
-                    width="100%",
-                    align="start",
+                    spacing="4", width="100%", align="start",
                 ),
             ),
         ),
+        # 6. evidence drawer (URL-addressable, Esc closes)
+        rc.evidence_drawer(),
+        rc.edit_dialog(),
+        # 6b. bulk action bar
+        rc.bulk_bar(),
         spacing="4",
         width="100%",
         align="start",

@@ -68,17 +68,21 @@ def _load_config(source_type: str) -> Optional[dict[str, Any]]:
 
 def parse_portal_export(
     path: Path, source_type: str, filename: str,
-) -> Optional[tuple[pd.DataFrame, list[dict[str, Any]], list[str]]]:
+) -> Optional[tuple[pd.DataFrame, list[dict[str, Any]], list[str], list[dict[str, Any]]]]:
     """Parse a GSTN portal export deterministically.
 
-    Returns (canonical_df, field_mappings, warnings) or None when the bridge
-    doesn't cover this source type or the parser produced no rows (so the
-    caller falls back to the generic model path).
+    Returns (canonical_df, field_mappings, warnings, validation) or None when
+    the bridge doesn't cover this source type or the parser produced no rows
+    (so the caller falls back to the generic model path).
 
     `field_mappings` is a list of {canonical_field, source_column, confidence,
     reason, required} dicts describing what the deterministic parser mapped —
     the same shape the review UI renders, so a deterministic parse is shown
     to the user exactly like a model mapping (with a rule-sourced reason).
+
+    `validation` is the §8 guardrail outcome for the portal side — the same
+    shape the books register produces, so the run-level gate can treat both
+    sides identically (D2).
     """
     if not supports(source_type):
         return None
@@ -123,6 +127,9 @@ def parse_portal_export(
             rec[f] = row.get(f)
         rec["source_type"] = source_type
         rec["source_file"] = filename
+        # Which sheet the row came from — the portal control-total check is
+        # scoped to the B2B sheet, so the provenance must survive to here.
+        rec["_source_sheet"] = row.get("_source_sheet")
         rec["original_row"] = json.dumps(
             {str(k): (None if v is None else str(v)) for k, v in row.items()}
         )
@@ -169,7 +176,34 @@ def parse_portal_export(
         return None
 
     mappings = _mappings_from_config(config, source_type)
-    return df.reset_index(drop=True), mappings, warnings
+
+    # §8 guardrails on the PORTAL side (D2): row accounting + the file's own
+    # ITC-summary control totals. The control total is the portal equivalent
+    # of the books register's own Total row — an independent, file-internal
+    # check that the parse is complete.
+    #
+    # Tax arithmetic is deliberately NOT run here: a GSTR-2B frame carries
+    # credit notes and amendments alongside invoices, whose signs and
+    # arithmetic differ, so the invoice-shaped check would misfire on them.
+    # The control total is the correct portal-side completeness check.
+    from src.f6 import validation as f6validation
+
+    control_totals = portal_control_totals(path, source_type, rows)
+    outcome = f6validation.ValidationOutcome()
+    outcome.results.append(f6validation.check_row_accounting(
+        parsed.row_count_read, parsed.row_count_parsed, parsed.exclusion_reasons,
+    ))
+    for parsed_sum, stated_total, label in control_totals:
+        outcome.results.append(
+            f6validation.check_control_total(parsed_sum, stated_total, label=label)
+        )
+    validation = outcome.to_json()
+    if outcome.hard_stopped:
+        for c in outcome.results:
+            if c.result == "hard_stop":
+                warnings.append(f"BLOCKED — {c.detail}")
+
+    return df.reset_index(drop=True), mappings, warnings, validation
 
 
 def _mappings_from_config(config: dict[str, Any], source_type: str) -> list[dict[str, Any]]:
@@ -212,3 +246,107 @@ def _mappings_from_config(config: dict[str, Any], source_type: str) -> list[dict
             "required": f in required,
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Portal-side control totals (D2)
+# ---------------------------------------------------------------------------
+#
+# §8's control-total check must run on the PORTAL side too, not only the
+# books side. A GSTR-2B carries its own ITC summary sheet ("ITC Available")
+# whose "B2B - Invoices (IMS)" row states the tax the portal itself computed
+# for the B2B invoices. Summing the parsed B2B rows and comparing to that
+# stated figure is the portal equivalent of the books register's own Total
+# row — an independent, file-internal check that the parse is complete.
+
+_SUMMARY_TAX_HEADS = (
+    ("igst", "integrated tax"),
+    ("cgst", "central tax"),
+    ("sgst", "state/ut tax"),
+    ("cess", "cess"),
+)
+
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        s = str(v).strip().replace(",", "")
+        if s in ("", "nan", "None", "-"):
+            return None
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_summary_row(raw: pd.DataFrame, heading_needle: str) -> Optional[tuple[int, int]]:
+    """Locate (header_row, data_row) in a GSTN summary sheet.
+
+    The header row is the one naming both a Heading column and the tax
+    columns; the data row is the first row below it whose Heading cell
+    contains `heading_needle` and none of the amendment/debit/ECO variants.
+    """
+    header_row = None
+    heading_col = None
+    for i in range(min(20, len(raw))):
+        cells = [str(v).strip().lower() for v in raw.iloc[i]]
+        if any("heading" in c for c in cells) and any("integrated tax" in c for c in cells):
+            header_row = i
+            heading_col = next(n for n, c in enumerate(cells) if "heading" in c)
+            break
+    if header_row is None or heading_col is None:
+        return None
+    for i in range(header_row + 1, len(raw)):
+        heading = str(raw.iat[i, heading_col]).strip().lower()
+        if heading_needle not in heading:
+            continue
+        if any(x in heading for x in ("amendment", "debit", "eco", "isd", "import")):
+            continue
+        return header_row, i
+    return None
+
+
+def portal_control_totals(
+    path: Path, source_type: str, rows: list[dict[str, Any]],
+) -> list[tuple[float, Optional[float], str]]:
+    """Control totals for a portal export, from the file's OWN summary sheet.
+
+    Returns the same ``(parsed_sum, stated_total, label)`` shape the books
+    register produces, so the one §8 control-total check drives both sides.
+    Returns an empty list when the file carries no usable summary (the check
+    then reports "no stated total available" rather than a false pass).
+    """
+    if source_type != "gstr2b":
+        return []
+    try:
+        raw = pd.read_excel(path, sheet_name="ITC Available", header=None,
+                            dtype=str, keep_default_na=False)
+    except Exception:  # noqa: BLE001
+        return []
+    if raw.empty:
+        return []
+
+    located = _find_summary_row(raw, "b2b - invoices")
+    if located is None:
+        return []
+    header_row, data_row = located
+    header_cells = [str(v).strip().lower() for v in raw.iloc[header_row]]
+
+    # Only the B2B sheet's rows are compared — the summary row is scoped to
+    # B2B invoices, so amendments/credit notes must not be folded in.
+    b2b_rows = [
+        r for r in rows
+        if str(r.get("_source_sheet", "")).strip().lower() == "b2b"
+    ]
+    if not b2b_rows:
+        return []
+
+    totals: list[tuple[float, Optional[float], str]] = []
+    for field, needle in _SUMMARY_TAX_HEADS:
+        col = next((n for n, c in enumerate(header_cells) if needle in c), None)
+        if col is None:
+            continue
+        stated = _to_float(raw.iat[data_row, col])
+        if stated is None:
+            continue
+        parsed = round(sum(float(r.get(field) or 0) for r in b2b_rows), 2)
+        totals.append((parsed, stated, f"GSTR-2B ITC summary — B2B {field.upper()}"))
+    return totals

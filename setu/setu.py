@@ -142,6 +142,8 @@ for _route, _renderer in pages.all_routes():
     if _route in ("/run", "/review", "/compare", "/config", "/export"):
         _on_load.append(Phase1State.load)
     if _route == "/reconcile":
+        # The handler reads its own router params, so a filtered Review view
+        # (/reconcile?stage=4&…) is linkable.
         _on_load.append(ReconcileState.load)
     if _route == "/security":
         _on_load.append(SecurityState.load)
