@@ -267,7 +267,7 @@ def _run_route():
 
 
 def _review_route():
-    from setu.views.phase1_pages import review_page
+    from setu.views.reconcile_page import review_page
 
     return review_page()
 

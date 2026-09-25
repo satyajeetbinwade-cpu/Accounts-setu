@@ -656,11 +656,17 @@ def _review_stage() -> rx.Component:
                     rc.notes_list(),
                     # 8. integrity strip
                     rc.integrity_strip(),
-                    rx.button(
-                        "Continue to export →",
-                        on_click=ReconcileState.continue_forward,
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
+                    # 9. report export (§3) — HTML / PDF / Excel
+                    rc.report_export(),
+                    rx.cond(
+                        ReconcileState.review_standalone,
+                        rx.fragment(),
+                        rx.button(
+                            "Continue to export →",
+                            on_click=ReconcileState.continue_forward,
+                            background=t.Color.ACCENT.value,
+                            color="#FFFFFF",
+                        ),
                     ),
                     spacing="4", width="100%", align="start",
                 ),
@@ -747,6 +753,33 @@ def _export_stage() -> rx.Component:
         spacing="4",
         width="100%",
         align="start",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Standalone Review screen (/review)
+# ---------------------------------------------------------------------------
+
+
+def review_page() -> rx.Component:
+    """The standalone /review screen — the SAME Stage-4 Review presentation
+    as /reconcile's Review tab, driven by the same ``ReconcileState`` and the
+    same ``review_components``. Only the wrapper differs: no stage rail, and
+    the page header reads "Review" instead of "Reconcile".
+    """
+    return shell.shell(
+        rx.vstack(
+            c.page_header(
+                "Review",
+                "Reconciliation results — headline, grouped, and per-item detail. "
+                "The same review surface as the Reconcile flow's Review tab.",
+            ),
+            _banners(),
+            _review_stage(),
+            spacing="5",
+            width="100%",
+            align="start",
+        )
     )
 
 

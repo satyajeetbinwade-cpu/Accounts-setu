@@ -25,6 +25,7 @@ from src import db as recon_db
 from src import queries
 from src.clients import service as clients
 from src.module2 import service as m2
+from src.reconciliation.review import drop_zero_slices
 
 # ---------------------------------------------------------------------------
 # Classification buckets
@@ -338,18 +339,31 @@ def build_report(run_id: int, *, allow_ai: bool = False, db_path=None) -> dict[s
         if credit:
             eligible = round(float(credit.get("eligible_credit") or 0.0), 2)
             total_itc = round(float(credit.get("total_itc_claimed") or 0.0), 2)
-            ineligible = round(max(total_itc - eligible, 0.0), 2)
-            itc_slices = [
+            # §2 — "Ineligible" means §17(5) blocked credit plus reverse-charge
+            # ITC, taken from the run's OWN eligibility markers. It is NOT
+            # (claimed − eligible): that difference is ITC on invoices that did
+            # not match, which is a different quantity and was mislabelled
+            # "Ineligible" — painting a red sliver on runs that have none.
+            blocked = round(float(credit.get("blocked_credit_itc") or 0.0), 2)
+            reverse_charge = round(float(credit.get("reverse_charge_itc") or 0.0), 2)
+            ineligible = round(blocked + reverse_charge, 2)
+            # Zero-value segments are dropped BEFORE the chart sees them, so a
+            # nil bucket can never render an arc.
+            itc_slices = drop_zero_slices([
                 {"name": "Eligible ITC", "value": eligible, "color_role": "rule"},
                 {"name": "Ineligible ITC", "value": ineligible, "color_role": "danger"},
-            ]
+            ])
             if total_itc <= 0:
                 itc_note = "No input tax was captured in this run's records, so the split is nil."
+            elif len(itc_slices) == 1:
+                itc_note = f"100% {itc_slices[0]['name']} — no ineligible ITC in this run."
         else:
             itc_note = "No eligible-credit figure was computed for this run (2A did not run)."
         gst_block = {
             "credit": credit,
             "itc_slices": itc_slices,
+            "itc_single": bool(itc_slices) and len(itc_slices) == 1,
+            "itc_single_label": itc_slices[0]["name"] if itc_slices and len(itc_slices) == 1 else "",
             "itc_note": itc_note,
         }
 

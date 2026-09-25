@@ -6,3 +6,8 @@ cryptography
 pymupdf
 reflex==0.9.11.post1
 pytest
+# PDF export prints the report with headless Chromium via Playwright.
+# Deliberately NOT wkhtmltopdf/QtWebKit, which silently collapses the report's
+# CSS Grid layout to one column and inverts the colour theme.
+# After installing, run: playwright install chromium
+playwright

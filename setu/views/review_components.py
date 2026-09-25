@@ -135,8 +135,25 @@ def context_bar() -> rx.Component:
             ),
             rx.vstack(
                 rx.text("Run", style=label),
-                rx.text(ReconcileState.run_context_label, style=t.TEXT["body"], font_weight="600"),
-                rx.text(ReconcileState.run_context_status, style=t.TEXT["micro"]),
+                rx.cond(
+                    ReconcileState.run_options.length() > 1,
+                    rx.vstack(
+                        rx.select(
+                            ReconcileState.run_option_values,
+                            value=ReconcileState.run_id.to_string(),
+                            on_change=ReconcileState.set_review_run,
+                            width="190px",
+                            size="1",
+                        ),
+                        rx.text(ReconcileState.run_context_status, style=t.TEXT["micro"]),
+                        spacing="0", align="start",
+                    ),
+                    rx.vstack(
+                        rx.text(ReconcileState.run_context_label, style=t.TEXT["body"], font_weight="600"),
+                        rx.text(ReconcileState.run_context_status, style=t.TEXT["micro"]),
+                        spacing="0", align="start",
+                    ),
+                ),
                 spacing="0", align="start",
             ),
             rx.spacer(),
@@ -159,12 +176,12 @@ def context_bar() -> rx.Component:
 def _cause_bar_segment(seg) -> rx.Component:
     return rx.box(
         rx.cond(
-            seg.percent >= 8,
-            rx.text(seg.percent.to_string() + "%", font_size="11px", font_weight="700",
+            seg.tax_percent >= 8,
+            rx.text(seg.tax_percent.to_string() + "%", font_size="11px", font_weight="700",
                     color="#FFFFFF", white_space="nowrap"),
             rx.fragment(),
         ),
-        width=seg.width,
+        width=seg.tax_width,
         min_width="3px",
         height="34px",
         display="flex",
@@ -203,7 +220,7 @@ def _cause_legend(seg) -> rx.Component:
         ),
         rx.text(seg.label, font_size="12px", font_weight=rx.cond(seg.active, "700", "500"),
                 color=t.Color.TEXT_PRIMARY.value),
-        rx.text(seg.count_display + " · " + seg.value_display, style=t.TEXT["micro"]),
+        rx.text(seg.count_display + " · " + seg.tax_display, style=t.TEXT["micro"]),
         spacing="2",
         align="center",
         cursor="pointer",
@@ -211,17 +228,64 @@ def _cause_legend(seg) -> rx.Component:
     )
 
 
+def single_ring(label, value, color, *, height: str = "230px") -> rx.Component:
+    """§2 — a donut with exactly ONE non-zero segment renders as a single
+    full-colour ring with a centre label, never as a degenerate two-slice pie
+    with an invisible second arc.
+
+    Hand-drawn SVG (no chart library), so the same markup can be reused by the
+    static HTML export without a JS runtime. Font sizes are set via ``style``:
+    an SVG ``<text>`` needs a real CSS font-size, not a component prop.
+    """
+    return rx.box(
+        rx.el.svg(
+            rx.el.circle(cx="50", cy="50", r="38", fill="none",
+                         stroke=color, stroke_width="14"),
+            rx.el.text(
+                label, x="50", y="47", text_anchor="middle",
+                style={"font-size": "7px", "font-weight": "600",
+                       "fill": t.Color.TEXT_SECONDARY.value,
+                       "font-family": "Inter, system-ui, sans-serif"},
+            ),
+            rx.el.text(
+                value, x="50", y="59", text_anchor="middle",
+                style={"font-size": "9px", "font-weight": "700",
+                       "fill": t.Color.TEXT_PRIMARY.value,
+                       "font-family": "Inter, system-ui, sans-serif"},
+            ),
+            view_box="0 0 100 100", width="180", height="180",
+            role="img", aria_label=label + " " + value,
+        ),
+        width="100%", height=height,
+        display="flex", align_items="center", justify_content="center",
+    )
+
+
 def summary_headline() -> rx.Component:
-    """Large ₹X requiring attention → context → progress → cause split."""
+    """The §1 headline: the TAX at stake (not gross invoice value), with its
+    share of the period's ITC as a badge. Context → progress → cause split."""
     return c.card(
         rx.vstack(
-            rx.text(
-                ReconcileState.headline_value,
-                font_size="40px", font_weight="700", letter_spacing="-0.03em",
-                color=t.Color.TEXT_PRIMARY.value, line_height="1.05",
+            rx.hstack(
+                rx.vstack(
+                    rx.text(
+                        ReconcileState.headline_value,
+                        font_size="40px", font_weight="700", letter_spacing="-0.03em",
+                        color=t.Color.TEXT_PRIMARY.value, line_height="1.05",
+                    ),
+                    rx.text(ReconcileState.headline_label, style=t.TEXT["label"]),
+                    spacing="0", align="start",
+                ),
+                c.pill(ReconcileState.headline_pct, variant="danger"),
+                rx.text(ReconcileState.headline_pct_caption, style=t.TEXT["micro"]),
+                spacing="3", align="end", wrap="wrap",
             ),
-            rx.text("requiring attention", style=t.TEXT["label"]),
             rx.text(ReconcileState.headline_sub, style=t.TEXT["micro"]),
+            rx.cond(
+                ReconcileState.headline_secondary != "",
+                rx.text(ReconcileState.headline_secondary, style=t.TEXT["micro"]),
+                rx.fragment(),
+            ),
             rx.vstack(
                 rx.hstack(
                     rx.text(ReconcileState.progress_label, style=t.TEXT["micro"]),
@@ -403,16 +467,16 @@ def _chart_card(title: str, subtitle: str, body) -> rx.Component:
 def classification_chart() -> rx.Component:
     return _chart_card(
         "Classification",
-        "Count or value per exception class — click a slice to filter.",
+        "Count or tax per exception class — one basis for every slice; click to filter.",
         rx.vstack(
             rx.hstack(
                 rx.cond(
                     ReconcileState.classification_mode_value,
-                    c.pill("Value", variant="accent"),
+                    c.pill("Tax", variant="accent"),
                     c.pill("Count", variant="accent"),
                 ),
                 rx.button(
-                    rx.cond(ReconcileState.classification_mode_value, "Show count", "Show value"),
+                    rx.cond(ReconcileState.classification_mode_value, "Show count", "Show tax"),
                     on_click=ReconcileState.toggle_classification_mode,
                     size="1", variant="soft", background="transparent",
                     color=t.Color.TEXT_SECONDARY.value,
@@ -420,16 +484,42 @@ def classification_chart() -> rx.Component:
                 ),
                 spacing="2", align="center",
             ),
-            rx.match(
-                ReconcileState.classification_mode_value,
-                (
-                    True,
+            rx.cond(
+                # §2 — one surviving bucket renders as a full ring, not a pie
+                # with an invisible second arc.
+                ReconcileState.classification_single,
+                single_ring(
+                    ReconcileState.classification_single_label,
+                    ReconcileState.classification_single_value,
+                    ReconcileState.classification_single_color,
+                ),
+                rx.match(
+                    ReconcileState.classification_mode_value,
+                    (
+                        True,
+                        rx.recharts.pie_chart(
+                            _ClickablePie.create(
+                                rx.foreach(ReconcileState.classification_colors,
+                                           lambda col: rx.recharts.cell(fill=col)),
+                                data=ReconcileState.classification_slices,
+                                data_key="value",
+                                name_key="name",
+                                inner_radius="55%",
+                                outer_radius="85%",
+                                on_click=ReconcileState.on_chart_classification,
+                            ),
+                            rx.recharts.graphing_tooltip(),
+                            rx.recharts.legend(),
+                            height=230,
+                            width="100%",
+                        ),
+                    ),
                     rx.recharts.pie_chart(
                         _ClickablePie.create(
                             rx.foreach(ReconcileState.classification_colors,
                                        lambda col: rx.recharts.cell(fill=col)),
                             data=ReconcileState.classification_slices,
-                            data_key="value",
+                            data_key="count",
                             name_key="name",
                             inner_radius="55%",
                             outer_radius="85%",
@@ -440,22 +530,6 @@ def classification_chart() -> rx.Component:
                         height=230,
                         width="100%",
                     ),
-                ),
-                rx.recharts.pie_chart(
-                    _ClickablePie.create(
-                        rx.foreach(ReconcileState.classification_colors,
-                                   lambda col: rx.recharts.cell(fill=col)),
-                        data=ReconcileState.classification_slices,
-                        data_key="count",
-                        name_key="name",
-                        inner_radius="55%",
-                        outer_radius="85%",
-                        on_click=ReconcileState.on_chart_classification,
-                    ),
-                    rx.recharts.graphing_tooltip(),
-                    rx.recharts.legend(),
-                    height=230,
-                    width="100%",
                 ),
             ),
             spacing="2", width="100%",
@@ -490,25 +564,39 @@ def supplier_chart() -> rx.Component:
 
 
 def itc_chart() -> rx.Component:
-    """Rendered only when the run already carries eligible/ineligible ITC."""
+    """Rendered only when the run carries an actual eligibility split.
+
+    §2 — the slices come from the run's own §17(5) blocked-credit and
+    reverse-charge markers, not from (claimed − eligible), and every
+    zero-value segment is filtered out before it reaches the chart. A period
+    with no ineligible ITC therefore renders one full ring, never a sliver.
+    """
     return rx.cond(
         ReconcileState.itc_available,
         _chart_card(
             "Input tax credit split",
             "Eligible against ineligible ITC for this period.",
-            rx.recharts.pie_chart(
-                _ClickablePie.create(
-                    rx.foreach(ReconcileState.itc_colors, lambda col: rx.recharts.cell(fill=col)),
-                    data=ReconcileState.itc_slices,
-                    data_key="value",
-                    name_key="name",
-                    inner_radius="55%",
-                    outer_radius="85%",
+            rx.cond(
+                ReconcileState.itc_single,
+                single_ring(
+                    ReconcileState.itc_single_label,
+                    ReconcileState.itc_single_value,
+                    ReconcileState.itc_single_color,
                 ),
-                rx.recharts.graphing_tooltip(),
-                rx.recharts.legend(),
-                height=230,
-                width="100%",
+                rx.recharts.pie_chart(
+                    _ClickablePie.create(
+                        rx.foreach(ReconcileState.itc_colors, lambda col: rx.recharts.cell(fill=col)),
+                        data=ReconcileState.itc_slices,
+                        data_key="value",
+                        name_key="name",
+                        inner_radius="55%",
+                        outer_radius="85%",
+                    ),
+                    rx.recharts.graphing_tooltip(),
+                    rx.recharts.legend(),
+                    height=230,
+                    width="100%",
+                ),
             ),
         ),
         rx.fragment(),
@@ -1311,10 +1399,12 @@ def evidence_drawer() -> rx.Component:
                 width="100%",
                 height="100%",
                 overflow_y="auto",
+                background=t.Color.SURFACE.value,
             ),
             side="right",
             width=["100%", "100%", "100%", "760px"],
             padding="0",
+            background=t.Color.SURFACE.value,
             on_open_auto_focus=rx.call_script(
                 f"setTimeout(() => document.getElementById('{_HOTKEY_ID}')?.focus(), 60)"
             ),
@@ -1420,6 +1510,87 @@ def integrity_strip() -> rx.Component:
             width="100%",
         ),
         rx.fragment(),
+    )
+
+
+# ===========================================================================
+# 8. Report export — one run, three formats (§3)
+# ===========================================================================
+
+
+def _format_button(label: str, fmt: str, hint: str) -> rx.Component:
+    return rx.vstack(
+        rx.button(
+            label,
+            on_click=ReconcileState.prepare_report(fmt),
+            disabled=ReconcileState.report_busy,
+            size="2",
+            variant="soft",
+            background=rx.cond(ReconcileState.report_fmt == fmt, "#EAF0FB", "transparent"),
+            color=t.Color.TEXT_PRIMARY.value,
+            border=rx.cond(
+                ReconcileState.report_fmt == fmt,
+                f"1px solid {t.Color.ACCENT.value}",
+                f"1px solid {t.Color.BORDER.value}",
+            ),
+            border_radius="9px",
+        ),
+        rx.text(hint, style=t.TEXT["micro"]),
+        spacing="1", align="start",
+    )
+
+
+def report_export() -> rx.Component:
+    """The export control: HTML / PDF / Excel, all built from this run's one
+    result so every headline number matches the screen exactly."""
+    return c.card(
+        rx.vstack(
+            c.section_title(
+                "Export this report",
+                "A finished, presentable report — not a data dump. All three formats "
+                "read the same figures as this screen.",
+            ),
+            rx.hstack(
+                _format_button("HTML", "html", "Self-contained file — opens offline"),
+                _format_button("PDF", "pdf", "Print-ready, charts included"),
+                _format_button("Excel", "excel", "Four sheets, live formulas"),
+                spacing="4", align="start", wrap="wrap",
+            ),
+            rx.cond(
+                ReconcileState.report_busy,
+                c.info_banner("Building the report…"),
+                rx.fragment(),
+            ),
+            rx.cond(
+                ReconcileState.report_error != "",
+                c.inline_reason(ReconcileState.report_error),
+                rx.fragment(),
+            ),
+            rx.cond(
+                ReconcileState.report_b64 != "",
+                rx.vstack(
+                    c.info_banner(
+                        f"{ReconcileState.report_fmt.upper()} report ready — "
+                        f"{ReconcileState.report_name}"
+                    ),
+                    rx.link(
+                        rx.button(
+                            f"Download {ReconcileState.report_fmt.upper()} report",
+                            background=t.Color.ACCENT.value,
+                            color="#FFFFFF",
+                        ),
+                        # The "data:" scheme is REQUIRED — without it the browser
+                        # reads "text/html;base64,AAA…" as a relative URL and
+                        # 404s instead of downloading the file.
+                        href="data:" + ReconcileState.report_mime + ";base64," + ReconcileState.report_b64,
+                        download=ReconcileState.report_name,
+                    ),
+                    spacing="2", align="start",
+                ),
+                rx.fragment(),
+            ),
+            spacing="3", align="start", width="100%",
+        ),
     )
 
 

@@ -9,6 +9,7 @@ No matching logic is recomputed here.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from dataclasses import dataclass, replace
@@ -26,6 +27,7 @@ from src.ingestion_ai import service as ingestion_ai
 from src.ingestion_ai import periods as period_utils
 from src.reconciliation import narrative
 from src.reconciliation import review
+from src.reconciliation import run_model
 from src.runner import RunExecutionError, execute_run
 from src.shared import discovery
 from setu.foundation import tokens as _t
@@ -111,6 +113,14 @@ class CaveatRow:
     source: str
 
 
+@dataclass
+class RunOption:
+    """A selectable run for the standalone Review screen's run switcher."""
+
+    run_id: int
+    label: str
+
+
 # ---------------------------------------------------------------------------
 # Stage 4 — Review (upgraded presentation model)
 # ---------------------------------------------------------------------------
@@ -142,6 +152,9 @@ class CauseSeg:
     group: str
     is_gap: bool
     active: bool
+    tax_display: str = ""
+    tax_percent: float = 0.0
+    tax_width: str = "0%"
 
 
 @dataclass
@@ -290,6 +303,7 @@ class ReconcileState(AuthState):
     has_existing_run: bool = False
     existing_run_id: int = 0
     existing_run_when: str = ""
+    run_options: list[RunOption] = []
 
     # stage 2
     slots: list[SlotRow] = []
@@ -325,6 +339,10 @@ class ReconcileState(AuthState):
 
     # stage 4 — headline / cause split / KPIs
     headline_value: str = "₹0.00"
+    headline_label: str = "ITC at stake (tax on exceptions)"
+    headline_pct: str = "0.00%"
+    headline_pct_caption: str = ""
+    headline_secondary: str = ""
     headline_sub: str = ""
     headline_scope: str = ""
     progress_percent: float = 0.0
@@ -338,12 +356,22 @@ class ReconcileState(AuthState):
     classification_slices: list[dict] = []
     classification_colors: list[str] = []
     classification_mode_value: bool = False
+    classification_single: bool = False
+    classification_single_label: str = ""
+    classification_single_value: str = ""
+    classification_single_color: str = ""
     supplier_bars: list[dict] = []
     itc_available: bool = False
     itc_slices: list[dict] = []
     itc_colors: list[str] = []
     itc_display: str = ""
     itc_claimed_display: str = ""
+    itc_ineligible_display: str = ""
+    itc_empty_note: str = ""
+    itc_single: bool = False
+    itc_single_label: str = ""
+    itc_single_value: str = ""
+    itc_single_color: str = ""
 
     # stage 4 — filters (URL-addressable)
     filter_view: str = ""            # "" | amount_difference | not_in_books | not_in_portal | matched | reviewed
@@ -392,6 +420,14 @@ class ReconcileState(AuthState):
     quality_notes: list[QualityNoteRow] = []
     integrity_rows: list[IntegrityRow] = []
     integrity_verdict: str = ""
+
+    # stage 4 — §3 multi-format report export (HTML / PDF / Excel)
+    report_fmt: str = ""
+    report_b64: str = ""
+    report_name: str = ""
+    report_mime: str = ""
+    report_busy: bool = False
+    report_error: str = ""
 
     # stage 4 — the evidence drawer
     selected_result_id: int = 0
@@ -455,6 +491,12 @@ class ReconcileState(AuthState):
     # Derived display vars
     # ------------------------------------------------------------------
     @rx.var
+    def review_standalone(self) -> bool:
+        """True when the Review presentation is rendered on the standalone
+        /review screen rather than inside the guided /reconcile flow."""
+        return self._on_review_route()
+
+    @rx.var
     def period_label(self) -> str:
         return review.format_period(self.ctx_period)
 
@@ -510,6 +552,41 @@ class ReconcileState(AuthState):
                 self.stage = 4
                 self._load_review()
 
+    @rx.event
+    def load_review_page(self):
+        """On-load for the standalone /review screen.
+
+        Same context discovery as ``load``, then — because /review has no
+        stage rail — it always lands on the Review presentation for the
+        latest run in the selected context (exactly what the guided flow's
+        "Continue this run" does).
+        """
+        self.clients = discovery.list_clients()
+        if not self.ctx_client and self.clients:
+            self.ctx_client = self.clients[0]
+        self._load_context()
+        try:
+            url_params = dict(self.router.page.params or {})
+        except Exception:  # noqa: BLE001
+            url_params = {}
+        if url_params:
+            self.read_url_params(url_params)
+            if not self.selected_result_id:
+                self.drawer_open = False
+        # The standalone screen always shows the run — pick the latest one
+        # for this context, mirroring continue_existing_run().
+        if self.existing_run_id:
+            self.run_id = self.existing_run_id
+            self._seed_selections_from_run()
+            self.stage = 4
+            self._load_review()
+
+    def _on_review_route(self) -> bool:
+        try:
+            return str(self.router.page.path or "").rstrip("/") == "/review"
+        except Exception:  # noqa: BLE001
+            return False
+
     def _load_context(self) -> None:
         if not self.ctx_client:
             return
@@ -523,6 +600,7 @@ class ReconcileState(AuthState):
         if self.ctx_recon_type not in self.recon_types:
             self.ctx_recon_type = self.recon_types[0] if self.recon_types else ""
         self._load_existing_run()
+        self._load_run_options()
         self._load_slots()
 
     def _load_existing_run(self) -> None:
@@ -538,6 +616,44 @@ class ReconcileState(AuthState):
             self.has_existing_run = True
             self.existing_run_id = int(latest["run_id"])
             self.existing_run_when = str(latest.get("run_timestamp") or "").replace("T", " ").split(".")[0]
+
+    def _load_run_options(self) -> None:
+        """Every run for this context, newest first — the standalone Review
+        screen's run selector reads this."""
+        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+            self.run_options = []
+            return
+        df = queries.list_runs(
+            client=self.ctx_client, period=self.ctx_period, recon_type=self.ctx_recon_type
+        )
+        self.run_options = [
+            RunOption(
+                run_id=int(r["run_id"]),
+                label=f"Run {int(r['run_id'])} · "
+                + str(r.get("run_timestamp") or "").replace("T", " ").split(".")[0],
+            )
+            for _, r in df.iterrows()
+        ]
+
+    @rx.event
+    def set_review_run(self, run_id: str):
+        """Switch the Review screen to a different run of this context."""
+        try:
+            rid = int(run_id)
+        except (TypeError, ValueError):
+            return
+        if not rid or rid == self.run_id:
+            return
+        self.run_id = rid
+        self.selected_result_id = 0
+        self.drawer_open = False
+        self.selection = []
+        self._seed_selections_from_run()
+        self._load_review()
+
+    @rx.var
+    def run_option_values(self) -> list[str]:
+        return [str(o.run_id) for o in self.run_options]
 
     @rx.event
     def set_ctx_client(self, v: str):
@@ -954,34 +1070,10 @@ class ReconcileState(AuthState):
             for c in (run.get("caveats") or [])
         ]
 
-        # Materiality is SEPARATE per recon type (C1), exactly as Module 2 reads it.
-        materiality_key = {
-            "GST": "materiality.gst", "TDS": "materiality.tds", "OTHER": "materiality.other",
-        }.get(self.ctx_recon_type, "materiality.gst")
-        materiality = self._effective_number(materiality_key, review.DEFAULT_MATERIALITY)
-        tolerance = self._effective_number("gst.amount_tolerance.absolute", review.DEFAULT_TOLERANCE)
-        rounding = self._effective_number("gst.rounding_tolerance", review.DEFAULT_ROUNDING_TOLERANCE)
-
-        itc_eligible = itc_claimed = None
-        if (run.get("recon_type") or "GST") == "GST":
-            client_id = _client_id_for_folder(self.ctx_client)
-            if client_id:
-                try:
-                    from src.module2 import service as m2
-
-                    credit = m2.eligible_credit_for_client(client_id, period=self.ctx_period)
-                    if credit:
-                        itc_eligible = float(credit.get("eligible_credit") or 0.0)
-                        itc_claimed = float(credit.get("total_itc_claimed") or 0.0)
-                except Exception:  # noqa: BLE001
-                    itc_eligible = itc_claimed = None
-
-        self._materiality = materiality
-        self._model = review.build_review_model(
-            run, self._review_rows,
-            materiality=materiality, tolerance=tolerance, rounding_tolerance=rounding,
-            itc_eligible=itc_eligible, itc_claimed=itc_claimed,
-        )
+        # ONE shared loader (src.reconciliation.run_model) so the screen and the
+        # HTML/PDF/Excel exports can never disagree on a headline number.
+        run, self._model = run_model.load_run_model(self.run_id)
+        self._materiality = float(self._model.get("materiality") or review.DEFAULT_MATERIALITY)
         m = self._model
         self.review_total = m["kpi"]["total_count"]
         self.review_matched = m["kpi"]["matched_count"]
@@ -1020,10 +1112,23 @@ class ReconcileState(AuthState):
     def _build_headline(self) -> None:
         k = self._model["kpi"]
         period_label = review.format_period(self.ctx_period)
-        self.headline_value = k["attention_display"]
+        # §1 — the headline is the TAX at stake, never the gross invoice value.
+        self.headline_value = k["itc_at_stake_display"]
+        self.headline_label = "ITC at stake (tax on exceptions)"
+        self.headline_pct = k["itc_at_stake_pct_display"]
+        self.headline_pct_caption = (
+            f"of {k['period_itc_total_display']} period ITC"
+            if k["period_itc_total"] else "of period ITC (nil)"
+        )
         self.headline_sub = (
             f"{k['exception_count']} item(s) · Run {self.run_id} · {period_label} "
             f"{self.ctx_recon_type}"
+        )
+        # Gross invoice value stays available, but only as an explicitly
+        # labelled secondary figure — never as the "requiring attention" number.
+        self.headline_secondary = (
+            f"Gross invoice value on those items: {k['gross_value_display']}"
+            if k["gross_value"] else ""
         )
         self.headline_scope = review.CAUSE_GROUP_LABELS["gap"] + " vs " + review.CAUSE_GROUP_LABELS["judgement"]
         total = k["total_count"] or 1
@@ -1032,10 +1137,14 @@ class ReconcileState(AuthState):
         self.progress_label = f"{k['reviewed_count']} of {k['total_count']} reviewed"
 
         segments = self._model["cause_segments"]
-        denom = sum(s["value"] for s in segments) or 1.0
+        # The bar is measured in TAX so it ties to the §1 headline. A segment
+        # whose tax is nil (e.g. a rounding-only difference) keeps a hairline
+        # width and a 0% share rather than being dropped — its row still exists.
+        denom = sum(s["tax_value"] for s in segments) or 1.0
         out: list[CauseSeg] = []
         for idx, s in enumerate(segments):
-            width = max(s["value"] / denom * 100, 1.0)
+            tax_value = round(float(s.get("tax_value") or 0.0), 2)
+            width = max(tax_value / denom * 100, 1.0) if tax_value else 0.0
             out.append(CauseSeg(
                 index=idx,
                 cause=s["cause"],
@@ -1048,13 +1157,17 @@ class ReconcileState(AuthState):
                 group=s["group"],
                 is_gap=s["group"] == "gap",
                 active=self.filter_cause == s["cause"],
+                tax_display=review.format_money(tax_value),
+                tax_percent=round(tax_value / denom * 100, 1),
+                tax_width=f"{width:.3f}%",
             ))
         self.cause_segments = out
 
         groups = self._model["group_segments"]
         gout: list[GroupSeg] = []
         for g in groups:
-            width = max(g["value"] / denom * 100, 1.0)
+            tax_value = round(float(g.get("tax_value") or 0.0), 2)
+            width = max(tax_value / denom * 100, 1.0) if tax_value else 0.0
             gout.append(GroupSeg(
                 group=g["group"],
                 label=g["label"],
@@ -1080,13 +1193,22 @@ class ReconcileState(AuthState):
             )
 
         self.kpis = [
+            # §1 — each card leads with the TAX at stake. The gross invoice
+            # value stays visible as an explicitly labelled secondary line
+            # (never as the card's headline figure).
             card("amount_difference", "Amount difference",
-                 review.format_money(k["amount_difference_value"]),
-                 k["amount_difference_count"], f"{k['amount_difference_count']} item(s)"),
-            card("not_in_books", "Not in books", review.format_money(k["not_in_books_value"]),
-                 k["not_in_books_count"], f"{k['not_in_books_count']} item(s)"),
-            card("not_in_portal", "Not in portal", review.format_money(k["not_in_portal_value"]),
-                 k["not_in_portal_count"], f"{k['not_in_portal_count']} item(s)"),
+                 review.format_money(k["amount_difference_tax"]),
+                 k["amount_difference_count"], f"{k['amount_difference_count']} item(s)",
+                 note=(f"on {review.format_money(k['amount_difference_gross'])} invoice value"
+                       if k["amount_difference_gross"] else "")),
+            card("not_in_books", "Not in books", review.format_money(k["not_in_books_tax"]),
+                 k["not_in_books_count"], f"{k['not_in_books_count']} item(s)",
+                 note=(f"on {review.format_money(k['not_in_books_gross'])} invoice value"
+                       if k["not_in_books_gross"] else "")),
+            card("not_in_portal", "Not in portal", review.format_money(k["not_in_portal_tax"]),
+                 k["not_in_portal_count"], f"{k['not_in_portal_count']} item(s)",
+                 note=(f"on {review.format_money(k['not_in_portal_gross'])} invoice value"
+                       if k["not_in_portal_gross"] else "")),
             card("matched", "Matched", review._UNAVAILABLE, k["matched_count"],
                  f"{k['matched_count']} of {k['portal_invoice_count']} portal invoices"),
             card("reviewed", "Reviewed", review._UNAVAILABLE, k["reviewed_count"],
@@ -1097,11 +1219,14 @@ class ReconcileState(AuthState):
         m = self._model
         # Charts take plain dicts: recharts binds the datum directly, and a
         # dataclass instance does not serialise into a JS data object.
+        #
+        # §2 — a zero-COUNT bucket is dropped here, before the data reaches the
+        # chart, so a nil classification can never paint a slice.
         slices: list[dict] = []
         colors: list[str] = []
         for s in m["classification_slices"]:
-            if s["count"] == 0 and s["value"] == 0:
-                continue  # never render an empty chart card
+            if int(s["count"]) <= 0:
+                continue
             slices.append({
                 "key": s["key"],
                 "name": s["name"],
@@ -1111,6 +1236,20 @@ class ReconcileState(AuthState):
             colors.append(_ROLE_COLOR.get(s["color_role"], _t.Color.NEUTRAL.value))
         self.classification_slices = slices
         self.classification_colors = colors
+        # A one-bucket period renders as a single full ring with a centre
+        # label rather than a degenerate pie.
+        self.classification_single = len(slices) == 1
+        if slices:
+            self.classification_single_label = slices[0]["name"]
+            self.classification_single_value = str(slices[0]["count"]) + " item(s)"
+            self.classification_single_color = (
+                _ROLE_COLOR.get(m["classification_slices"][0]["color_role"], _t.Color.NEUTRAL.value)
+                if self.classification_single else _t.Color.NEUTRAL.value
+            )
+        else:
+            self.classification_single_label = ""
+            self.classification_single_value = ""
+            self.classification_single_color = _t.Color.NEUTRAL.value
 
         bars: list[dict] = []
         for s in (m["suppliers"] or [])[:8]:
@@ -1123,7 +1262,10 @@ class ReconcileState(AuthState):
         self.supplier_bars = bars
 
         itc = m.get("itc")
-        self.itc_available = bool(itc)
+        # §2 — a run with no eligible-credit figure has nothing to chart; a run
+        # whose eligibility split is entirely one-sided renders a single ring.
+        self.itc_available = bool(itc) and bool(itc.get("slices"))
+        self.itc_empty_note = (itc or {}).get("empty_note", "") if itc else ""
         if itc:
             self.itc_slices = [
                 {"name": s["name"], "value": float(s["value"])} for s in itc["slices"]
@@ -1132,11 +1274,23 @@ class ReconcileState(AuthState):
                                for s in itc["slices"]]
             self.itc_display = review.format_money(itc["eligible"])
             self.itc_claimed_display = review.format_money(itc["claimed"])
+            self.itc_single = bool(itc.get("single"))
+            self.itc_single_label = itc.get("single_label") or ""
+            self.itc_single_value = itc.get("single_display") or ""
+            self.itc_single_color = _ROLE_COLOR.get(
+                itc.get("single_color_role") or "neutral", _t.Color.NEUTRAL.value
+            )
+            self.itc_ineligible_display = review.format_money(itc["ineligible"])
         else:
             self.itc_slices = []
             self.itc_colors = []
             self.itc_display = review._UNAVAILABLE
             self.itc_claimed_display = review._UNAVAILABLE
+            self.itc_single = False
+            self.itc_single_label = ""
+            self.itc_single_value = ""
+            self.itc_single_color = _t.Color.NEUTRAL.value
+            self.itc_ineligible_display = review._UNAVAILABLE
 
     def _build_quality_notes(self, run: dict) -> None:
         notes = review.data_quality_notes(
@@ -1177,15 +1331,29 @@ class ReconcileState(AuthState):
             except Exception:  # noqa: BLE001
                 pass
 
-        # Independent recompute — a genuinely separate code path.
+        # Independent recompute — a genuinely separate code path. §1: the
+        # headline is the TAX at stake, so the recount is done in tax too.
         items = self._model["items"]
         exceptions = [i for i in items if i["bucket"] != "Matched"]
-        row_sum = round(sum(i["difference"] for i in exceptions), 2)
-        cause_sum = round(sum(s["value"] for s in self._model["cause_segments"]), 2)
+        row_sum = round(sum(i["tax"] for i in exceptions), 2)
+        cause_sum = round(sum(s.get("tax_value") or 0.0 for s in self._model["cause_segments"]), 2)
         rows.append(IntegrityRow(
             label="Headline ties to rows",
             result="PASS" if abs(row_sum - cause_sum) < 0.05 else "FAIL",
             detail=f"{len(exceptions)} row(s) recounted → {review.format_money(row_sum)}",
+        ))
+        # Gross invoice value remains a secondary, explicitly labelled figure —
+        # never the "requiring attention" number.
+        gross_row_sum = round(sum(i["difference"] for i in exceptions), 2)
+        headline_tax = round(float(self._model["kpi"]["itc_at_stake_tax"]), 2)
+        headline_gross = round(float(self._model["kpi"]["gross_value"]), 2)
+        rows.append(IntegrityRow(
+            label="Headline is tax, not invoice value",
+            result="PASS" if headline_tax != headline_gross or headline_tax == 0 else "FAIL",
+            detail=(
+                f"headline tax {review.format_money(headline_tax)} · "
+                f"gross {review.format_money(gross_row_sum)} kept as a secondary figure"
+            ),
         ))
         tagged = sum(1 for i in exceptions if i["cause"])
         rows.append(IntegrityRow(
@@ -1537,6 +1705,9 @@ class ReconcileState(AuthState):
             ("open", str(self.selected_result_id) if self.selected_result_id else ""),
         ]
         query = "&".join(f"{k}={_url_quote(v)}" for k, v in pairs if v)
+        if self._on_review_route():
+            base = "/review"
+            return base + (f"?{query}" if query else "")
         return "/reconcile?stage=4" + (f"&{query}" if query else "")
     def _sync_url(self) -> None:
         self._pending_url = self._build_url()
@@ -2131,6 +2302,48 @@ class ReconcileState(AuthState):
             self._load_drawer()
         except Exception as exc:  # noqa: BLE001
             self.error = f"The revert couldn't be saved: {exc}"
+
+    # ==================================================================
+    # Stage 4 — report export (HTML / PDF / Excel) — §3
+    # ==================================================================
+    @rx.event
+    async def prepare_report(self, fmt: str):
+        """Render one export format from the run's single in-memory result.
+
+        All three formats come from ``report_export.export_report``, which
+        reads the same model the screen renders — so no headline number can
+        drift between the screen and an export.
+
+        The render happens on a worker thread: the PDF writer drives Playwright's
+        SYNCHRONOUS API, which refuses to run inside the event loop Reflex
+        serves events from. ``asyncio.to_thread`` gives it a loop-free thread.
+        """
+        self.report_error = ""
+        self.report_fmt = ""
+        self.report_b64 = ""
+        self.report_name = ""
+        if not self.run_id:
+            self.report_error = "No run to export."
+            return
+        fmt = (fmt or "").lower()
+        fmt = {"excel": "xlsx"}.get(fmt, fmt)
+        self.report_busy = True
+        try:
+            from src.reconciliation import report_export
+
+            payload = await asyncio.to_thread(
+                report_export.export_payload, self.run_id, fmt
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.report_error = f"The {fmt.upper()} report couldn't be written: {exc}"
+            return
+        finally:
+            self.report_busy = False
+        self.report_b64 = payload["b64"]
+        self.report_name = payload["filename"]
+        self.report_mime = payload["mime"]
+        self.report_fmt = fmt
+        self.flash = f"{fmt.upper()} report ready — {payload['filename']}"
 
     # ==================================================================
     # Stage 5 — Export

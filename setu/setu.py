@@ -139,8 +139,12 @@ for _route, _renderer in pages.all_routes():
         _on_load.append(ReportState.load)
     if _route == "/invoice-extraction":
         _on_load.append(InvoiceExtractState.load)
-    if _route in ("/run", "/review", "/compare", "/config", "/export"):
+    if _route in ("/run", "/compare", "/config", "/export"):
         _on_load.append(Phase1State.load)
+    if _route == "/review":
+        # The standalone Review screen renders the SAME Stage-4 presentation
+        # as /reconcile's Review tab, driven by the same ReconcileState.
+        _on_load.append(ReconcileState.load_review_page)
     if _route == "/reconcile":
         # The handler reads its own router params, so a filtered Review view
         # (/reconcile?stage=4&…) is linkable.

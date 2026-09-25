@@ -875,19 +875,38 @@ def data_quality_notes(
         ))
 
     # Run notes (D7) — declarations of what was deliberately NOT reconciled.
+    # Each note carries its OWN why/how. A single shared blob previously made
+    # the IMS coverage note repeat the credit-note note verbatim — text that
+    # describes a missing register, not what IMS status is or requires.
+    _RUN_NOTE_TEXT = {
+        "credit_notes_not_reconciled": (
+            "A reconciliation that silently omits a class of documents would overstate "
+            "its own completeness.",
+            "Upload the missing source (e.g. a books-side credit/debit-note register) "
+            "and re-run if these documents need to be reconciled.",
+        ),
+        "ims_coverage": (
+            "IMS status shows what a supplier has filed and what the recipient has "
+            "actioned in the portal — useful context, but it does not drive matching "
+            "in this build.",
+            "No action is required for this reconciliation; review Pending / No Action "
+            "items directly in the IMS portal if needed.",
+        ),
+    }
     for n in (run_notes or []):
+        code = n.get("code") or ""
+        why, how = _RUN_NOTE_TEXT.get(code, (
+            "This class of document was deliberately left out of this reconciliation, "
+            "so the report states the omission rather than implying full coverage.",
+            "Treat this as a declared scope limit; include the source in a later run "
+            "if these documents need to be reconciled.",
+        ))
         notes.append(QualityNote(
-            key=f"run_note_{n.get('code') or n.get('title')}",
+            key=f"run_note_{code or n.get('title')}",
             title=n.get("title") or "Not reconciled",
             what=n.get("detail") or "",
-            why=(
-                "A reconciliation that silently omits a class of documents would overstate "
-                "its own completeness."
-            ),
-            how=(
-                "Upload the missing source (e.g. a books-side credit/debit-note register) "
-                "and re-run if these documents need to be reconciled."
-            ),
+            why=why,
+            how=how,
         ))
 
     if source_files:
@@ -913,6 +932,24 @@ def data_quality_notes(
 # Headline / cause / KPI aggregation
 # ---------------------------------------------------------------------------
 
+def drop_zero_slices(slices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove every zero-value segment from a chart dataset (§2).
+
+    A pie/donut segment with ``value = 0`` still draws a stroke, which paints
+    a visible sliver for a bucket that does not exist. Filtering here — before
+    the data reaches any chart component — is the fix, not a cosmetic patch.
+    Also drops entries with no name, so a malformed slice can't render blank.
+    """
+    out: list[dict[str, Any]] = []
+    for s in slices or []:
+        if not clean(s.get("name")):
+            continue
+        if (to_number(s.get("value")) or 0.0) <= 0:
+            continue
+        out.append(s)
+    return out
+
+
 def _bucket_for(recon_type: str, classification: str) -> str:
     c = clean(classification)
     if recon_type == "TDS" and c in _TDS_BUCKET_OF:
@@ -929,6 +966,8 @@ def build_review_model(
     rounding_tolerance: float = DEFAULT_ROUNDING_TOLERANCE,
     itc_eligible: Optional[float] = None,
     itc_claimed: Optional[float] = None,
+    itc_blocked: Optional[float] = None,
+    itc_reverse_charge: Optional[float] = None,
 ) -> dict[str, Any]:
     """Turn raw result rows into the Review screen's full data model.
 
@@ -961,6 +1000,11 @@ def build_review_model(
         gstin = gstin_of(combined)
         reference = reference_of(combined)
         rec_date = date_of(combined)
+
+        # §1 — the TAX this record stands for, independent of its gross value.
+        # Portal (GSTR-2B) is the ITC evidence side, so it leads; a books-only
+        # record (Not in Portal) falls back to its own tax.
+        record_tax = component_tax_total(portal) or component_tax_total(books)
 
         books_value = item_value(books, recon_type) if books else 0.0
         portal_value = item_value(portal, recon_type) if portal else 0.0
@@ -1014,6 +1058,7 @@ def build_review_model(
             # present, so the UI never re-derives a different figure.
             "itc_at_risk": round(float(row.get("itc_at_risk") or 0.0), 2),
             "gross_value": round(float(row.get("gross_value") or 0.0), 2),
+            "tax": round(record_tax, 2),
             "books_value": round(books_value, 2),
             "portal_value": round(portal_value, 2),
             "books_display": format_money(books_value),
@@ -1037,26 +1082,65 @@ def build_review_model(
     attention_value = round(sum(i["difference"] for i in exceptions), 2)
     reviewed_count = sum(1 for i in items if i["reviewed"])
 
-    # Cause split — sums to the headline.
+    # ------------------------------------------------------------------
+    # §1 — ITC AT STAKE (the headline figure)
+    #
+    # The money genuinely at risk is the INPUT TAX on the invoices that never
+    # reached the books — not their gross invoice value, which is ~7x larger
+    # and not what a reviewer can reclaim or lose. Gross invoice value stays
+    # available (supplier chart, detail table) but is never a top-line number.
+    #
+    #   itc_at_stake_tax = SUM(tax) over records classified Not in Books
+    #   period_itc_total = SUM(tax) over every invoice in the run
+    #   itc_at_stake_pct = itc_at_stake_tax / period_itc_total
+    # ------------------------------------------------------------------
+    not_in_books_items = [i for i in items if i["bucket"] in ("Not in Books", "Missing")]
+    itc_at_stake_tax = round(sum(i["tax"] for i in not_in_books_items), 2)
+    period_itc_total = round(sum(i["tax"] for i in items), 2)
+    itc_at_stake_pct = (
+        round(itc_at_stake_tax / period_itc_total * 100.0, 2) if period_itc_total else 0.0
+    )
+    # Tax at stake per exception bucket — the KPI cards lead with these, never
+    # with gross invoice value.
+    def _bucket_tax(names: tuple[str, ...]) -> float:
+        return round(sum(i["tax"] for i in items if i["bucket"] in names), 2)
+
+    def _bucket_gross(names: tuple[str, ...]) -> float:
+        return round(sum(i["difference"] for i in items if i["bucket"] in names), 2)
+
+    # Cause split — `value` is the gross difference (unchanged); `tax_value`
+    # is the same split measured in tax so the bar ties to the §1 headline.
     cause_stat: dict[str, dict[str, Any]] = {}
     for i in exceptions:
         s = cause_stat.setdefault(i["cause"], {"cause": i["cause"], "label": CAUSE_LABELS.get(i["cause"], i["cause"]),
-                                               "count": 0, "value": 0.0, "group": i["cause_group"],
+                                               "count": 0, "value": 0.0, "tax_value": 0.0, "group": i["cause_group"],
                                                "color_role": CAUSE_COLOR_ROLE.get(i["cause"], "neutral")})
         s["count"] += 1
         s["value"] = round(s["value"] + i["difference"], 2)
+        s["tax_value"] = round(s["tax_value"] + i["tax"], 2)
     cause_segments = sorted(cause_stat.values(), key=lambda s: s["value"], reverse=True)
 
     group_stat: dict[str, dict[str, Any]] = {}
     for seg in cause_segments:
         g = group_stat.setdefault(seg["group"], {"group": seg["group"],
                                                  "label": CAUSE_GROUP_LABELS[seg["group"]],
-                                                 "count": 0, "value": 0.0})
+                                                 "count": 0, "value": 0.0, "tax_value": 0.0})
         g["count"] += seg["count"]
         g["value"] = round(g["value"] + seg["value"], 2)
+        g["tax_value"] = round(g["tax_value"] + seg["tax_value"], 2)
     group_segments = [group_stat[g] for g in ("gap", "judgement") if g in group_stat]
 
-    # Classification donut (count + value).
+    # Classification donut. EVERY slice is weighted by the SAME basis so the
+    # chart can never invert:
+    #   * count — the record count (the chart's centre label already reads
+    #     "Records N", so this is the intended basis), and
+    #   * value — the TOTAL TAX of the records in the bucket, a like-for-like
+    #     monetary total on every slice.
+    # The previous figure summed each item's *difference*, which is a sub-rupee
+    # residual for a matched invoice but a gross value for a Not-in-Books one.
+    # Weighting one side by a diagnostic residual and another by a gross total
+    # made a clean run (35/39 matched) render almost entirely red. The per-item
+    # `difference` is still on the items for the cause bar and the detail table.
     buckets = GST_BUCKETS if recon_type != "TDS" else ["Matched", "Amount Difference", "Missing", "Late Deposit"]
     classification_slices = []
     for name in buckets:
@@ -1065,7 +1149,7 @@ def build_review_model(
             "key": name,
             "name": name,
             "count": len(bucket_items),
-            "value": round(sum(i["difference"] for i in bucket_items), 2),
+            "value": round(sum(i["tax"] for i in bucket_items), 2),
             "color_role": CLASSIFICATION_COLOR_ROLE.get(name, "neutral"),
         })
 
@@ -1089,6 +1173,15 @@ def build_review_model(
     kpi = {
         "attention_value": attention_value,
         "attention_display": format_money(attention_value),
+        # §1 — the headline is the TAX at stake, with its share of the period's
+        # ITC. `attention_*` / `gross_value*` remain available as secondary
+        # figures but are never the top-line "requiring attention" number.
+        "itc_at_stake_tax": itc_at_stake_tax,
+        "itc_at_stake_display": format_money(itc_at_stake_tax),
+        "itc_at_stake_pct": itc_at_stake_pct,
+        "itc_at_stake_pct_display": f"{itc_at_stake_pct:.2f}%",
+        "period_itc_total": period_itc_total,
+        "period_itc_total_display": format_money(period_itc_total),
         "exception_count": len(exceptions),
         "total_count": total,
         "matched_count": matched_count,
@@ -1106,6 +1199,13 @@ def build_review_model(
         "amount_difference_value": round(
             sum(i["difference"] for i in exceptions if i["bucket"] == "Amount Difference"), 2
         ),
+        # Tax at stake per bucket — the KPI cards show THESE.
+        "amount_difference_tax": _bucket_tax(("Amount Difference",)),
+        "amount_difference_gross": _bucket_gross(("Amount Difference",)),
+        "not_in_books_tax": _bucket_tax(("Not in Books", "Missing")),
+        "not_in_books_gross": _bucket_gross(("Not in Books", "Missing")),
+        "not_in_portal_tax": _bucket_tax(("Not in Portal", "Late Deposit")),
+        "not_in_portal_gross": _bucket_gross(("Not in Portal", "Late Deposit")),
         "not_in_books_count": sum(1 for i in exceptions if i["bucket"] in ("Not in Books", "Missing")),
         "not_in_books_value": round(
             sum(i["difference"] for i in exceptions if i["bucket"] in ("Not in Books", "Missing")), 2
@@ -1116,19 +1216,42 @@ def build_review_model(
         ),
     }
 
-    # ITC split — rendered ONLY when the run actually carries the figure.
+    # ITC eligibility split — built from the run's OWN eligibility markers
+    # (§17(5) blocked credit and reverse charge), never from
+    # (claimed − eligible), which is a genuinely different quantity and was
+    # mislabelled "Ineligible" on the Review screen (§2).
     itc = None
     if recon_type == "GST" and itc_claimed is not None:
-        eligible = float(itc_eligible or 0.0)
-        claimed = float(itc_claimed or 0.0)
+        eligible = round(float(itc_eligible or 0.0), 2)
+        blocked = round(float(itc_blocked or 0.0), 2)
+        reverse_charge = round(float(itc_reverse_charge or 0.0), 2)
+        ineligible = round(blocked + reverse_charge, 2)
+        slices = drop_zero_slices([
+            {"name": "Eligible ITC", "value": eligible, "color_role": "rule"},
+            {"name": "Ineligible ITC", "value": ineligible, "color_role": "danger"},
+        ])
+        total_itc = round(sum(s["value"] for s in slices), 2)
         itc = {
-            "eligible": round(eligible, 2),
-            "ineligible": round(max(claimed - eligible, 0.0), 2),
-            "claimed": round(claimed, 2),
-            "slices": [
-                {"name": "Eligible ITC", "value": round(eligible, 2), "color_role": "rule"},
-                {"name": "Ineligible ITC", "value": round(max(claimed - eligible, 0.0), 2), "color_role": "danger"},
-            ],
+            "eligible": eligible,
+            "ineligible": ineligible,
+            "blocked": blocked,
+            "reverse_charge": reverse_charge,
+            "claimed": round(float(itc_claimed or 0.0), 2),
+            "total": total_itc,
+            "total_display": format_money(total_itc),
+            "eligible_display": format_money(eligible),
+            # Zero-value segments are dropped BEFORE the chart sees them, so a
+            # nil bucket can never paint a sliver.
+            "slices": slices,
+            "single": len(slices) == 1,
+            "single_label": (slices[0]["name"] if slices else ""),
+            "single_value": (slices[0]["value"] if slices else 0.0),
+            "single_display": (format_money(slices[0]["value"]) if slices else format_money(0)),
+            "single_color_role": (slices[0]["color_role"] if slices else "neutral"),
+            "single_percent": 100.0 if slices else 0.0,
+            "empty_note": (
+                "No ITC was recorded for this run." if not slices else ""
+            ),
         }
 
     return {
