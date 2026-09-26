@@ -95,8 +95,18 @@ class ProviderSpec:
 # so its catalogue is a short static starter list plus manual model-string
 # entry on the AI Models screen (Admin-maintained). CONFIRM the live-endpoint
 # state at build time and switch catalog_mode to 'live' if one exists.
+#
+# Sarvam retires model ids WITHOUT notice: 'sarvam-m' was deprecated and the
+# API now rejects it with "Model 'sarvam-m' has been deprecated. Please use one
+# of the available models instead: sarvam-105b, sarvam-105b-conversations."
+# That arrives as a typed api_error which the gateway (correctly) does NOT
+# retry — a retired id is a request problem, not a provider outage. Keep this
+# list to ids the API currently accepts, because a stale id here becomes the
+# DEFAULT the dropdown offers AND the id the provider-switch handler auto-selects
+# — so one retired entry breaks every Sarvam leg at once.
 _SARVAM_STATIC_MODELS: list[dict[str, Any]] = [
-    {"model_id": "sarvam-m", "name": "Sarvam M", "modality": "text->text"},
+    {"model_id": "sarvam-105b", "name": "Sarvam 105B", "modality": "text->text"},
+    {"model_id": "sarvam-105b-conversations", "name": "Sarvam 105B (conversations)", "modality": "text->text"},
 ]
 
 PROVIDER_SPECS: dict[str, ProviderSpec] = {

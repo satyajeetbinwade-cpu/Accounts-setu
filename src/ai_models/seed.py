@@ -153,6 +153,19 @@ def run_seed(conn: sqlite3.Connection) -> None:
     for spec in prov.PROVIDER_SPECS.values():
         adb.upsert_provider(conn, **spec.to_row())
 
+    # Static-catalogue providers (Sarvam) own their model list IN CODE, so each
+    # boot mirrors the current code list into the cache. `upsert_provider`
+    # deliberately never overwrites an existing row, so without this a retired id
+    # cached by an earlier seed (e.g. 'sarvam-m', since deprecated) would be
+    # offered by the dropdown FOREVER. Live providers are left alone here: their
+    # cache is filled by an explicit catalogue refresh, and wiping it on every
+    # boot would empty their dropdown until the next refresh.
+    for spec in prov.PROVIDER_SPECS.values():
+        if not spec.has_live_catalog:
+            adb.replace_provider_models(
+                conn, spec.key, prov.static_models(spec), source="static",
+            )
+
     for key, label, category, description, primary, fallback, order in SEED_ASSIGNMENTS:
         adb.upsert_assignment(
             conn,

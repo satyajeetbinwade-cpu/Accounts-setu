@@ -124,8 +124,32 @@ def test_unknown_provider_rejected():
 
 def test_sarvam_uses_static_catalogue_without_network():
     models = prov.fetch_catalog(prov.PROVIDER_SPECS["sarvam"], None)
-    assert models and models[0]["model_id"] == "sarvam-m"
+    ids = [m["model_id"] for m in models]
+    assert "sarvam-105b" in ids
+    assert "sarvam-m" not in ids  # Sarvam retired 'sarvam-m'
     assert prov.PROVIDER_SPECS["sarvam"].catalog_mode == "static"
+
+
+def test_seed_purges_a_retired_static_model_id(db):
+    """A stale static id cached by an earlier seed must not survive a boot."""
+    from src.ai_models import db as adb
+    from src.db import get_connection
+
+    conn = get_connection(db)
+    try:
+        adb.replace_provider_models(
+            conn, "sarvam",
+            [{"model_id": "sarvam-m", "name": "Sarvam M"}],
+            source="static",
+        )
+    finally:
+        conn.close()
+
+    ai_models.init_ai_models(db)  # a boot
+
+    ids = [m["model_id"] for m in ai_models.models_for_provider("sarvam", db_path=db)]
+    assert "sarvam-m" not in ids
+    assert "sarvam-105b" in ids
 
 
 def test_stored_key_is_masked_and_never_returned(db):
