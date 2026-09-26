@@ -342,7 +342,7 @@ def _review_queue_section() -> rx.Component:
             ),
             c.empty_state(
                 "Nothing awaiting review — every upload is either auto-accepted or already confirmed.",
-                icon="check-circle",
+                icon="circle_check",
             ),
         ),
         spacing="4",

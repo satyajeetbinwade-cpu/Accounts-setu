@@ -676,7 +676,7 @@ def _compare_tool() -> rx.Component:
                                 spacing="3",
                                 width="100%",
                             ),
-                            c.empty_state("No classification changes between these two runs.", icon="check-circle"),
+                            c.empty_state("No classification changes between these two runs.", icon="circle_check"),
                         ),
                         spacing="3",
                         align="start",

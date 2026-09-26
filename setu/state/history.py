@@ -6,9 +6,12 @@ the component in ``setu/foundation/components.py`` stays presentation-only.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from src.f4 import service as f4
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -24,8 +27,22 @@ class HistoryEntry:
 def load_history(
     record_type: str, record_id, *, client_id: int | None = None
 ) -> list[HistoryEntry]:
-    """Newest-first history for one record, each entry in plain language."""
-    rows = f4.history_for_record(record_type, record_id, client_id=client_id)
+    """Newest-first history for one record, each entry in plain language.
+
+    Degrades to an empty history rather than raising. Callers embed the result
+    directly in ``rx.foreach`` renderers and also build per-record dicts from
+    it, so a read failure must yield ``[]`` — never abort mid-load and leave
+    the owning collection partially built. That exact failure mode crashed the
+    whole page with "Cannot read properties of undefined (reading 'length')"
+    when the underlying table was missing.
+    """
+    try:
+        rows = f4.history_for_record(record_type, record_id, client_id=client_id)
+    except Exception as exc:  # noqa: BLE001 — degrade to empty, log loudly
+        logger.warning(
+            "Edit history unavailable for %s %r: %s", record_type, record_id, exc
+        )
+        return []
     return [
         HistoryEntry(
             plain_language=r.get("plain_language") or "",

@@ -114,7 +114,7 @@ def init_module2(db_path=None) -> None:
     conn = _connect(db_path)
     try:
         init_module2_schema(conn)
-        _seed_matching_key_configs(conn)
+        _seed_matching_key_configs(conn, db_path)
     finally:
         conn.close()
 
@@ -133,14 +133,19 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _seed_matching_key_configs(conn: sqlite3.Connection) -> None:
+def _seed_matching_key_configs(conn: sqlite3.Connection, db_path=None) -> None:
     """Seed the per-sub-type matching-key configurations. Additive-upsert —
     never clobbers an Admin's tuned values. Tolerance/key definitions are
-    read from C1 at run time; the values here are the resolved defaults."""
+    read from C1 at run time; the values here are the resolved defaults.
+
+    ``db_path`` must be threaded into the C1 read: initialising a scratch DB
+    (a test DB, or any non-default path) otherwise read C1's rules from the
+    *default* DB and failed with "no such table: rules".
+    """
     from src.rules import service as rules
 
     def _tol(key: str, default: float) -> float:
-        v = rules.get_effective_number(key, default=default)
+        v = rules.get_effective_number(key, default=default, db_path=db_path)
         return default if v is None else v
 
     configs: list[dict[str, Any]] = [

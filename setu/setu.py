@@ -17,8 +17,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import reflex as rx
 
-from src import db
-from src.auth import service as auth
 from setu.foundation import tokens as t
 from setu.state import (
     AdminState,
@@ -47,22 +45,15 @@ from setu.views import pages
 from setu.views.login import login_page
 
 # --- Service layer bootstrap ------------------------------------------------
-# Each init_* is idempotent (creates tables / seeds first-run data only), so
-# repeated starts against the same db/poc.db are safe. Modules are added here
-# as they're built.
-db.init_db()
-auth.init_auth()
+# ONE list of modules (src/bootstrap.py) creates every table and seeds
+# first-run defaults. Centralising it is what guarantees a fresh database has
+# every table the UI reads — when a module was omitted here, whole pages read
+# missing tables and the failure surfaced as a client-side crash instead of a
+# clear error. Every init_* is idempotent, so this is safe on every start
+# against an existing db/poc.db.
+from src import bootstrap  # noqa: E402
 
-from src.f6 import service as f6  # noqa: E402
-from src.invoice_extract import service as invoice_extract  # noqa: E402
-from src.ingestion_ai import service as ingestion_ai  # noqa: E402
-
-f6.init_f6()
-invoice_extract.init_invoice_extract()
-# F3-AI's schema init also runs the additive migrations (validation_json,
-# metadata_json, rate_matrix_json, dispositions_json, ingestion_path), which
-# the corrective build's gate and review screen read.
-ingestion_ai.init_ingestion_ai()
+bootstrap.init_all()
 
 
 def _boot() -> None:

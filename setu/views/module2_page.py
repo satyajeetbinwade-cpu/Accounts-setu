@@ -298,7 +298,7 @@ def _queue() -> rx.Component:
                 rx.cond(
                     Module2State.exceptions.length() > 0,
                     rx.vstack(rx.foreach(Module2State.exceptions, _exception_row), spacing="0", width="100%"),
-                    c.empty_state("No exceptions match this filter.", icon="check-circle"),
+                    c.empty_state("No exceptions match this filter.", icon="circle_check"),
                 ),
                 spacing="3",
                 align="start",

@@ -5,12 +5,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from src import bootstrap
 from src import db
 from src.config_loader import load_config
 
 
 def main() -> None:
-    db.init_db()
+    bootstrap.init_all()
     config = load_config()
 
     # Verify both tables exist.
