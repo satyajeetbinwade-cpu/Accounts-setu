@@ -7,9 +7,12 @@ screen and all three exports agree exactly.
 
   * HTML  — a single self-contained file: inline CSS, inline SVG charts, no
             JS, no network fetches, system-font fallback.
-  * Excel — four sheets with LIVE formulas (SUM / COUNTIF / SUMIF) on
-            Overview referencing the detail sheets, landscape + fit-to-width,
-            frozen header, status fills, ₹#,##0.00.
+  * Excel — ONE master-data sheet carrying the whole matching report (every
+            entry + its classification), plus a formula-derived sheet per
+            classification (Matched / Not in Books / Not in Portal / Amount
+            Difference) and a live SUM / COUNTIF / SUMIF Overview. Every one of
+            those sheets reads the master sheet, so none can disagree with it.
+            Landscape, fit-to-width, frozen header, status fills, ₹#,##0.00.
   * PDF   — printed by headless Chromium (Playwright), deliberately NOT
             wkhtmltopdf/QtWebKit, which collapses CSS Grid and inverts the
             theme.
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -32,16 +36,25 @@ from src.reconciliation import run_model
 FORMATS = ("html", "pdf", "xlsx")
 
 SHEET_OVERVIEW = "Overview"
-SHEET_INVOICES = "GST Invoices"
+# ONE master sheet holds the whole matching report — every entry with its
+# classification. The per-classification sheets are DERIVED from it by formula,
+# so a classification view can never drift from the data it summarises.
+SHEET_MASTER = "Master data"
 SHEET_CREDIT_NOTES = "Credit Notes"
-SHEET_QUALITY = "Data Quality"
 
-# Column letters on the invoice sheet — the Overview formulas reference these,
-# so the layout and the formulas are defined in one place.
+# The order the split sheets are written in (only classes actually present get
+# a sheet, so an all-matched run is not padded with empty buckets).
+_CLASS_ORDER = ("Matched", "Amount Difference", "Not in Books", "Not in Portal")
+
+# Column letters on the master sheet — the Overview formulas and the derived
+# sheets reference these, so the layout and the formulas are defined in one place.
 _INV_LAST = "P"
 _INV_CLASS = "L"      # Classification
 _INV_TAX = "J"        # Total tax
 _INV_VALUE = "K"      # Invoice value (gross)
+# Hidden helper column: "<classification>|<rank>" — what the derived sheets MATCH on.
+_KEY_COL = "Q"
+_KEY_COL_INDEX = 17
 
 # Foundation semantic tokens, resolved to hex for static output. A chart in any
 # format uses these roles and never introduces a new colour.
@@ -619,7 +632,8 @@ def _status_fill(classification: str):
     }.get(classification, PatternFill("solid", fgColor="F5F6F7"))
 
 
-_INVOICE_HEADERS = [
+# The master data ledger — one row per entry, and the ONLY place a value lives.
+_MASTER_HEADERS = [
     "Supplier", "GSTIN", "Invoice no.", "Invoice date",
     "Taxable value", "IGST", "CGST", "SGST", "Cess", "Total tax",
     "Invoice value", "Classification", "Status", "Difference type",
@@ -670,18 +684,64 @@ def _recalculate_workbook(path: Path) -> None:
             shutil.move(str(produced), str(path))
 
 
+def _ordered_classes(invoices: list[dict[str, Any]]) -> list[str]:
+    """The classifications actually present, in report order."""
+    present = {inv.get("classification") or "" for inv in invoices}
+    ordered = [name for name in _CLASS_ORDER if name in present]
+    ordered += sorted(present - set(_CLASS_ORDER) - {""})
+    return ordered
+
+
+def _derived_cell(column: str, last_row: int, classification: str) -> str:
+    """A formula pulling the k-th master row that carries one classification.
+
+    The master sheet's hidden ``Row key`` column holds ``<classification>|<rank>``
+    (rank = COUNTIF over the class so far) and ``ROW()-1`` is this row's own
+    1-based position in the derived sheet — so MATCH finds the k-th such row.
+    MATCH/INDEX is used deliberately: it recalculates in every spreadsheet app,
+    whereas an AGGREGATE(SMALL) array form silently did NOT in LibreOffice.
+    """
+    master = f"'{SHEET_MASTER}'"  # quoted — the sheet name contains a space
+    key = f"{master}!${_KEY_COL}$2:${_KEY_COL}${last_row}"
+    return (
+        f"=IFERROR(INDEX({master}!{column}$2:{column}${last_row},"
+        f"MATCH(\"{classification}|\"&(ROW()-1),{key},0)),\"\")"
+    )
+
+
 def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
-    """Four sheets. Every Overview total is a LIVE formula over the detail
-    sheets — nothing is copied from the app's in-memory result."""
+    """A master data sheet plus one formula-derived sheet per classification.
+
+    The master sheet carries the whole matching report — every entry with its
+    classification and figures. Each ``Matched`` / ``Not in Books`` /
+    ``Not in Portal`` / ``Amount Difference`` sheet is built ONLY from formulas
+    that read that master sheet, and Overview's split is COUNTIF/SUMIF over it
+    too — so no sheet can hold a figure the master does not, and an edit to the
+    master flows through every view.
+    """
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, Side
     from openpyxl.utils import get_column_letter
 
     k = data["kpi"]
+    invoices = data["invoices"]
+    classes = _ordered_classes(invoices)
     wb = Workbook()
     bold = Font(bold=True)
     title_font = Font(bold=True, size=14)
     thin = Side(style="thin", color="E7E9EC")
+
+    # Ranges every formula reads. They cover the REAL data rows only, so the
+    # workbook stays small and a reviewer can see exactly what a total covers.
+    last_row = len(invoices) + 1              # master data lives in rows 2..last_row
+    cn_last = len(data["credit_notes"]) + 1
+    m = f"'{SHEET_MASTER}'"
+    m_cls = f"{m}!${_INV_CLASS}$2:${_INV_CLASS}${last_row}"
+    m_tax = f"{m}!${_INV_TAX}$2:${_INV_TAX}${last_row}"
+    m_val = f"{m}!${_INV_VALUE}$2:${_INV_VALUE}${last_row}"
+    m_count = f"{m}!$A$2:$A${last_row}"
+    cn_count = f"'{SHEET_CREDIT_NOTES}'!$A$2:$A${cn_last}"
+    cn_tax = f"'{SHEET_CREDIT_NOTES}'!$K$2:$K${cn_last}"
 
     # ---- Overview -------------------------------------------------------
     ws = wb.active
@@ -693,17 +753,6 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
     ws["A3"] = f"Generated {data['generated_at']}"
     ws["A4"] = "Source files: " + (", ".join(data["source_files"]) or "—")
 
-    # Detail-sheet ranges the formulas read. The generous bound lets a reviewer
-    # add rows without breaking a total.
-    inv_last = max(len(data["invoices"]) + 1, 2)
-    inv_range_end = 100000
-    cls_col = f"'{SHEET_INVOICES}'!${_INV_CLASS}$2:${_INV_CLASS}${inv_range_end}"
-    tax_col = f"'{SHEET_INVOICES}'!${_INV_TAX}$2:${_INV_TAX}${inv_range_end}"
-    value_col = f"'{SHEET_INVOICES}'!${_INV_VALUE}$2:${_INV_VALUE}${inv_range_end}"
-    inv_count_col = f"'{SHEET_INVOICES}'!$A$2:$A${inv_range_end}"
-    cn_count_col = f"'{SHEET_CREDIT_NOTES}'!$A$2:$A${inv_range_end}"
-    cn_tax_col = f"'{SHEET_CREDIT_NOTES}'!$K$2:$K${inv_range_end}"
-
     r = 6
     ws.cell(row=r, column=1, value="Key figures (live formulas)").font = bold
     r += 1
@@ -713,22 +762,22 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
         # cause split and the on-screen headline. Previously this summed the
         # Not-in-Books bucket alone, so it disagreed with the report's own
         # headline on any run whose exposure spanned more than one bucket.
-        ("ITC at stake (tax on exceptions)", f"=SUMIF({cls_col},\"<>Matched\",{tax_col})",
+        ("ITC at stake (tax on exceptions)", f"=SUMIF({m_cls},\"<>Matched\",{m_tax})",
          _MONEY_FMT, "§1 headline — tax on every exception bucket, not gross invoice value"),
-        ("Period ITC (total tax in run)", f"=SUM({tax_col})", _MONEY_FMT, ""),
+        ("Period ITC (total tax in run)", f"=SUM({m_tax})", _MONEY_FMT, ""),
         ("ITC at stake % of period ITC", None, "0.00%", "=B7/B8"),
-        ("Invoices", f"=COUNTA({inv_count_col})", "0", ""),
-        ("Matched", f"=COUNTIF({cls_col},\"Matched\")", "0", ""),
-        ("Exceptions", f"=COUNTA({inv_count_col})-COUNTIF({cls_col},\"Matched\")", "0", ""),
-        ("Not in books", f"=COUNTIF({cls_col},\"Not in Books\")", "0", ""),
-        ("Not in portal", f"=COUNTIF({cls_col},\"Not in Portal\")", "0", ""),
-        ("Amount difference", f"=COUNTIF({cls_col},\"Amount Difference\")", "0", ""),
-        ("Credit notes", f"=COUNTA({cn_count_col})", "0", "tracked separately from invoices"),
-        ("Credit note tax", f"=SUM({cn_tax_col})", _MONEY_FMT, "not reconciled this run"),
+        ("Invoices", f"=COUNTA({m_count})", "0", ""),
+        ("Matched", f"=COUNTIF({m_cls},\"Matched\")", "0", ""),
+        ("Exceptions", f"=COUNTA({m_count})-COUNTIF({m_cls},\"Matched\")", "0", ""),
+        ("Not in books", f"=COUNTIF({m_cls},\"Not in Books\")", "0", ""),
+        ("Not in portal", f"=COUNTIF({m_cls},\"Not in Portal\")", "0", ""),
+        ("Amount difference", f"=COUNTIF({m_cls},\"Amount Difference\")", "0", ""),
+        ("Credit notes", f"=COUNTA({cn_count})", "0", "tracked separately from invoices"),
+        ("Credit note tax", f"=SUM({cn_tax})", _MONEY_FMT, "not reconciled this run"),
         # §4 — column K (Invoice value), NOT column J (Total tax). The label is
         # "gross invoice value", so it must sum the invoice-value column; the
         # cell previously summed tax and shipped a note admitting it.
-        ("Gross invoice value on exceptions (context only)", f"=SUMIF({cls_col},\"<>Matched\",{value_col})",
+        ("Gross invoice value on exceptions (context only)", f"=SUMIF({m_cls},\"<>Matched\",{m_val})",
          _MONEY_FMT, ""),
     ]
     itc_row = None
@@ -752,15 +801,29 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
     if itc_row and period_row:
         ws.cell(row=itc_row + 2, column=2).value = f"=IFERROR(B{itc_row}/B{period_row},0)"
 
+    # ---- The split: every classification, live over the master sheet -----
+    # This is the "split of the different types of matching" — count, tax and
+    # gross value per bucket, and a total that reconciles to Period ITC.
     r += 1
-    ws.cell(row=r, column=1, value="Credit-note detail (from the portal file)").font = bold
+    ws.cell(row=r, column=1, value="Split by matching type (from the master data sheet)").font = bold
     r += 1
-    for label, value, fmt in [
-        ("Credit note tax total", f"=SUM({cn_tax_col})", _MONEY_FMT),
-        ("Credit note count", f"=COUNTA({cn_count_col})", "0"),
-    ]:
-        ws.cell(row=r, column=1, value=label)
-        ws.cell(row=r, column=2, value=value).number_format = fmt
+    for col, head in enumerate(("Classification", "Entries", "Total tax", "Invoice value"), start=1):
+        cell = ws.cell(row=r, column=col, value=head)
+        cell.font = bold
+        cell.border = Border(bottom=thin)
+    r += 1
+    split_first = r
+    for name in classes:
+        ws.cell(row=r, column=1, value=name)
+        ws.cell(row=r, column=2, value=f"=COUNTIF({m_cls},\"{name}\")").number_format = "0"
+        ws.cell(row=r, column=3, value=f"=SUMIF({m_cls},\"{name}\",{m_tax})").number_format = _MONEY_FMT
+        ws.cell(row=r, column=4, value=f"=SUMIF({m_cls},\"{name}\",{m_val})").number_format = _MONEY_FMT
+        r += 1
+    if classes:
+        ws.cell(row=r, column=1, value="Total").font = bold
+        ws.cell(row=r, column=2, value=f"=SUM(B{split_first}:B{r-1})").number_format = "0"
+        ws.cell(row=r, column=3, value=f"=SUM(C{split_first}:C{r-1})").number_format = _MONEY_FMT
+        ws.cell(row=r, column=4, value=f"=SUM(D{split_first}:D{r-1})").number_format = _MONEY_FMT
         r += 1
 
     r += 1
@@ -774,18 +837,21 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
             r += 1
 
-    ws.column_dimensions["A"].width = 46
-    ws.column_dimensions["B"].width = 20
-    ws.column_dimensions["C"].width = 44
+    for col, width in zip("ABCD", (46, 20, 22, 18)):
+        ws.column_dimensions[col].width = width
     ws.print_title_rows = "1:1"
 
-    # ---- GST Invoices ---------------------------------------------------
-    wsi = wb.create_sheet(SHEET_INVOICES)
-    for col, head in enumerate(_INVOICE_HEADERS, start=1):
-        c = wsi.cell(row=1, column=col, value=head)
+    # ---- Master data — the whole matching report, the one source of truth -
+    wsm = wb.create_sheet(SHEET_MASTER)
+    for col, head in enumerate(_MASTER_HEADERS, start=1):
+        c = wsm.cell(row=1, column=col, value=head)
         c.font = bold
         c.border = Border(bottom=thin)
-    for idx, inv in enumerate(data["invoices"], start=2):
+    # Hidden helper: the composite key the derived classification sheets MATCH on.
+    key_head = wsm.cell(row=1, column=_KEY_COL_INDEX, value="Row key")
+    key_head.font = bold
+    key_head.border = Border(bottom=thin)
+    for idx, inv in enumerate(invoices, start=2):
         values = [
             inv["party"], inv["gstin"], inv["reference"], inv["date"],
             inv["taxable_value"], inv["igst"], inv["cgst"], inv["sgst"], inv["cess"],
@@ -793,20 +859,60 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
             inv["status"], inv["difference_type"], inv["confidence"], inv["match_reason"],
         ]
         for col, value in enumerate(values, start=1):
-            cell = wsi.cell(row=idx, column=col, value=value)
+            cell = wsm.cell(row=idx, column=col, value=value)
             if 5 <= col <= 11:
                 cell.number_format = _MONEY_FMT
             if col == 16:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
         fill = _status_fill(inv["classification"])
-        for col in range(1, len(_INVOICE_HEADERS) + 1):
-            wsi.cell(row=idx, column=col).fill = fill
-    _sheet_setup(wsi)
-    for col in range(1, len(_INVOICE_HEADERS) + 1):
-        wsi.column_dimensions[get_column_letter(col)].width = 30 if col == 16 else 18
-    wsi.column_dimensions["A"].width = 34
+        for col in range(1, len(_MASTER_HEADERS) + 1):
+            wsm.cell(row=idx, column=col).fill = fill
+        wsm.cell(
+            row=idx, column=_KEY_COL_INDEX,
+            value=f'=${_INV_CLASS}{idx}&"|"&COUNTIF(${_INV_CLASS}$2:${_INV_CLASS}{idx},${_INV_CLASS}{idx})',
+        )
+    _sheet_setup(wsm)
+    for col in range(1, len(_MASTER_HEADERS) + 1):
+        wsm.column_dimensions[get_column_letter(col)].width = 30 if col == 16 else 18
+    wsm.column_dimensions["A"].width = 34
+    wsm.column_dimensions[_KEY_COL].hidden = True
 
-    # ---- Credit Notes ---------------------------------------------------
+    # ---- One formula-derived sheet per classification --------------------
+    col_letters = [get_column_letter(i) for i in range(1, len(_MASTER_HEADERS) + 1)]
+    counts = Counter(inv["classification"] for inv in invoices)
+    for name in classes:
+        wsd = wb.create_sheet(name)
+        for col, head in enumerate(_MASTER_HEADERS, start=1):
+            cell = wsd.cell(row=1, column=col, value=head)
+            cell.font = bold
+            cell.border = Border(bottom=thin)
+        fill = _status_fill(name)
+        for i in range(counts[name]):
+            row = 2 + i
+            for col, letter in enumerate(col_letters, start=1):
+                cell = wsd.cell(row=row, column=col, value=_derived_cell(letter, last_row, name))
+                if 5 <= col <= 11:
+                    cell.number_format = _MONEY_FMT
+                if col == 16:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                cell.fill = fill
+        # A control total so the split sheet is self-checking on its own.
+        total_row = 2 + counts[name]
+        wsd.cell(row=total_row, column=1, value="Total").font = bold
+        for col in range(5, 12):
+            letter = col_letters[col - 1]
+            cell = wsd.cell(
+                row=total_row, column=col,
+                value=f"=SUM({letter}2:{letter}{total_row - 1})",
+            )
+            cell.number_format = _MONEY_FMT
+            cell.font = bold
+        _sheet_setup(wsd)
+        for col in range(1, len(_MASTER_HEADERS) + 1):
+            wsd.column_dimensions[get_column_letter(col)].width = 30 if col == 16 else 18
+        wsd.column_dimensions["A"].width = 34
+
+    # ---- Credit Notes (a separate document class — never in the master) ---
     wsc = wb.create_sheet(SHEET_CREDIT_NOTES)
     for col, head in enumerate(_CREDIT_NOTE_HEADERS, start=1):
         c = wsc.cell(row=1, column=col, value=head)
@@ -825,20 +931,6 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
     _sheet_setup(wsc)
     for col in range(1, len(_CREDIT_NOTE_HEADERS) + 1):
         wsc.column_dimensions[get_column_letter(col)].width = 34 if col == 1 else 18
-
-    # ---- Data Quality ---------------------------------------------------
-    wsq = wb.create_sheet(SHEET_QUALITY)
-    for col, head in enumerate(["Note", "What", "Why it matters", "How to fix"], start=1):
-        c = wsq.cell(row=1, column=col, value=head)
-        c.font = bold
-        c.border = Border(bottom=thin)
-    for idx, n in enumerate(data["quality_notes"], start=2):
-        for col, key in enumerate(("title", "what", "why", "how"), start=1):
-            cell = wsq.cell(row=idx, column=col, value=n[key])
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-    _sheet_setup(wsq, landscape=False)
-    for col, width in zip("ABCD", (40, 52, 52, 52)):
-        wsq.column_dimensions[col].width = width
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)

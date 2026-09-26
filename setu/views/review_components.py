@@ -1542,7 +1542,12 @@ def _format_button(label: str, fmt: str, hint: str) -> rx.Component:
 
 def report_export() -> rx.Component:
     """The export control: HTML / PDF / Excel, all built from this run's one
-    result so every headline number matches the screen exactly."""
+    result so every headline number matches the screen exactly.
+
+    Choosing a format renders it AND downloads it in one action. The download
+    is driven by ``rx.download`` on the server event, NOT a ``data:`` URI
+    ``rx.link`` — react-router intercepts the anchor click and swallows the
+    native download attribute, so the old data-URI link silently did nothing."""
     return c.card(
         rx.vstack(
             c.section_title(
@@ -1553,7 +1558,7 @@ def report_export() -> rx.Component:
             rx.hstack(
                 _format_button("HTML", "html", "Self-contained file — opens offline"),
                 _format_button("PDF", "pdf", "Print-ready, charts included"),
-                _format_button("Excel", "excel", "Four sheets, live formulas"),
+                _format_button("Excel", "excel", "Master data + a sheet per match type"),
                 spacing="4", align="start", wrap="wrap",
             ),
             rx.cond(
@@ -1571,19 +1576,17 @@ def report_export() -> rx.Component:
                 rx.vstack(
                     c.info_banner(
                         f"{ReconcileState.report_fmt.upper()} report ready — "
-                        f"{ReconcileState.report_name}"
+                        f"{ReconcileState.report_name}. Your download should have started."
                     ),
-                    rx.link(
-                        rx.button(
-                            f"Download {ReconcileState.report_fmt.upper()} report",
-                            background=t.Color.ACCENT.value,
-                            color="#FFFFFF",
-                        ),
-                        # The "data:" scheme is REQUIRED — without it the browser
-                        # reads "text/html;base64,AAA…" as a relative URL and
-                        # 404s instead of downloading the file.
-                        href="data:" + ReconcileState.report_mime + ";base64," + ReconcileState.report_b64,
-                        download=ReconcileState.report_name,
+                    rx.button(
+                        "Download again",
+                        on_click=ReconcileState.prepare_report(ReconcileState.report_fmt),
+                        size="1",
+                        variant="soft",
+                        background="transparent",
+                        color=t.Color.TEXT_SECONDARY.value,
+                        border=f"1px solid {t.Color.BORDER.value}",
+                        border_radius="8px",
                     ),
                     spacing="2", align="start",
                 ),

@@ -247,10 +247,48 @@ def test_xlsx_gross_formula_uses_column_k_and_drops_the_caveat(monkeypatch, tmp_
     row = next(r for r in range(1, 40)
                if str(ws.cell(row=r, column=1).value or "").startswith("Gross invoice value"))
     formula = ws.cell(row=row, column=2).value
-    assert "'GST Invoices'!$K$2:$K$100000" in formula
-    assert "'GST Invoices'!$J$2:$J$100000" not in formula
+    assert "'Master data'!$K$2:$K$5" in formula
+    assert "'Master data'!$J$2:$J$5" not in formula
     # The self-caveat note is gone once the formula is correct.
     assert ws.cell(row=row, column=3).value in (None, "")
+
+
+def test_xlsx_is_master_data_plus_formula_derived_classification_sheets(monkeypatch, tmp_path):
+    """The Excel is ONE master data sheet carrying every entry, plus a sheet
+    per classification built ONLY from formulas that read the master — and an
+    Overview split that is COUNTIF/SUMIF over the same master."""
+    monkeypatch.setattr(ex, "_recalculate_workbook", lambda path: None)
+    data = _export_data(monkeypatch, client_gstin="07AAACP9472A1ZJ")
+    out = ex.write_xlsx(data, tmp_path / "report.xlsx")
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(out, data_only=False)
+    # Only classifications actually present get a sheet (the fixture has no
+    # Not-in-Portal row), so an all-matched run is not padded with empty tabs.
+    assert wb.sheetnames == [
+        "Overview", "Master data", "Matched", "Not in Books", "Credit Notes",
+    ]
+
+    master = wb["Master data"]
+    assert sum(1 for r in master.iter_rows(min_row=2, max_col=1) if r[0].value) == len(data["invoices"])
+
+    for name, expected_rows in (("Matched", 3), ("Not in Books", 1)):
+        sheet = wb[name]
+        assert str(sheet["A2"].value).startswith("="), f"{name} A2 must be a formula"
+        assert "'Master data'!" in str(sheet["A2"].value)
+        # One derived formula row per entry of that class, then a Total row.
+        body = sum(
+            1 for r in sheet.iter_rows(min_row=2, max_col=1)
+            if isinstance(r[0].value, str) and r[0].value.startswith("=")
+        )
+        assert body == expected_rows
+        assert sheet.cell(row=2 + expected_rows, column=1).value == "Total"
+
+    ov = wb["Overview"]
+    labels = [str(ov.cell(row=r, column=1).value or "") for r in range(1, 40)]
+    assert "Split by matching type (from the master data sheet)" in labels
+    assert "Matched" in labels and "Not in Books" in labels
 
 
 @pytest.mark.skipif(

@@ -3,8 +3,8 @@
 One guided path from source files to a finished report: Context → Upload →
 Reconcile → Review → Export. ORCHESTRATION ONLY — it reuses the same engine
 and services every other screen uses (``ingestion_ai.normalize_source_file``,
-``runner.execute_run``, ``export.export_run``, ``queries``, ``f5``, ``module2``).
-No matching logic is recomputed here.
+``runner.execute_run``, ``reconciliation.report_export``, ``queries``, ``f5``,
+``module2``). No matching logic is recomputed here.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from src import queries
 from src.clients import service as clients
 from src.config_loader import load_config
 from src.data_paths import source_data_path
-from src.export import export_run
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
 from src.ingestion_ai import periods as period_utils
@@ -421,7 +420,7 @@ class ReconcileState(AuthState):
     integrity_rows: list[IntegrityRow] = []
     integrity_verdict: str = ""
 
-    # stage 4 — §3 multi-format report export (HTML / PDF / Excel)
+    # stage 5 — §3 multi-format report export (HTML / PDF / Excel)
     report_fmt: str = ""
     report_b64: str = ""
     report_name: str = ""
@@ -514,10 +513,6 @@ class ReconcileState(AuthState):
         return f"{who} · {when}" if when else who
 
     # stage 5
-    export_b64: str = ""
-    export_name: str = ""
-    export_ready: bool = False
-
     flash: str = ""
     error: str = ""
 
@@ -704,7 +699,7 @@ class ReconcileState(AuthState):
         if stage == 4:
             self._load_review()
         if stage == 5:
-            self._load_export()
+            self._load_report()
 
     @rx.event
     def continue_forward(self):
@@ -713,7 +708,7 @@ class ReconcileState(AuthState):
         if self.stage == 4:
             self._load_review()
         if self.stage == 5:
-            self._load_export()
+            self._load_report()
 
     # ==================================================================
     # Stage 1 — Context
@@ -731,8 +726,6 @@ class ReconcileState(AuthState):
         self.run_id = 0
         self.auto_ran = False
         self.selections = {}
-        self.export_ready = False
-        self.export_b64 = ""
         self._load_slots()
 
     def _seed_selections_from_run(self) -> None:
@@ -1030,8 +1023,6 @@ class ReconcileState(AuthState):
 
         self.run_id = run_id
         self.auto_ran = True
-        self.export_ready = False
-        self.export_b64 = ""
         self.flash = f"Run {run_id} complete."
         self.stage = 4
         self._load_review()
@@ -1041,8 +1032,6 @@ class ReconcileState(AuthState):
         self.run_id = 0
         self.auto_ran = False
         self.pause_before_run = True
-        self.export_ready = False
-        self.export_b64 = ""
         self.stage = 3
 
     # ==================================================================
@@ -2318,24 +2307,29 @@ class ReconcileState(AuthState):
             self.error = f"The revert couldn't be saved: {exc}"
 
     # ==================================================================
-    # Stage 4 — report export (HTML / PDF / Excel) — §3
+    # Stage 5 — report export (HTML / PDF / Excel) — §3
     # ==================================================================
     @rx.event
     async def prepare_report(self, fmt: str):
-        """Render one export format from the run's single in-memory result.
+        """Render AND download one export format from the run's single result.
 
-        All three formats come from ``report_export.export_report``, which
+        All three formats come from ``report_export.export_payload``, which
         reads the same model the screen renders — so no headline number can
         drift between the screen and an export.
 
         The render happens on a worker thread: the PDF writer drives Playwright's
         SYNCHRONOUS API, which refuses to run inside the event loop Reflex
         serves events from. ``asyncio.to_thread`` gives it a loop-free thread.
+
+        The download uses ``rx.download`` (a real client-side download event),
+        NOT an ``rx.link`` with a ``data:`` href — react-router intercepts that
+        anchor's click and the native download never fires.
         """
         self.report_error = ""
         self.report_fmt = ""
         self.report_b64 = ""
         self.report_name = ""
+        self.report_mime = ""
         if not self.run_id:
             self.report_error = "No run to export."
             return
@@ -2349,45 +2343,29 @@ class ReconcileState(AuthState):
                 report_export.export_payload, self.run_id, fmt
             )
         except Exception as exc:  # noqa: BLE001
+            self.report_busy = False
             self.report_error = f"The {fmt.upper()} report couldn't be written: {exc}"
             return
-        finally:
-            self.report_busy = False
+        self.report_busy = False
         self.report_b64 = payload["b64"]
         self.report_name = payload["filename"]
         self.report_mime = payload["mime"]
         self.report_fmt = fmt
         self.flash = f"{fmt.upper()} report ready — {payload['filename']}"
-
-    # ==================================================================
-    # Stage 5 — Export
-    # ==================================================================
-    def _load_export(self) -> None:
-        self.export_ready = False
-        self.export_b64 = ""
-        self.export_name = ""
-
-    @rx.event
-    def generate_export(self):
-        self.error = ""
-        if not self.run_id:
-            self.error = "No run to export."
-            return
-        try:
-            path = export_run(self.run_id)
-            data = path.read_bytes()
-        except Exception as exc:  # noqa: BLE001
-            self.error = f"The export couldn't be written: {exc}"
-            return
-        run = queries.get_run(self.run_id) or {}
-        ts = str(run.get("run_timestamp") or "").replace("-", "").replace(":", "").split(".")[0]
-        self.export_name = (
-            f"{run.get('client', 'client')}_{run.get('period', 'period')}_"
-            f"{run.get('recon_type', 'RECON')}_run{self.run_id}_{ts}.xlsx"
+        yield rx.download(
+            data=base64.b64decode(payload["b64"]),
+            filename=payload["filename"],
+            mime_type=payload["mime"],
         )
-        self.export_b64 = base64.b64encode(data).decode()
-        self.export_ready = True
-        self.flash = "Report ready."
+
+    def _load_report(self) -> None:
+        """Clear any previous export when the Export stage is (re)entered."""
+        self.report_fmt = ""
+        self.report_b64 = ""
+        self.report_name = ""
+        self.report_mime = ""
+        self.report_busy = False
+        self.report_error = ""
 
 
 # ---------------------------------------------------------------------------

@@ -680,8 +680,6 @@ def _review_stage() -> rx.Component:
                     rc.notes_list(),
                     # 8. integrity strip
                     rc.integrity_strip(),
-                    # 9. report export (§3) — HTML / PDF / Excel
-                    rc.report_export(),
                     rx.cond(
                         ReconcileState.review_standalone,
                         rx.fragment(),
@@ -718,60 +716,40 @@ def _export_stage() -> rx.Component:
         rx.cond(
             ReconcileState.run_id == 0,
             c.empty_state("No run to export yet — go back to Reconcile.", icon="download"),
-            c.card(
-                rx.vstack(
-                    c.section_title("What goes into this report"),
-                    rx.text(
-                        f"Run: {ReconcileState.run_id} · Context: {ReconcileState.ctx_client} · "
-                        f"{ReconcileState.ctx_period} · {ReconcileState.ctx_recon_type}",
-                        style=t.TEXT["body"],
-                    ),
-                    rx.text(
-                        f"Records: {ReconcileState.review_total} total · "
-                        f"{ReconcileState.review_matched} matched · "
-                        f"{ReconcileState.review_exceptions} exception(s)",
-                        style=t.TEXT["body"],
-                    ),
-                    rx.cond(
-                        ReconcileState.caveats.length() > 0,
-                        c.warning_banner(
-                            f"This report carries {ReconcileState.caveats.length()} stated limitation(s) — "
-                            "the checks it could not perform."
+            rx.vstack(
+                c.card(
+                    rx.vstack(
+                        c.section_title("What goes into this report"),
+                        rx.text(
+                            f"Run: {ReconcileState.run_id} · Context: {ReconcileState.ctx_client} · "
+                            f"{ReconcileState.ctx_period} · {ReconcileState.ctx_recon_type}",
+                            style=t.TEXT["body"],
                         ),
-                        rx.fragment(),
-                    ),
-                    rx.button(
-                        "Download reconciliation report",
-                        on_click=ReconcileState.generate_export,
-                        background=t.Color.ACCENT.value,
-                        color="#FFFFFF",
-                    ),
-                    rx.cond(
-                        ReconcileState.export_ready,
-                        rx.vstack(
-                            c.info_banner("Report ready."),
-                            rx.link(
-                                rx.button(
-                                    "Download reconciliation report",
-                                    background=t.Color.ACCENT.value,
-                                    color="#FFFFFF",
-                                ),
-                                href=(
-                                    "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                                    ";base64," + ReconcileState.export_b64
-                                ),
-                                download=ReconcileState.export_name,
+                        rx.text(
+                            f"Records: {ReconcileState.review_total} total · "
+                            f"{ReconcileState.review_matched} matched · "
+                            f"{ReconcileState.review_exceptions} exception(s)",
+                            style=t.TEXT["body"],
+                        ),
+                        rx.cond(
+                            ReconcileState.caveats.length() > 0,
+                            c.warning_banner(
+                                f"This report carries {ReconcileState.caveats.length()} stated limitation(s) — "
+                                "the checks it could not perform."
                             ),
-                            spacing="2",
-                            align="start",
+                            rx.fragment(),
                         ),
-                        rx.text("One button, one file. Nothing else to configure.", style=t.TEXT["micro"]),
+                        spacing="3",
+                        align="start",
+                        width="100%",
                     ),
-                    spacing="3",
-                    align="start",
                     width="100%",
                 ),
+                # HTML / PDF / Excel — the same figures the Review screen shows.
+                rc.report_export(),
+                spacing="4",
                 width="100%",
+                align="start",
             ),
         ),
         spacing="4",

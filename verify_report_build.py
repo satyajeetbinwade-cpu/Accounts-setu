@@ -127,7 +127,7 @@ def main() -> int:
         formulas_are_live,
         "; ".join(f"{k}={str(v)[:34]}" for k, v in fmt_values.items()),
     )
-    sheet = wb["GST Invoices"]
+    sheet = wb["Master data"]
     invoice_count = sum(1 for r in sheet.iter_rows(min_row=2, max_col=1) if r[0].value)
     cn_sheet = wb["Credit Notes"]
     cn_count = sum(1 for r in cn_sheet.iter_rows(min_row=2, max_col=1) if r[0].value)
