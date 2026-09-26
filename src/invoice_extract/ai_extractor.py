@@ -76,7 +76,9 @@ _SYSTEM_PROMPT = (
     "2. Give a per-field confidence from 0-100 reflecting how clearly you could "
     "read that specific field. Do NOT give one document-level score.\n"
     "3. Amounts: return the number as printed, without currency symbols or "
-    "thousands separators (e.g. 9345.60). Dates: return as printed.\n"
+    "thousands separators (e.g. 9345.60). Tax RATES (CGST/SGST/IGST): return "
+    "just the percentage number (e.g. 9 for 9%, 2.5 for 2.5%) — never a "
+    "fraction and never with a '%' sign. Dates: return as printed.\n"
     "4. GSTIN must be the 15-character GSTIN of the SELLER/vendor (the party "
     "issuing the invoice), not the buyer.\n"
     "5. Respond with JSON ONLY — no prose, no markdown fences."
@@ -93,8 +95,11 @@ _FIELD_GUIDE = {
     "rate": "the unit rate of the first line item",
     "taxable_value": "the total taxable value (before tax)",
     "cgst_amount": "the CGST amount",
+    "cgst_rate": "the CGST rate as a percentage (e.g. 9 for 9%)",
     "sgst_amount": "the SGST amount",
+    "sgst_rate": "the SGST rate as a percentage (e.g. 9 for 9%)",
     "igst_amount": "the IGST amount",
+    "igst_rate": "the IGST rate as a percentage (e.g. 18 for 18%)",
     "total_tax": "the total tax (CGST+SGST+IGST)",
     "invoice_total": "the grand total / invoice total",
     "place_of_supply": "the place of supply",

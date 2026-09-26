@@ -2,8 +2,8 @@
 
 Upload invoices (four formats: image / pdf / excel / word) → AI extracts the
 canonical field set with per-field confidence → sub-threshold fields gate into
-this module's OWN review queue → confirm → generate an immutable Tally-ready
-export. Every handler calls ``src.invoice_extract.service``.
+this module's OWN review queue → confirm → generate an immutable
+purchase-register export. Every handler calls ``src.invoice_extract.service``.
 """
 
 from __future__ import annotations
@@ -87,6 +87,11 @@ class FieldRow:
     bbox_page: int = 1
     has_suggestion: bool = False
     suggestion_label: str = ""
+    # A field the document didn't carry but which is exactly computable from
+    # fields it did (tax rate ↔ amount). Shown with a "Derived" badge and
+    # never counted as needing human review.
+    is_derived: bool = False
+    derived_label: str = ""
 
 
 @dataclass
@@ -358,7 +363,14 @@ class InvoiceExtractState(SharedUploadState):
         conf = f.get("confidence")
         is_present = bool(f.get("is_present"))
         resolved = bool(f.get("resolved"))
-        flagged = (not resolved) and ((not is_present) or conf is None or conf < threshold)
+        is_derived = bool(f.get("is_derived"))
+        # A derived field is settled for export purposes, so it never counts
+        # as flagged (the service's review gate agrees — see
+        # service._satisfied_by_derivation).
+        flagged = (
+            (not resolved) and (not is_derived)
+            and ((not is_present) or conf is None or conf < threshold)
+        )
         # Math-derived suggestion: only for a flagged field whose dependencies
         # are all trustworthy. Pre-fills the input; the reviewer still clicks
         # Resolve (never auto-confirmed).
@@ -366,19 +378,24 @@ class InvoiceExtractState(SharedUploadState):
         default_input = self.field_inputs.get(f["field_name"], f.get("extracted_value") or "")
         if suggestion and not self.field_inputs.get(f["field_name"]):
             default_input = suggestion["value"]
+        if is_derived and not default_input:
+            default_input = f.get("derived_value") or ""
+        effective = f.get("effective_value")
+        if is_derived and (effective is None or str(effective).strip() == ""):
+            effective = f.get("derived_value")
         return FieldRow(
             field_name=f["field_name"],
             label=f.get("label") or f["field_name"],
             extracted_value=f.get("extracted_value") or "",
-            effective_value=str(f.get("effective_value")) if f.get("effective_value") is not None else "",
+            effective_value=str(effective) if effective is not None else "",
             source_location=f.get("source_location") or "",
             confidence=int(conf) if conf is not None else 0,
             has_confidence=conf is not None,
             is_present=is_present,
             resolved=resolved,
             flagged=flagged,
-            auto_accepted=(not resolved) and is_present and conf is not None and conf >= threshold,
-            not_present=(not is_present) or conf is None,
+            auto_accepted=(not resolved) and (not is_derived) and is_present and conf is not None and conf >= threshold,
+            not_present=((not is_present) or conf is None) and not is_derived,
             resolved_value=f.get("resolved_value") or "",
             badge_pct=f"AI — {int(conf)}%" if conf is not None else "not present",
             input_value=default_input,
@@ -391,6 +408,8 @@ class InvoiceExtractState(SharedUploadState):
             bbox_page=int(f.get("bbox_page") or 1),
             has_suggestion=bool(suggestion),
             suggestion_label=suggestion["formula_label"] if suggestion else "",
+            is_derived=is_derived,
+            derived_label=f.get("derived_label") or "",
         )
 
     def _load_preview(self, up: dict) -> None:

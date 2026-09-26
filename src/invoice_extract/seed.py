@@ -17,6 +17,7 @@ Two things are seeded here:
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Locked canonical field set (F3-B build prompt, "Canonical field set").
@@ -51,8 +52,11 @@ CANONICAL_FIELDS: list[tuple[str, str, str, str, str]] = [
     ("rate", "Rate", "Rate", "row", SECTION_LINE_ITEMS),
     ("taxable_value", "Taxable Value", "Taxable Value", "row", SECTION_TOTALS),
     ("cgst_amount", "CGST Amount", "CGST", "row", SECTION_TOTALS),
+    ("cgst_rate", "CGST Rate %", "CGST Rate", "row", SECTION_TOTALS),
     ("sgst_amount", "SGST Amount", "SGST", "row", SECTION_TOTALS),
+    ("sgst_rate", "SGST Rate %", "SGST Rate", "row", SECTION_TOTALS),
     ("igst_amount", "IGST Amount", "IGST", "row", SECTION_TOTALS),
+    ("igst_rate", "IGST Rate %", "IGST Rate", "row", SECTION_TOTALS),
     ("total_tax", "Total Tax", "Total Tax", "row", SECTION_TOTALS),
     ("invoice_total", "Invoice Total", "Voucher Total", "page/cell", SECTION_TOTALS),
 ]
@@ -65,19 +69,56 @@ FIELD_TALLY_COLUMNS: dict[str, str] = {k: col for k, _, col, _, _ in CANONICAL_F
 FIELD_SECTIONS: dict[str, str] = {k: section for k, _, _, _, section in CANONICAL_FIELDS}
 
 # ---------------------------------------------------------------------------
-# Math-derivable fields (review-screen suggestions only).
+# Math-derivable fields.
 #
-# key -> (dependency keys, human formula label). A flagged/not-present field
-# whose dependencies are ALL auto-accepted (or already resolved) gets its
-# input PRE-FILLED with the computed value, clearly labelled as a suggestion.
-# It is NEVER auto-confirmed — the reviewer still clicks Resolve, per the
-# platform's standing no-silent-posting principle. If any dependency is
-# itself flagged/missing, no suggestion is offered (the arithmetic would be
-# unreliable) and the field stays a manual entry.
+# Each spec says how a field can be COMPUTED from other fields:
+#   * ``sum``               — total = Σ(deps)
+#   * ``amount_from_rate``  — amount = taxable_value × rate ÷ 100  (dep order: taxable, rate)
+#   * ``rate_from_amount``  — rate = amount ÷ taxable_value × 100  (dep order: amount, taxable)
+#
+# Two consumers:
+#   1. The review screen PRE-FILLS a flagged field's input with the computed
+#      value (clearly labelled as a suggestion). It is NEVER auto-confirmed —
+#      the reviewer still clicks Resolve, per the platform's standing
+#      no-silent-posting principle.
+#   2. The review GATE and the EXPORT treat a field as satisfiable when it can
+#      be derived — so a document that gives only ONE half of a tax pair
+#      (rate OR amount) neither blocks the upload nor leaves a blank column.
+#      Whichever half the document actually carries is used verbatim; only the
+#      missing half is computed.
 # ---------------------------------------------------------------------------
-DERIVATIONS: dict[str, tuple[list[str], str]] = {
-    "total_tax": (["cgst_amount", "sgst_amount", "igst_amount"], "CGST + SGST + IGST"),
-    "invoice_total": (["taxable_value", "total_tax"], "Taxable Value + Total Tax"),
+@dataclass(frozen=True)
+class Derivation:
+    """A deterministic relationship between canonical fields."""
+
+    deps: tuple[str, ...]
+    formula_label: str
+    kind: str = "sum"
+
+
+DERIVATIONS: dict[str, Derivation] = {
+    "total_tax": Derivation(("cgst_amount", "sgst_amount", "igst_amount"), "CGST + SGST + IGST"),
+    "invoice_total": Derivation(("taxable_value", "total_tax"), "Taxable Value + Total Tax"),
+    # Tax-head rate ↔ amount. A purchase register needs BOTH the rate and the
+    # amount for each head, but an invoice often prints only one of them, so
+    # the other is computed from the taxable value.
+    "cgst_amount": Derivation(("taxable_value", "cgst_rate"), "Taxable Value \u00d7 CGST Rate \u00f7 100", "amount_from_rate"),
+    "sgst_amount": Derivation(("taxable_value", "sgst_rate"), "Taxable Value \u00d7 SGST Rate \u00f7 100", "amount_from_rate"),
+    "igst_amount": Derivation(("taxable_value", "igst_rate"), "Taxable Value \u00d7 IGST Rate \u00f7 100", "amount_from_rate"),
+    "cgst_rate": Derivation(("cgst_amount", "taxable_value"), "CGST Amount \u00f7 Taxable Value \u00d7 100", "rate_from_amount"),
+    "sgst_rate": Derivation(("sgst_amount", "taxable_value"), "SGST Amount \u00f7 Taxable Value \u00d7 100", "rate_from_amount"),
+    "igst_rate": Derivation(("igst_amount", "taxable_value"), "IGST Amount \u00f7 Taxable Value \u00d7 100", "rate_from_amount"),
+}
+
+# Fields whose export value is a percentage rather than a currency amount.
+RATE_FIELD_KEYS: set[str] = {"cgst_rate", "sgst_rate", "igst_rate"}
+
+# Tax-head fields that are the COUNTERPART of another field (rate ↔ amount).
+# A document usually supplies only one half of each pair; the other is
+# computed, so these fields never add to the human review burden on their own.
+PAIRED_DERIVATION_KEYS: set[str] = {
+    key for key, spec in DERIVATIONS.items()
+    if spec.kind in ("amount_from_rate", "rate_from_amount")
 }
 
 # ---------------------------------------------------------------------------
@@ -107,7 +148,39 @@ SEED_TOUCHPOINTS: list[tuple[str, str, str, str, str, str, int]] = [
 # in C3-ext, exactly like F3-AI's thresholds — never hardcoded in code).
 DEFAULT_CONFIDENCE_THRESHOLD = 90
 
-EXPORT_FORMAT_VERSION = "tally-1.0"
+# ---------------------------------------------------------------------------
+# Export layout.
+#
+# Mirrors the client's PURCHASE-FORMAT3 purchase-register workbook: ONE header
+# row, ``(column header, canonical field)`` pairs, left to right. A column
+# whose field is absent from the document is filled from its derivation when
+# one exists (see DERIVATIONS above), else left blank.
+#
+# The source template's typos are corrected ("Taxable Amount'" -> "Taxable
+# Amount", "Discription" -> "Description"); beyond that the column set/order
+# is unchanged, extended with an explicit AMOUNT column beside each tax RATE so
+# the file carries both halves of every tax head.
+# ---------------------------------------------------------------------------
+EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("SUPPLIER INV NO", "invoice_number"),
+    ("INVOICE DATE", "invoice_date"),
+    ("PARTY A/C NAME", "vendor_name"),
+    ("PLACE OF SUPPLY", "place_of_supply"),
+    ("PO Number", "reference_po"),
+    ("Taxable Amount", "taxable_value"),
+    ("SGST %", "sgst_rate"),
+    ("SGST Amount", "sgst_amount"),
+    ("CGST %", "cgst_rate"),
+    ("CGST Amount", "cgst_amount"),
+    ("IGST %", "igst_rate"),
+    ("IGST Amount", "igst_amount"),
+    ("Total Invoice AMOUNT", "invoice_total"),
+    ("Description", "item_description"),
+]
+EXPORT_HEADERS: list[str] = [header for header, _ in EXPORT_COLUMNS]
+EXPORT_SHEET_NAME = "Sheet1"
+EXPORT_FILENAME_STEM = "purchase_register_export"
+EXPORT_FORMAT_VERSION = "purchase-format3-1.0"
 
 
 def run_seed(conn: sqlite3.Connection) -> None:

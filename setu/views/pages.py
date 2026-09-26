@@ -143,7 +143,7 @@ _PLACEHOLDER_PAGES = {
     "/config": ("Config", "Matching-rule configuration.", "Phase 1 tool"),
     "/review": ("Review", "Review reconciliation results.", "Phase 1 tool"),
     "/smart-ingestion": ("Smart Ingestion", "AI-assisted document ingestion.", "Module F3-AI"),
-    "/invoice-extraction": ("Invoice Extraction", "Invoice capture and Tally export.", "Module F3-B"),
+    "/invoice-extraction": ("Invoice Extraction", "Invoice capture and purchase-register export.", "Module F3-B"),
     "/reconciliation": ("Reconciliation", "Exception queue and eligible-credit figure.", "Module 2"),
     "/action-center": ("Action Center", "Unified flagged-item queue.", "Module 8"),
     "/data-integrity": ("Data Integrity", "Validation gate and sync health.", "Module F5"),

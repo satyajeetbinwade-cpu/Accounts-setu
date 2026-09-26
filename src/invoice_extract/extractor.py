@@ -115,9 +115,18 @@ _TEXT_LABEL_RULES: list[tuple[str, str, int, str]] = [
     ("quantity", rf"(?:qty|quantity|nos)\.?\s*[:\-]?\s*{_AMOUNT}", 92, "text match"),
     ("rate", rf"\brate\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 92, "text match"),
     ("taxable_value", rf"(?:taxable\s*(?:value|amount)|sub\s*total|subtotal|net\s*amount)\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
-    ("cgst_amount", rf"cgst(?:\s*(?:amount|@\s*[\d.]+%))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
-    ("sgst_amount", rf"sgst(?:\s*(?:amount|@\s*[\d.]+%))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
-    ("igst_amount", rf"igst(?:\s*(?:amount|@\s*[\d.]+%))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
+    # Tax-head RATE ("CGST @ 9%" / "CGST 9%" / "CGST % 9"). The number may
+    # sit before or after the '%', so the rule allows either and captures the
+    # digit run only (never the '%'), keeping the value numeric/derivable.
+    ("cgst_rate", rf"cgst\s*(?:rate|@|at)?\s*[:=\-]?\s*(?:%\s*([\d]+(?:\.\d+)?)|([\d]+(?:\.\d+)?)\s*%)", 92, "text match"),
+    ("sgst_rate", rf"sgst\s*(?:rate|@|at)?\s*[:=\-]?\s*(?:%\s*([\d]+(?:\.\d+)?)|([\d]+(?:\.\d+)?)\s*%)", 92, "text match"),
+    ("igst_rate", rf"igst\s*(?:rate|@|at)?\s*[:=\-]?\s*(?:%\s*([\d]+(?:\.\d+)?)|([\d]+(?:\.\d+)?)\s*%)", 92, "text match"),
+    # Tax-head AMOUNT — skips an optional "Amount" keyword and an optional
+    # leading rate token ("@ 9%" / "9%") so "CGST @ 9% 1,161.00" captures
+    # the amount, not the rate.
+    ("cgst_amount", rf"cgst(?:\s*amount)?(?:\s*(?:@|at|rate)?\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
+    ("sgst_amount", rf"sgst(?:\s*amount)?(?:\s*(?:@|at|rate)?\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
+    ("igst_amount", rf"igst(?:\s*amount)?(?:\s*(?:@|at|rate)?\s*[\d.]+\s*%)?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
     ("total_tax", rf"total\s*tax\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 93, "text match"),
     ("invoice_total", rf"(?:invoice\s*total|grand\s*total|total\s*amount|amount\s*payable)\s*(?:\([^)]*\))?\s*[:\-]?\s*(?:rs\.?\s*)?{_AMOUNT}", 94, "text match"),
     ("place_of_supply", rf"place\s*of\s*supply\s*[:\-]\s*([A-Za-z][A-Za-z0-9 ()]{{1,40}}?){_NEXT_LABEL}", 90, "text match"),
@@ -671,7 +680,14 @@ def _extract_from_text(text: str) -> list[dict[str, Any]]:
         if not m:
             results.append(_absent(field))
             continue
-        raw = m.group(1).strip().rstrip(".,;:")
+        # A rule may offer the value in more than one capture group (e.g. the
+        # tax-rate rules accept the number before OR after the '%'). Take the
+        # first group that actually captured.
+        raw = next((g for g in m.groups() if g), None) if m.groups() else None
+        if raw is None:
+            results.append(_absent(field))
+            continue
+        raw = str(raw).strip().rstrip(".,;:")
         if not raw:
             results.append(_absent(field))
             continue
@@ -693,7 +709,10 @@ def _extract_from_text(text: str) -> list[dict[str, Any]]:
         m = re.search(pattern, flat, re.IGNORECASE)
         if not m:
             continue
-        raw = m.group(1).strip().rstrip(".,;:")
+        raw = next((g for g in m.groups() if g), None) if m.groups() else None
+        if raw is None:
+            continue
+        raw = str(raw).strip().rstrip(".,;:")
         if not raw:
             continue
         by_name[field] = {

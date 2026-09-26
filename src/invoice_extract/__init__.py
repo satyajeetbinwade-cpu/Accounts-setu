@@ -4,7 +4,8 @@ A self-contained, AI-assisted invoice digitization pipeline: upload
 invoices in any of four common formats, extract a fixed canonical field
 set through a configurable AI layer with per-field confidence scoring,
 gate anything under a 90% confidence threshold into this module's OWN
-manual review queue, and export a Tally-import-ready Excel/CSV batch.
+manual review queue, and export a purchase-register Excel/CSV batch
+(PURCHASE-FORMAT3 column layout).
 
 Per the F3-B build prompt this module is a SCOPE ADDITION beyond the
 locked 17-module catalogue, built and shipped as a fully separate,

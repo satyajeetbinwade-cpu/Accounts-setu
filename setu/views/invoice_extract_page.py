@@ -388,17 +388,21 @@ def _field_row(f) -> rx.Component:
                     f.resolved,
                     c.confidence_badge("rule", label="Resolved"),
                     rx.cond(
-                        f.not_present,
-                        c.confidence_badge("ai", label="not present"),
+                        f.is_derived,
+                        c.confidence_badge("rule", label="Derived"),
                         rx.cond(
-                            f.auto_accepted,
-                            c.confidence_badge("ai", label=f"Auto-accepted — {f.confidence}%"),
-                            c.confidence_badge("ai", pct=f.confidence),
+                            f.not_present,
+                            c.confidence_badge("ai", label="not present"),
+                            rx.cond(
+                                f.auto_accepted,
+                                c.confidence_badge("ai", label=f"Auto-accepted — {f.confidence}%"),
+                                c.confidence_badge("ai", pct=f.confidence),
+                            ),
                         ),
                     ),
                 ),
                 rx.cond(
-                    f.resolved | f.auto_accepted,
+                    f.resolved | f.auto_accepted | f.is_derived,
                     rx.button(
                         "Edit",
                         on_click=InvoiceExtractState.start_edit_field(f.field_name),
@@ -471,9 +475,17 @@ def _field_row(f) -> rx.Component:
                 padding="10px 12px",
                 width="100%",
             ),
-            rx.text(
-                f"value: {rx.cond(f.effective_value != '', f.effective_value, '—')}",
-                style=t.TEXT["micro"],
+            rx.cond(
+                f.is_derived,
+                rx.text(
+                    "derived — " + f.derived_label + " · " + f.effective_value,
+                    style=t.TEXT["micro"],
+                    color=t.Color.ACCENT.value,
+                ),
+                rx.text(
+                    f"value: {rx.cond(f.effective_value != '', f.effective_value, '—')}",
+                    style=t.TEXT["micro"],
+                ),
             ),
         ),
         spacing="2",
@@ -922,7 +934,7 @@ def _export_section() -> rx.Component:
         c.card(
             rx.vstack(
                 c.section_title(
-                    "Generate Tally-ready export",
+                    "Generate purchase-register export",
                     "Only Confirmed uploads can be exported — the hard gate is enforced at the "
                     "data-pipeline level.",
                 ),

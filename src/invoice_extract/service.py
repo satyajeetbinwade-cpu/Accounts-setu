@@ -43,7 +43,7 @@ this build):
 - F3-B -> F3 (deferred, structural only): _link_confirmed_to_f3() is a stub
   that would file each Confirmed upload as an F3 Document with an
   EvidenceLink back to this module's record.
-- F3-B -> Module 2 (deferred, structural only): the exported Tally-ready
+- F3-B -> Module 2 (deferred, structural only): the exported purchase-register
   batch is a flat-file hand-off, not a live data feed.
 - F3-B -> F4: export history and review-edit actions are logged locally
   (invoice_extract_change_log) — the same retrofit-later stub every other
@@ -62,13 +62,16 @@ from src.invoice_extract import ai_extractor
 from src.invoice_extract import db as idb
 from src.invoice_extract import extractor
 from src.invoice_extract.seed import (
-    CANONICAL_FIELD_KEYS,
     DEFAULT_CONFIDENCE_THRESHOLD,
     DERIVATIONS,
+    EXPORT_COLUMNS as EXPORT_COLUMNS_SPEC,
+    EXPORT_FILENAME_STEM,
     EXPORT_FORMAT_VERSION,
+    EXPORT_SHEET_NAME,
     FIELD_SECTIONS,
-    FIELD_TALLY_COLUMNS,
     FIELD_LABELS,
+    PAIRED_DERIVATION_KEYS,
+    RATE_FIELD_KEYS,
     run_seed,
 )
 from src.invoice_extract.schema import init_invoice_extract_schema
@@ -270,7 +273,7 @@ def upload_invoice(
 
     threshold = get_threshold(db_path=db_path)
     tagged = _apply_threshold(field_results, threshold)
-    reviewable = [f["field_name"] for f in tagged if f["reviewable"]]
+    reviewable = _reviewable_keys(tagged, threshold)
     status = STATUS_NEEDS_REVIEW if reviewable else STATUS_EXTRACTED
 
     conn = _connect(db_path)
@@ -350,7 +353,7 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
 
         threshold = get_threshold(db_path=db_path)
         tagged = _apply_threshold(field_results, threshold)
-        reviewable = [f["field_name"] for f in tagged if f["reviewable"]]
+        reviewable = _reviewable_keys(tagged, threshold)
 
         # Replace the field set (reviewer decisions are intentionally dropped
         # since the values just changed) and reset queue state.
@@ -391,8 +394,10 @@ def _apply_threshold(field_results: list[dict[str, Any]], threshold: int) -> lis
       * confidence >= threshold            -> auto_accepted (no badge shown)
       * confidence < threshold (present)   -> reviewable ("AI — N%")
       * not present (confidence is None)   -> reviewable ("not present")
-    The last two are BOTH reviewable: nothing below threshold and nothing
-    genuinely absent may silently reach an export batch."""
+    Both flag kinds are reviewable by default. The ONE relaxation is the tax
+    rate↔amount pair: a half that is EXACTLY derivable from data the document
+    does carry (see _satisfied_by_derivation) is computed at export instead of
+    going to a human — arithmetic, never a guess. Everything else still gates."""
     out: list[dict[str, Any]] = []
     for f in field_results:
         f = dict(f)
@@ -462,9 +467,27 @@ def get_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
             r["effective_value"] = idb.effective_value(r)
             r["has_bbox"] = r.get("bbox_x") is not None and r.get("bbox_w") is not None
             out.append(r)
-        return out
     finally:
         conn.close()
+
+    # Derived values: a field the document didn't carry but which is exactly
+    # computable from values it did (rate ↔ amount, or a sum). Computed here
+    # so the review screen, the confirmation gate and the export all agree on
+    # which fields are actually still missing.
+    available = _resolve_values({f["field_name"]: f for f in out}, threshold=get_threshold(db_path=db_path))
+    for f in out:
+        key = f["field_name"]
+        eff = f["effective_value"]
+        has_value = eff is not None and str(eff).strip() != ""
+        if not has_value and key in DERIVATIONS and key in available:
+            f["derived_value"] = _format_derived(key, available[key])
+            f["derived_label"] = DERIVATIONS[key].formula_label
+            f["is_derived"] = True
+        else:
+            f["derived_value"] = None
+            f["derived_label"] = ""
+            f["is_derived"] = False
+    return out
 
 
 def suggested_value(upload_id: int, field_name: str, *, db_path=None) -> Optional[dict[str, Any]]:
@@ -480,34 +503,100 @@ def suggested_value(upload_id: int, field_name: str, *, db_path=None) -> Optiona
     This is a SUGGESTION only: the caller pre-fills the reviewer's input and
     the reviewer still clicks Resolve. Nothing is ever written here.
     """
-    deps = DERIVATIONS.get(field_name)
-    if not deps:
+    spec = DERIVATIONS.get(field_name)
+    if spec is None:
         return None
-    dep_keys, formula_label = deps
     threshold = get_threshold(db_path=db_path)
     by_name = {f["field_name"]: f for f in get_fields(upload_id, db_path=db_path)}
 
-    total = 0.0
-    for key in dep_keys:
+    dep_values: dict[str, float] = {}
+    for key in spec.deps:
         dep = by_name.get(key)
-        if dep is None:
+        if dep is None or not _is_trustworthy(dep, threshold):
             return None
-        # Trustworthy = resolved by a human, OR present and auto-accepted.
-        resolved = bool(dep.get("resolved"))
-        auto_accepted = (
-            bool(dep.get("is_present"))
-            and dep.get("confidence") is not None
-            and dep["confidence"] >= threshold
-        )
-        if not (resolved or auto_accepted):
-            return None
-        raw = dep.get("resolved_value") if resolved else dep.get("extracted_value")
-        num = _to_number(raw)
+        num = _to_number(_field_source_value(dep))
         if num is None:
             return None
-        total += num
+        dep_values[key] = num
 
-    return {"value": f"{round(total, 2):.2f}", "formula_label": formula_label}
+    value = _apply_derivation(spec, dep_values)
+    if value is None:
+        return None
+    return {"value": _format_derived(field_name, value), "formula_label": spec.formula_label}
+
+
+def _is_trustworthy(field: dict[str, Any], threshold: int) -> bool:
+    """A value reliable enough to build arithmetic on: resolved by a human,
+    or present and auto-accepted at/above the threshold."""
+    if field.get("resolved"):
+        return True
+    conf = field.get("confidence")
+    return bool(field.get("is_present")) and conf is not None and conf >= threshold
+
+
+def _field_source_value(field: dict[str, Any]) -> Any:
+    """The value that counts for a field: the reviewer's resolved value when
+    present, else the extracted value (mirrors idb.effective_value)."""
+    return field.get("resolved_value") if field.get("resolved") else field.get("extracted_value")
+
+
+def _apply_derivation(spec, values: dict[str, float]) -> Optional[float]:
+    """Compute a derived value from a ``{field: number}`` map, or None when a
+    dependency is missing or the arithmetic is undefined (÷ by zero)."""
+    try:
+        deps = [values[k] for k in spec.deps]
+    except KeyError:
+        return None
+    if spec.kind == "sum":
+        return sum(deps)
+    if spec.kind == "amount_from_rate":  # (taxable_value, rate)
+        taxable, rate = deps[0], deps[1]
+        return taxable * rate / 100.0
+    if spec.kind == "rate_from_amount":  # (amount, taxable_value)
+        amount, taxable = deps[0], deps[1]
+        if taxable == 0:
+            return None
+        return amount / taxable * 100.0
+    return None
+
+
+def _resolve_values(
+    by_name: dict[str, dict[str, Any]], *, threshold: int,
+) -> dict[str, float]:
+    """Every numeric value available for this upload: each trustworthy
+    field's own value, extended to a fixed point with values that can be
+    DERIVED from other available values.
+
+    Shared by the review GATE and the EXPORT so a document that supplies only
+    one half of a tax pair (rate OR amount) neither blocks confirmation nor
+    leaves a blank column — the missing half is computed.
+    """
+    values: dict[str, float] = {}
+    for key, field in by_name.items():
+        if _is_trustworthy(field, threshold):
+            num = _to_number(_field_source_value(field))
+            if num is not None:
+                values[key] = num
+
+    changed = True
+    while changed:
+        changed = False
+        for key, spec in DERIVATIONS.items():
+            if key in values:
+                continue
+            value = _apply_derivation(spec, values)
+            if value is not None:
+                values[key] = value
+                changed = True
+    return values
+
+
+def _format_derived(field_name: str, value: float) -> str:
+    """Render a derived number for display/export: percentages without
+    trailing zeroes (``9`` not ``9.00``), amounts as 2-decimal currency."""
+    if field_name in RATE_FIELD_KEYS:
+        return f"{round(value, 2):g}"
+    return f"{round(value, 2):.2f}"
 
 
 def _to_number(raw: Any) -> Optional[float]:
@@ -527,16 +616,54 @@ def _to_number(raw: Any) -> Optional[float]:
         return None
 
 
+def _satisfied_by_derivation(field_name: str, available: dict[str, float]) -> bool:
+    """True when a flagged field does NOT need human review because the
+    export can compute it exactly from data already on the document.
+
+    Scoped to the tax rate↔amount pairs: a tax RATE half never gates on its
+    own (its amount half is authoritative), and a tax AMOUNT half is
+    satisfied when its rate counterpart is available. Sum-derived fields
+    (total tax, invoice total) still gate as before — this function is the
+    only place that relaxes the gate, and it does so only where the other
+    half of the pair genuinely exists.
+    """
+    if field_name in RATE_FIELD_KEYS:
+        return True
+    return field_name in PAIRED_DERIVATION_KEYS and field_name in available
+
+
+def _reviewable_keys(tagged: list[dict[str, Any]], threshold: int) -> list[str]:
+    """The canonical fields that must be reviewed for a fresh extraction —
+    everything flagged EXCEPT the tax halves that are exactly derivable.
+    Used to set the upload's status at extraction time so the review queue
+    matches the live confirmation gate (get_reviewable_fields)."""
+    available = _resolve_values({f["field_name"]: f for f in tagged}, threshold=threshold)
+    return [
+        f["field_name"] for f in tagged
+        if f["reviewable"] and not _satisfied_by_derivation(f["field_name"], available)
+    ]
+
+
 def get_reviewable_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
     """Fields still gating this upload: unreviewed AND (sub-threshold or
-    not present). Once a reviewer resolves a field it drops off this list."""
+    not present). Once a reviewer resolves a field it drops off this list.
+
+    A flagged tax half that can be DERIVED from trustworthy data does NOT
+    gate the upload — the export computes it (see seed.DERIVATIONS). This is
+    what lets an invoice that prints only the tax AMOUNT (the common case)
+    clear review without the reviewer hand-entering every rate, and vice-versa.
+    """
     threshold = get_threshold(db_path=db_path)
+    fields = get_fields(upload_id, db_path=db_path)
+    available = _resolve_values({f["field_name"]: f for f in fields}, threshold=threshold)
     out = []
-    for r in get_fields(upload_id, db_path=db_path):
+    for r in fields:
         if r["resolved"]:
             continue
         conf = r["confidence"]
         if (not r["is_present"]) or conf is None or conf < threshold:
+            if _satisfied_by_derivation(r["field_name"], available):
+                continue
             out.append(r)
     return out
 
@@ -668,18 +795,48 @@ def is_exportable(upload_id: int, *, db_path=None) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
-# Export — Tally-ready Excel/CSV, immutable batch
+# Export — purchase-register Excel/CSV (PURCHASE-FORMAT3 layout), immutable batch
 # ---------------------------------------------------------------------------
 
 
-# Canonical Tally column order (label used as the export column header).
-EXPORT_COLUMNS: list[str] = [FIELD_LABELS[k] for k in CANONICAL_FIELD_KEYS]
+# The export column headers, left to right (see seed.EXPORT_COLUMNS).
+EXPORT_COLUMNS: list[str] = [header for header, _ in EXPORT_COLUMNS_SPEC]
+
+
+def _export_row_values(conn: sqlite3.Connection, upload_id: int, *, threshold: int) -> dict[str, Any]:
+    """One export row: each export column's canonical field resolved to its
+    final cell value.
+
+    Precedence is (1) the value read off the document (resolved or
+    extracted), then (2) a DERIVED value when the document gave only the
+    counterpart of a tax pair, then blank. Whichever half the document
+    actually carries is used verbatim; only the missing half is computed.
+    """
+    fields = idb.list_fields(conn, upload_id)
+    by_name = {f["field_name"]: f for f in fields}
+    available = _resolve_values(by_name, threshold=threshold)
+
+    row: dict[str, Any] = {}
+    for _header, key in EXPORT_COLUMNS_SPEC:
+        field = by_name.get(key)
+        value = idb.effective_value(field) if field is not None else None
+        if value is None or str(value).strip() == "":
+            if key in DERIVATIONS and key in available:
+                value = _format_derived(key, available[key])
+            else:
+                value = None
+        elif key in RATE_FIELD_KEYS:
+            # The column header already carries "%" — store the bare number
+            # so a spreadsheet/import treats it as numeric.
+            value = str(value).strip().rstrip("%").strip()
+        row[key] = value
+    return row
 
 
 def generate_export(
     *, upload_ids: list[int], actor: str, fmt: str = "xlsx", db_path=None,
 ) -> dict[str, Any]:
-    """Generate a Tally-import-ready batch from one or more Confirmed uploads.
+    """Generate a purchase-register batch from one or more Confirmed uploads.
 
     Enforces the HARD GATE on every upload (raises rather than silently
     skipping). Records the batch immutably — re-exporting produces a NEW
@@ -697,20 +854,17 @@ def generate_export(
         # Data-pipeline-level enforcement, independent of any UI state.
         raise InvoiceExtractError("Export blocked — " + "; ".join(blocked))
 
-    rows: list[dict[str, Any]] = []
+    threshold = get_threshold(db_path=db_path)
     conn = _connect(db_path)
     try:
-        for uid in upload_ids:
-            fields = idb.list_fields(conn, uid)
-            by_name = {f["field_name"]: idb.effective_value(f) for f in fields}
-            rows.append({FIELD_LABELS[k]: by_name.get(k) for k in CANONICAL_FIELD_KEYS})
+        rows = [_export_row_values(conn, uid, threshold=threshold) for uid in upload_ids]
     finally:
         conn.close()
 
     data = _build_export_bytes(rows, fmt=fmt)
     row_count = len(rows)
     row_range = f"1-{row_count}"
-    filename = f"tally_invoice_export_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{fmt}"
+    filename = f"{EXPORT_FILENAME_STEM}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.{fmt}"
 
     conn = _connect(db_path)
     try:
@@ -732,17 +886,20 @@ def generate_export(
 
 
 def _build_export_bytes(rows: list[dict[str, Any]], *, fmt: str) -> bytes:
-    """Build the export file in memory. Uses pandas + openpyxl (already
-    project dependencies) — no new package introduced."""
+    """Build the export file in memory using the PURCHASE-FORMAT3 column
+    layout. Uses pandas + openpyxl (already project dependencies) — no new
+    package introduced."""
     import pandas as pd
 
-    df = pd.DataFrame(rows, columns=EXPORT_COLUMNS)
+    headers = [header for header, _ in EXPORT_COLUMNS_SPEC]
+    matrix = [[row.get(key) for _header, key in EXPORT_COLUMNS_SPEC] for row in rows]
+    df = pd.DataFrame(matrix, columns=headers)
     buf = BytesIO()
     if fmt == "csv":
         df.to_csv(buf, index=False)
     else:
         with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Tally Import")
+            df.to_excel(writer, index=False, sheet_name=EXPORT_SHEET_NAME)
     return buf.getvalue()
 
 
@@ -769,13 +926,10 @@ def regenerate_export_bytes(batch_id: int, *, db_path=None) -> bytes:
     batch = get_export_batch(batch_id, db_path=db_path)
     if batch is None:
         raise InvoiceExtractError("Export batch not found.")
-    rows: list[dict[str, Any]] = []
+    threshold = get_threshold(db_path=db_path)
     conn = _connect(db_path)
     try:
-        for uid in batch["upload_ids"]:
-            fields = idb.list_fields(conn, uid)
-            by_name = {f["field_name"]: idb.effective_value(f) for f in fields}
-            rows.append({FIELD_LABELS[k]: by_name.get(k) for k in CANONICAL_FIELD_KEYS})
+        rows = [_export_row_values(conn, uid, threshold=threshold) for uid in batch["upload_ids"]]
     finally:
         conn.close()
     fmt = "csv" if batch["filename"].endswith(".csv") else "xlsx"
