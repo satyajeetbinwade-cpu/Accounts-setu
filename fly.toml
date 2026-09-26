@@ -1,0 +1,38 @@
+
+# Replace "setu-poc" with your actual app name everywhere in this file --
+# it must match what you passed to `fly apps create`.
+app = "setu-poc"
+primary_region = "sin"   # adjust if you picked a different region
+ 
+[build]
+ 
+[env]
+  REFLEX_API_URL = "https://setu-poc.fly.dev"
+ 
+# Fly only supports one volume per machine. db/ and data/ both live as
+# subdirectories of this single volume, symlinked into place by the
+# Dockerfile's CMD at every boot.
+[[mounts]]
+  source      = "setu_persist"
+  destination = "/app/persist"
+ 
+[http_service]
+  internal_port        = 8080   # Caddy's listening port, from the Caddyfile
+  force_https          = true
+  auto_stop_machines    = "off" # SQLite + a slow cold start don't suit scale-to-zero
+  auto_start_machines   = true
+  min_machines_running  = 1
+ 
+  [[http_service.checks]]
+    grace_period = "5m"   # first boot compiles the frontend and seeds the DB
+    interval     = "15s"
+    method       = "GET"
+    path         = "/ping"
+    timeout      = "10s"
+ 
+[[vm]]
+  size   = "shared-cpu-2x"
+  memory = "2gb"   # dev-mode Reflex (file watcher + Vite + backend) needs
+                   # meaningfully more than production mode would have;
+                   # 1gb/shared-cpu-1x was starving badly enough that even a
+                   # localhost DNS lookup was timing out

@@ -61,11 +61,21 @@ gst:
   # GST keys (GSTIN + invoice number) are strong — baselines sit above TDS.
   confidence_baselines:
     exact: 98             # Pass 1 — GSTIN + normalised invoice number
-    invoice_variant: 90   # Pass 2 — GSTIN + trailing numeric segment + amount
+    invoice_variant: 90   # Pass 1 variant / Pass 2 — same key only after a
+                          #   derivation (FY suffix, leading zero, prefix)
     amount_date: 80       # Pass 3 — GSTIN + amount + date window
     fuzzy_party: 65       # Pass 4 — name fuzzy + amount + date
     cross_period: 75      # Pass 5 — re-runs 1-3 against adjacent period
     ambiguity_penalty: -8 # Applied when runner-up is close
+    invalid_gstin_penalty: -5  # Distinct deduction when a GSTIN is STRUCTURALLY
+                               #   invalid (wrong length — it cannot identify the
+                               #   supplier at all). Applied ON TOP of the pass
+                               #   baseline so it never coincides with the
+                               #   ordinary fuzzy-name-match confidence. A mere
+                               #   15-char character TYPO is not this case.
+    # NOTE: confidence is pass-based and INDEPENDENT of value agreement — how
+    # far the amounts differ drives the Amount Difference classification and
+    # review priority, never the certainty of which record matched.
 
   # --- Document type mappings ---
   # Maps raw document-type values (from GSTR-2B / IMS exports) to normalised

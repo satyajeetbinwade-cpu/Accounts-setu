@@ -1,0 +1,15 @@
+:8080 {
+	encode gzip
+
+	# Reflex's backend endpoints (event websocket, upload, health checks) are
+	# mounted at these fixed paths by default. Everything else is the
+	# pre-compiled static frontend.
+	@backend path /_event* /ping /_upload* /_health /_all_routes*
+	handle @backend {
+		reverse_proxy localhost:8000
+	}
+
+	handle {
+		reverse_proxy localhost:3000
+	}
+}

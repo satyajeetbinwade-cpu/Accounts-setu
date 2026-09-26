@@ -55,6 +55,14 @@ DIFFERENCE_TYPES = (
 # Credit-note-like document types whose values should be ITC-negative.
 _CREDIT_NOTE_TYPES = {"Credit Note"}
 
+# Credit/debit notes are a SEPARATE document class: the portal carries them on
+# its B2B-CDNR sheet (reported by the report's own Credit Notes card, never
+# reconciled as invoices). Books rows carrying one of these markers must be
+# kept OUT of the invoice-matching pool, or every one of them becomes a false
+# "Not in Portal" exception that contradicts that label.
+_NOTE_TYPES = {"Credit Note", "Debit Note"}
+_NOTE_MARKER_RE = re.compile(r"^(CN|DN)\s*[-/]", re.IGNORECASE)
+
 # Document types routed to separate matching pools.
 _REVERSE_CHARGE_TYPES = {"Reverse Charge"}
 _IMPORT_TYPES = {"Import"}
@@ -81,6 +89,20 @@ def _validate_gstin_structure(gstin: str) -> tuple[bool, str]:
     if not _GSTIN_RE.match(g):
         return False, f"GSTIN '{g}' does not match structural pattern"
     return True, ""
+
+
+def _gstin_structurally_invalid(gstin: str) -> bool:
+    """True only when the GSTIN is GROSSLY malformed (wrong length).
+
+    A 15-character GSTIN that merely fails the character pattern (e.g. a '0'
+    typed for an 'O') is a single-character TYPO, not a structural defect: the
+    supplier identity is still corroborated by other evidence (a fuzzy party
+    name, or an exact match on both sides). Only a structurally malformed
+    GSTIN — which cannot identify the supplier at all — attracts the distinct
+    deduction, so an invalid-GSTIN match no longer lands on the same score as
+    an ordinary fuzzy-name match by coincidence.
+    """
+    return len(str(gstin or "").strip().upper()) != 15
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +132,23 @@ def _trailing_numeric_key(raw: str, config: dict | None = None) -> str | None:
     from src.matching.invoice_keys import variant_invoice_key
 
     return variant_invoice_key(raw, _fy_patterns(config or {}))
+
+
+def _fy_only_key(raw: str, config: dict | None = None) -> str:
+    """The raw invoice number with the CONFIGURED financial-year tokens removed
+    and separators dropped — leading zeros KEPT.
+
+    When a books/portal pair agrees on this, the ONLY difference was the FY
+    token: a deterministic rule the engine already applies, so the match IS an
+    exact one ("T11439" vs "T11439/26-27"). When it still disagrees, a further
+    derivation was needed to make the keys meet — leading-zero stripping, a
+    supplier prefix, or reusing the numeric core — so it is a VARIANT and
+    carries the lower baseline ("VE-234" vs "VE/26-27/0234").
+    """
+    from src.matching.invoice_keys import strip_fy_tokens
+
+    s = strip_fy_tokens(raw, _fy_patterns(config or {})).upper()
+    return re.sub(r"[\s/\\\-_.]+", "", s)
 
 
 # ---------------------------------------------------------------------------
@@ -202,16 +241,32 @@ def _proximity(actual_diff: float, tolerance: float) -> float:
 # Confidence scoring
 # ---------------------------------------------------------------------------
 
-def _score(baseline: float, config: dict, *, proximity_factor: float = 1.0,
-           cross_period: bool = False, fuzzy: bool = False,
+def _score(baseline: float, config: dict, *, cross_period: bool = False,
            invalid_gstin: bool = False) -> float:
-    baselines = config["confidence_baselines"]
-    s = baseline * proximity_factor
+    """Identity confidence for a match: the PASS baseline plus the fixed,
+    pass-independent penalties.
+
+    Deliberately INDEPENDENT of how closely the two records' values agree.
+    A large value gap drives the "Amount Difference" classification and the
+    review priority — never the certainty of WHICH record matched. (Before
+    this, the baseline was scaled by value proximity, so an exact
+    GSTIN+invoice-number match with a large value gap collapsed to Low/0 and
+    read identically to a record with no counterpart at all.)
+    """
+    s = float(baseline)
     if cross_period:
         s += float(config.get("cross_period_penalty", -12))
     if invalid_gstin:
-        s -= 5.0  # small penalty; still matched, but flagged
+        s += float(config["confidence_baselines"].get("invalid_gstin_penalty", -5))
     return max(0.0, min(100.0, round(s, 2)))
+
+
+def _rank(baseline: float, prox: float, config: dict, **penalties) -> float:
+    """Ordering score used ONLY to choose among candidates of the SAME pass —
+    closeness of amount breaks ties ("pick the nearest counterpart"). It is
+    never reported as confidence, so value agreement can rank without
+    contaminating the identity score."""
+    return round(_score(baseline, config, **penalties) * max(0.0, prox), 4)
 
 
 def _band(score: float, config: dict) -> str:
@@ -505,22 +560,49 @@ def preprocess_portal(
     return b2b_pool, rc_pool, import_pool, summary
 
 
+def _books_note_type(invoice_number: Any, invoice_value: Any, taxable_value: Any) -> str | None:
+    """The credit/debit-note marker on a BOOKS row, or None for an invoice.
+
+    Two signals, either of which is enough:
+      * a CN-/DN- invoice-number prefix (a note booked with a POSITIVE value),
+      * a negative invoice value or taxable value (the sign convention).
+    """
+    s = str(invoice_number or "").strip()
+    if _NOTE_MARKER_RE.match(s):
+        return "Debit Note" if s.upper().startswith("DN") else "Credit Note"
+    for v in (invoice_value, taxable_value):
+        try:
+            if float(v or 0) < 0:
+                return "Credit Note"
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def preprocess_books(books_df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
-    """Pre-process books records: add internal keys, normalise signs for
-    credit notes (negative invoice_value treated as credit note)."""
+    """Pre-process books records: add internal keys, and tag + sign-normalise
+    credit/debit notes so they can be isolated from the invoice pool."""
     df = books_df.copy()
     df["_bid"] = range(len(df))
     df["_norm_inv"] = df["invoice_number"].apply(lambda v: _normalize_invoice_number(v, config))
     df["_trail_num"] = df["invoice_number"].apply(lambda v: _trailing_numeric_key(v, config))
     df["_fy"] = df["invoice_date"].apply(_financial_year)
 
-    # Derive document type from sign
+    # Derive document type: CN-/DN- prefix OR a negative value/amount.
     df["_doc_type"] = "Invoice"
     value_cols = ["taxable_value", "cgst", "sgst", "igst", "cess", "total_tax", "invoice_value"]
     for idx, row in df.iterrows():
-        inv_val = float(row.get("invoice_value", 0) or 0)
-        if inv_val < 0:
-            df.at[idx, "_doc_type"] = "Credit Note"
+        note_type = _books_note_type(
+            row.get("invoice_number"), row.get("invoice_value"), row.get("taxable_value")
+        )
+        if not note_type:
+            continue
+        df.at[idx, "_doc_type"] = note_type
+        # ITC-negative, the same convention preprocess_portal applies.
+        for col in value_cols:
+            v = float(row.get(col, 0) or 0)
+            if v > 0:
+                df.at[idx, col] = -v
 
     df["_amendment_note"] = ""
     return df
@@ -530,41 +612,24 @@ def preprocess_books(books_df: pd.DataFrame, config: dict | None = None) -> pd.D
 # DUPLICATE DETECTION (Section 5)
 # ===================================================================
 
-def _detect_books_duplicates(books: pd.DataFrame, config: dict) -> list[dict[str, Any]]:
-    """Find duplicate invoices in books (same GSTIN + normalised invoice number).
-    Returns findings with classification='Amount Difference',
-    difference_type='Duplicate in Books', portal_record=None."""
-    results: list[dict[str, Any]] = []
-    _EXCLUDE = ["_bid", "_norm_inv", "_trail_num", "_fy", "_doc_type", "_amendment_note"]
+def _books_duplicate_keys(books: pd.DataFrame) -> dict[tuple[str, str], int]:
+    """(GSTIN, normalised invoice number) -> how many times books carry it.
 
-    grouped = books.groupby(["gstin", "_norm_inv"], dropna=False)
-    for (gstin, norm_inv), group in grouped:
-        if len(group) <= 1:
-            continue
-        gstin_str = str(gstin).strip().upper()
-        orig_invs = group["invoice_number"].unique()
-        inv_display = ", ".join(str(x) for x in orig_invs)
-        total_claimed = group["total_tax"].astype(float).sum()
-        bids = list(group["_bid"])
-        baselines = config["confidence_baselines"]
-        score = _score(float(baselines["exact"]), config)
-
-        for _, row in group.iterrows():
-            reason = (
-                f"Duplicate in Books: GSTIN {gstin_str}, invoice '{inv_display}' "
-                f"appears {len(group)} times in books claiming total ITC of {_fmt(total_claimed)}. "
-                f"Duplicate ITC claims are a material error."
-            )
-            results.append(_make_result(
-                "Amount Difference", score, config,
-                books_record=_row_json(row, exclude=_EXCLUDE),
-                portal_record=None,
-                match_reason=reason,
-                difference_type="Duplicate in Books",
-                matched_record_ids=bids,
-            ))
-
-    return results
+    The number of times a key is duplicated is REPORTED to the matching passes
+    so the SURPLUS copies can be labelled, but it is deliberately NOT emitted
+    as its own set of result rows. The five matching passes already produce
+    exactly one match plus N-1 residuals for a duplicated key (a portal record
+    is matched at most once), so emitting the duplicate population separately
+    re-emitted the same books rows — the S2-09 "4 rows instead of 2" defect.
+    """
+    if books.empty:
+        return {}
+    counts = books.groupby(["gstin", "_norm_inv"], dropna=False).size()
+    return {
+        (str(g).strip().upper(), str(k)): int(n)
+        for (g, k), n in counts.items()
+        if int(n) > 1
+    }
 
 
 # ===================================================================
@@ -693,37 +758,41 @@ def _core_counts(df: pd.DataFrame) -> dict[tuple[str, str], int]:
 
 
 def _resolve_ambiguity(
-    candidates: list[tuple[float, pd.Series, str]],
+    candidates: list[tuple[float, float, pd.Series, str]],
     config: dict,
 ) -> tuple[pd.Series, float, str, bool]:
-    """Given scored candidates [(score, portal_row, reason_fragment), ...],
-    select best, apply ambiguity penalty, return (chosen, final_score,
-    ambiguity_note, forced_low).
+    """Given candidates [(rank, identity_score, portal_row, reason_fragment), ...],
+    select the best, apply the ambiguity penalty, and return (chosen,
+    final_identity_score, ambiguity_note, forced_low).
 
-    The note always reports the CHOSEN candidate's own score against the
+    ``rank`` selects the counterpart (closest amount wins) and drives the
+    ambiguity margin; ``identity_score`` is the pass-based confidence that is
+    actually reported. Keeping them separate is what stops value agreement
+    from contaminating the identity confidence.
+
+    The note always reports the CHOSEN candidate's OWN rank against the
     runner-up's — never the penalised score, which would read as the chosen
-    candidate having scored BELOW the runner-up (D4b). The penalty is applied
-    to the returned score so the stored confidence reflects the ambiguity.
+    candidate having scored BELOW the runner-up (D4b).
     """
     candidates.sort(key=lambda x: -x[0])
-    chosen_score, best_row, best_frag = candidates[0]
-    final_score = chosen_score
+    chosen_rank, chosen_identity, best_row, best_frag = candidates[0]
+    final_score = chosen_identity
     forced_low = False
     note = ""
 
     if len(candidates) > 1:
-        runner_score = candidates[1][0]
+        runner_rank = candidates[1][0]
         margin = float(config.get("ambiguity_margin", 5.0))
         penalty = float(config["confidence_baselines"].get("ambiguity_penalty", -8))
 
         # Scale penalty by closeness of runner-up
-        gap = chosen_score - runner_score
+        gap = chosen_rank - runner_rank
         if gap < margin:
             forced_low = True
-            final_score = chosen_score + penalty
+            final_score = chosen_identity + penalty
             note = (
                 f" Ambiguous: {len(candidates)} portal candidates from this GSTIN; "
-                f"chosen on highest score ({chosen_score:.0f} vs runner-up {runner_score:.0f}); "
+                f"chosen on highest score ({chosen_rank:.0f} vs runner-up {runner_rank:.0f}); "
                 f"confidence forced to Low."
             )
         else:
@@ -743,6 +812,7 @@ def _match_pool(
     *,
     adjacent_portal: pd.DataFrame | None = None,
     pool_label: str = "B2B",
+    duplicate_keys: dict[tuple[str, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Run all 5 matching passes on a single pool pair.
     Returns result dicts for every books and portal record."""
@@ -770,19 +840,13 @@ def _match_pool(
         inv_b = str(br.get("invoice_number", ""))
         inv_p = str(pr.get("invoice_number", ""))
 
-        iv_b = float(br.get("invoice_value", 0) or 0)
-        iv_p = float(pr.get("invoice_value", 0) or 0)
-        diff = abs(iv_b - iv_p)
-        prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-
         if score_override is not None:
             # The ambiguity resolver already applied its penalty to this
             # score — recomputing from the baseline would silently discard it.
             score = max(0.0, min(100.0, round(float(score_override), 2)))
         else:
-            score = _score(baseline, config, proximity_factor=prox,
-                           cross_period=cross_period,
-                           invalid_gstin=not gstin_valid)
+            score = _score(baseline, config, cross_period=cross_period,
+                           invalid_gstin=_gstin_structurally_invalid(gstin))
 
         if cross_period and diff_type is None:
             diff_type = "Timing Difference"
@@ -831,6 +895,7 @@ def _match_pool(
     # ambiguous. This is what makes a prefix-only difference an exact match
     # rather than a lower-confidence amount+date guess (D3/D4).
     baseline_exact = float(baselines["exact"])
+    baseline_var = float(baselines["invoice_variant"])
     books_core_counts = _core_counts(books)
     portal_core_counts = _core_counts(portal)
     for _, br in _unmatched_books().iterrows():
@@ -840,6 +905,7 @@ def _match_pool(
         gstin_b = str(br.get("gstin", "")).strip().upper()
         norm_b = br["_norm_inv"]
         core_b = br.get("_trail_num")
+        br_struct_invalid = _gstin_structurally_invalid(gstin_b)
 
         candidates = []
         for _, pr in _unmatched_portal().iterrows():
@@ -862,20 +928,35 @@ def _match_pool(
                 continue
             iv_b = float(br.get("invoice_value", 0) or 0)
             iv_p = float(pr.get("invoice_value", 0) or 0)
-            diff = abs(iv_b - iv_p)
-            prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-            sc = _score(baseline_exact, config, proximity_factor=prox)
+            prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
+            # `exact_key` means the normalised keys coincide. When they only
+            # coincide because LEADING ZEROS were stripped (the numbers still
+            # differ once the configured FY token is removed), the pair relies
+            # on a coercion that is genuinely ambiguous — "0234" and "234" are
+            # distinct invoice numbers in some numbering systems — so it takes
+            # the lower variant baseline and can never read the same as an
+            # invoice whose numbers agree under the configured rules
+            # (VE-234 vs RTM/145). A numeric-core match after the configured
+            # FY/prefix rules stays an exact match (the D3/D4 path).
+            variant = exact_key and (
+                _fy_only_key(br.get("invoice_number"), config)
+                != _fy_only_key(pr.get("invoice_number"), config)
+            )
+            id_baseline = baseline_var if variant else baseline_exact
+            identity = _score(id_baseline, config, invalid_gstin=br_struct_invalid)
+            rank = _rank(id_baseline, prox, config, invalid_gstin=br_struct_invalid)
             frag = ""
-            if core_key:
+            if variant:
                 frag = (
                     f" after invoice number variance ('{br.get('invoice_number', '')}' in books, "
-                    f"'{pr.get('invoice_number', '')}' on portal — same numeric core {core_b})"
+                    f"'{pr.get('invoice_number', '')}' on portal"
+                    + (f" — same numeric core {core_b})" if core_key else ")")
                 )
-            candidates.append((sc, pr, frag))
+            candidates.append((rank, identity, pr, frag))
 
         if candidates:
             chosen, final_score, amb_note, forced = _resolve_ambiguity(candidates, config)
-            chosen_frag = next(f for s, p, f in candidates if p["_pid"] == chosen["_pid"])
+            chosen_frag = next(f for _r, _i, p, f in candidates if p["_pid"] == chosen["_pid"])
             r = _make_pair_result(
                 br, chosen, "Matched on", baseline_exact,
                 extra_reason=chosen_frag + amb_note, forced_low=forced,
@@ -896,6 +977,7 @@ def _match_pool(
         if not trail_b:
             continue
         iv_b = float(br.get("invoice_value", 0) or 0)
+        br_struct_invalid = _gstin_structurally_invalid(gstin_b)
 
         candidates = []
         for _, pr in _unmatched_portal().iterrows():
@@ -911,20 +993,20 @@ def _match_pool(
             iv_p = float(pr.get("invoice_value", 0) or 0)
             if not _within_tolerance(iv_b, iv_p, config):
                 continue
-            diff = abs(iv_b - iv_p)
-            prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-            sc = _score(baseline_var, config, proximity_factor=prox)
+            prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
             inv_b_str = str(br.get("invoice_number", ""))
             inv_p_str = str(pr.get("invoice_number", ""))
             frag = (
                 f" after invoice number variance ('{inv_b_str}' in books, "
                 f"'{inv_p_str}' on portal)"
             )
-            candidates.append((sc, pr, frag))
+            identity = _score(baseline_var, config, invalid_gstin=br_struct_invalid)
+            rank = _rank(baseline_var, prox, config, invalid_gstin=br_struct_invalid)
+            candidates.append((rank, identity, pr, frag))
 
         if candidates:
             chosen, final_score, amb_note, forced = _resolve_ambiguity(candidates, config)
-            chosen_frag = next(f for s, p, f in candidates if p["_pid"] == chosen["_pid"])
+            chosen_frag = next(f for _r, _i, p, f in candidates if p["_pid"] == chosen["_pid"])
             r = _make_pair_result(
                 br, chosen, "Matched on GSTIN and amount", baseline_var,
                 extra_reason=chosen_frag + amb_note, forced_low=forced,
@@ -941,6 +1023,7 @@ def _match_pool(
         if bid in matched_bids:
             continue
         gstin_b = str(br.get("gstin", "")).strip().upper()
+        br_struct_invalid = _gstin_structurally_invalid(gstin_b)
         iv_b = float(br.get("invoice_value", 0) or 0)
         date_b = br.get("invoice_date")
 
@@ -957,18 +1040,18 @@ def _match_pool(
                 continue
             if not _date_within_window(date_b, pr.get("invoice_date"), config):
                 continue
-            diff = abs(iv_b - iv_p)
-            prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-            sc = _score(baseline_ad, config, proximity_factor=prox)
+            prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
             dd = _date_diff_days(date_b, pr.get("invoice_date"))
             frag = ""
             if dd and dd > 0:
                 frag = f"; date differs by {dd} day(s), within the {config['date_tolerance_days']}-day window"
-            candidates.append((sc, pr, frag))
+            identity = _score(baseline_ad, config, invalid_gstin=br_struct_invalid)
+            rank = _rank(baseline_ad, prox, config, invalid_gstin=br_struct_invalid)
+            candidates.append((rank, identity, pr, frag))
 
         if candidates:
             chosen, final_score, amb_note, forced = _resolve_ambiguity(candidates, config)
-            chosen_frag = next(f for s, p, f in candidates if p["_pid"] == chosen["_pid"])
+            chosen_frag = next(f for _r, _i, p, f in candidates if p["_pid"] == chosen["_pid"])
             r = _make_pair_result(
                 br, chosen, "Matched on GSTIN and amount+date", baseline_ad,
                 extra_reason=chosen_frag + amb_note, forced_low=forced,
@@ -985,6 +1068,8 @@ def _match_pool(
         bid = br["_bid"]
         if bid in matched_bids:
             continue
+        gstin_b = str(br.get("gstin", "")).strip().upper()
+        br_struct_invalid = _gstin_structurally_invalid(gstin_b)
         name_b = str(br.get("party_name", "")).strip()
         iv_b = float(br.get("invoice_value", 0) or 0)
         date_b = br.get("invoice_date")
@@ -1005,18 +1090,22 @@ def _match_pool(
             fz_score = fuzz.token_sort_ratio(name_b.lower(), name_p.lower())
             if fz_score < threshold:
                 continue
-            diff = abs(iv_b - iv_p)
-            prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-            sc = _score(baseline_fz, config, proximity_factor=prox, fuzzy=True)
+            prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
             frag = (
                 f" via fuzzy party name match ({fz_score:.0f}%: "
                 f"'{name_b}' ↔ '{name_p}')"
             )
-            candidates.append((sc, pr, frag))
+            # The structural-GSTIN deduction belongs to EVERY pass, not just
+            # the exact ones: a match whose GSTIN is grossly malformed is a
+            # weaker identity match than an ordinary fuzzy-name match, and must
+            # not land on the same number by coincidence.
+            identity = _score(baseline_fz, config, invalid_gstin=br_struct_invalid)
+            rank = _rank(baseline_fz, prox, config, invalid_gstin=br_struct_invalid)
+            candidates.append((rank, identity, pr, frag))
 
         if candidates:
             chosen, final_score, amb_note, forced = _resolve_ambiguity(candidates, config)
-            chosen_frag = next(f for s, p, f in candidates if p["_pid"] == chosen["_pid"])
+            chosen_frag = next(f for _r, _i, p, f in candidates if p["_pid"] == chosen["_pid"])
             r = _make_pair_result(
                 br, chosen, "Matched on party name and amount", baseline_fz,
                 extra_reason=chosen_frag + amb_note, forced_low=forced,
@@ -1039,6 +1128,7 @@ def _match_pool(
             if bid in matched_bids:
                 continue
             gstin_b = str(br.get("gstin", "")).strip().upper()
+            br_struct_invalid = _gstin_structurally_invalid(gstin_b)
             norm_b = br["_norm_inv"]
             trail_b = br.get("_trail_num")
             iv_b = float(br.get("invoice_value", 0) or 0)
@@ -1057,42 +1147,42 @@ def _match_pool(
 
                 # Try exact match
                 if pr["_norm_inv"] == norm_b:
-                    diff = abs(iv_b - iv_p)
-                    prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-                    sc = _score(baseline_xp, config, proximity_factor=prox, cross_period=True)
+                    prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
                     frag = (
                         f" Timing Difference: not present in the {books_period} 2B, "
                         f"matched to the {adj_period} 2B on GSTIN and invoice number. "
                         f"Supplier filed late."
                     )
-                    candidates.append((sc, pr, frag))
+                    identity = _score(baseline_xp, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    rank = _rank(baseline_xp, prox, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    candidates.append((rank, identity, pr, frag))
                     continue
 
                 # Try trailing numeric + amount
                 if trail_b and pr.get("_trail_num") == trail_b and _within_tolerance(iv_b, iv_p, config):
-                    diff = abs(iv_b - iv_p)
-                    prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-                    sc = _score(baseline_xp, config, proximity_factor=prox, cross_period=True)
+                    prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
                     frag = (
                         f" Timing Difference: matched to {adj_period} 2B on GSTIN "
                         f"and trailing invoice number + amount."
                     )
-                    candidates.append((sc, pr, frag))
+                    identity = _score(baseline_xp, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    rank = _rank(baseline_xp, prox, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    candidates.append((rank, identity, pr, frag))
                     continue
 
                 # Try amount + date
                 if _within_tolerance(iv_b, iv_p, config):
-                    diff = abs(iv_b - iv_p)
-                    prox = _proximity(diff, float(config["amount_tolerance"]["absolute"]))
-                    sc = _score(baseline_xp, config, proximity_factor=prox, cross_period=True)
+                    prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
                     frag = (
                         f" Timing Difference: matched to {adj_period} 2B on GSTIN + amount."
                     )
-                    candidates.append((sc, pr, frag))
+                    identity = _score(baseline_xp, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    rank = _rank(baseline_xp, prox, config, cross_period=True, invalid_gstin=br_struct_invalid)
+                    candidates.append((rank, identity, pr, frag))
 
             if candidates:
                 chosen, final_score, amb_note, forced = _resolve_ambiguity(candidates, config)
-                chosen_frag = next(f for s, p, f in candidates if p["_pid"] == chosen["_pid"])
+                chosen_frag = next(f for _r, _i, p, f in candidates if p["_pid"] == chosen["_pid"])
                 r = _make_pair_result(
                     br, chosen, "Cross-period match", baseline_xp,
                     extra_reason=chosen_frag + amb_note,
@@ -1125,11 +1215,27 @@ def _match_pool(
         if not gstin_valid:
             reason += f" Note: {gstin_note}."
 
+        # Surplus copy of a duplicated books invoice: reported as an exception
+        # in its own right (the second ITC claim has no portal support), NOT as
+        # another paired comparison. The one portal record was matched exactly
+        # once by the passes above, so no comparison is re-emitted here.
+        duplicate_count = int((duplicate_keys or {}).get((gstin, str(br.get("_norm_inv") or "")), 0))
+        duplicate_diff_type = None
+        if duplicate_count > 1:
+            duplicate_diff_type = "Duplicate in Books"
+            reason += (
+                f" Duplicate in Books: this GSTIN + invoice number appears "
+                f"{duplicate_count} times in the books, and one copy was already "
+                f"matched. This surplus copy is the additional ITC claim and is "
+                f"reported separately rather than compared a second time."
+            )
+
         results.append(_make_result(
             "Not in Portal", 0.0, config,
             books_record=_row_json(br, exclude=_EXCLUDE_COLS),
             portal_record=None,
             match_reason=reason,
+            difference_type=duplicate_diff_type,
         ))
         matched_bids.add(bid)
 
@@ -1187,6 +1293,20 @@ def match_gst(
     books = preprocess_books(books_df, config)
     b2b_portal, rc_portal, import_portal, summary = preprocess_portal(portal_df, config)
 
+    # Credit/debit notes are a SEPARATE document class. The portal carries them
+    # on its B2B-CDNR sheet (declared by the report's own Credit Notes card and
+    # never reconciled as invoices), so a books row carrying a note marker must
+    # be kept OUT of the invoice-matching pool — otherwise every one of them
+    # becomes a false "Not in Portal" exception that contradicts that label.
+    note_mask = books["_doc_type"].isin(_NOTE_TYPES)
+    note_count = int(note_mask.sum())
+    if note_count:
+        print(
+            f"[GST] {note_count} books credit/debit note row(s) excluded from the "
+            f"invoice-matching pool (reported separately by the Credit Notes card)."
+        )
+        books = books[~note_mask].copy()
+
     _print_preprocessing_summary(summary)
 
     # Pre-process adjacent portal if supplied
@@ -1196,18 +1316,24 @@ def match_gst(
         print(f"[GST] Adjacent period portal: {len(adj_b2b)} B2B records available for cross-period matching.")
 
     # --- Duplicate detection (books-internal) ---
-    dup_results = _detect_books_duplicates(books, config)
+    # Only the duplicate KEYS are needed. The five matching passes below already
+    # produce exactly ONE match plus N-1 residuals for a duplicated key (a
+    # portal record is matched at most once), so the surplus copy is labelled as
+    # a residual rather than re-emitted as its own comparison — which is what
+    # produced the S2-09 "4 rows instead of 2" defect.
+    duplicate_keys = _books_duplicate_keys(books)
 
     # --- Match each pool ---
     # For simplicity in PoC, books are not separated into pools — all books
     # match against b2b. RC and import pools match against the same books.
     # A production system would separate books by voucher type.
-    all_results = list(dup_results)
+    all_results: list[dict[str, Any]] = []
 
     b2b_results = _match_pool(
         books, b2b_portal, config,
         adjacent_portal=adj_b2b,
         pool_label="B2B",
+        duplicate_keys=duplicate_keys,
     )
     all_results.extend(b2b_results)
 

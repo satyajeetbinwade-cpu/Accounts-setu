@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>GST Reconciliation Report — Test Client Aug 2026</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 28px;
+  background: #EEF0F2; color: #16181D;
+  /* System-font stack: the report must render identically with no network. */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-size: 13px; line-height: 1.45;
+}
+.page { max-width: 1080px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.card {
+  background: #FFFFFF; border: 1px solid #E7E9EC; border-radius: 10px;
+  padding: 16px 18px; margin-bottom: 16px;
+}
+.sub { color: #6B7280; font-size: 12px; margin: 0; }
+.muted { color: #9CA3AF; font-size: 12px; margin: 6px 0 0; }
+.headline { font-size: 34px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }
+.badge {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  background: #FDEBEA; color: #C0392B; font-weight: 600; font-size: 12px;
+  border: 1px solid #F6C9C5;
+}
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.kpi { border: 1px solid #E7E9EC; border-radius: 9px; padding: 12px 14px; background: #FFFFFF; }
+.kpi .label { color: #6B7280; font-size: 11px; text-transform: uppercase;
+               letter-spacing: 0.05em; font-weight: 600; }
+.kpi .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+.kpi .note { color: #9CA3AF; font-size: 11px; margin-top: 2px; }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.bar-card { grid-column: 1 / -1; }
+.donut { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.legend { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.legend li { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.legend strong { margin-left: 6px; }
+.dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em;
+      color: #6B7280; border-bottom: 1px solid #E7E9EC; padding: 7px 8px; }
+td { padding: 7px 8px; border-bottom: 1px solid #E7E9EC; vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.matched td { background: #F3FAF6; }
+tr.amount-difference td { background: #FDF4E3; }
+tr.not-in-books td { background: #FDEBEA; }
+tr.not-in-portal td { background: #EAF0FB; }
+.status { font-weight: 600; }
+.dq { border-bottom: 1px solid #E7E9EC; padding: 10px 0; }
+.dq strong { display: block; margin-bottom: 4px; }
+.dq dl { margin: 0; font-size: 12px; }
+.dq dt { font-weight: 600; color: #6B7280; display: inline-block; min-width: 108px; }
+.dq dd { display: inline; margin: 0 0 0 4px; }
+@media print {
+  body { background: #FFFFFF; padding: 0; }
+  .card { break-inside: avoid; }
+  thead { display: table-header-group; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="card">
+    <h1>GST Reconciliation Report</h1>
+    <p class="sub">
+      Test Client · Aug 2026
+      · GSTIN 07AAACP9472A1ZJ
+      · Run 13
+    </p>
+    <p class="sub">Generated 25 Sep 2026 18:11 UTC · Source files:
+      092026_07AAECM4521F1Z8_GSTR2B_TESTSET2.xlsx, PurchaseRegister_TESTSET2_MeridianTextiles.xlsx</p>
+  </div>
+
+  <div class="card">
+    <div class="headline">₹1,710.00</div>
+    <div><span class="label">ITC at stake (tax on exceptions)</span>
+      &nbsp;<span class="badge">2.13%</span>
+      <span class="muted">of ₹80,153.82 period ITC</span>
+    </div>
+    <p class="sub">12 item(s) · Run 13 ·
+      Aug 2026 GST</p>
+  </div>
+
+  <div class="card">
+    <h2>Key figures</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="label">ITC at stake (tax)</div><div class="value">₹1,710.00</div><div class="note">2.13% of period ITC</div></div>
+      <div class="kpi"><div class="label">Period ITC</div><div class="value">₹80,153.82</div><div class="note">total tax in this run</div></div>
+      <div class="kpi"><div class="label">Invoices</div><div class="value">23</div><div class="note">11 matched</div></div>
+      <div class="kpi"><div class="label">Exceptions</div><div class="value">12</div><div class="note">0 reviewed</div></div>
+      <div class="kpi"><div class="label">Credit notes</div><div class="value">2</div><div class="note">excluded from invoice counts</div></div>
+      <div class="kpi"><div class="label">Credit note tax</div><div class="value">₹972.00</div><div class="note">not reconciled this run</div></div>
+    </div>
+    <p class="muted">Gross invoice value on the exception items was
+      ₹62,894.00 — shown here for context only; it is
+      not the exposure.</p>
+  </div>
+
+  <div class="charts">
+    <div class="card">
+      <h2>Classification</h2>
+      <div class="donut"><svg viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Records"><circle cx="100" cy="100" r="70.0" fill="none" stroke="#1F7A4D" stroke-width="26.0" stroke-dasharray="210.350 229.473" stroke-dashoffset="-0.000" transform="rotate(-90 100 100)"/><circle cx="100" cy="100" r="70.0" fill="none" stroke="#B26A00" stroke-width="26.0" stroke-dasharray="114.736 325.087" stroke-dashoffset="-210.350" transform="rotate(-90 100 100)"/><circle cx="100" cy="100" r="70.0" fill="none" stroke="#C0392B" stroke-width="26.0" stroke-dasharray="19.123 420.700" stroke-dashoffset="-325.087" transform="rotate(-90 100 100)"/><circle cx="100" cy="100" r="70.0" fill="none" stroke="#2F6FED" stroke-width="26.0" stroke-dasharray="95.614 344.209" stroke-dashoffset="-344.209" transform="rotate(-90 100 100)"/><text x="100" y="97" text-anchor="middle" font-size="12" fill="#6B7280">Records</text><text x="100" y="115" text-anchor="middle" font-size="15" font-weight="700" fill="#16181D">23</text></svg><ul class="legend"><li><span class="dot" style="background:#1F7A4D"></span>Matched<strong>11</strong></li><li><span class="dot" style="background:#B26A00"></span>Amount Difference<strong>6</strong></li><li><span class="dot" style="background:#C0392B"></span>Not in Books<strong>1</strong></li><li><span class="dot" style="background:#2F6FED"></span>Not in Portal<strong>5</strong></li></ul></div>
+    </div>
+    <div class="card">
+      <h2>Input tax credit split</h2>
+      <div class="donut"><svg viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Eligible ITC"><circle cx="100" cy="100" r="70.0" fill="none" stroke="#1F7A4D" stroke-width="26.0"/><text x="100" y="97" text-anchor="middle" font-size="12" fill="#6B7280">Eligible ITC</text><text x="100" y="115" text-anchor="middle" font-size="15" font-weight="700" fill="#16181D">₹43,667.83</text></svg><ul class="legend"><li><span class="dot" style="background:#1F7A4D"></span>Eligible ITC<strong>₹43,667.83</strong></li></ul></div>
+    </div>
+    <div class="card bar-card">
+      <h2>Top suppliers by unmatched invoice value</h2>
+      <svg viewBox="0 0 320 202" width="100%" height="202" role="img" aria-label="Top suppliers by unmatched invoice value"><text x="0" y="20" font-size="11" fill="#6B7280">OM TRADERS</text><rect x="150" y="5" width="100.0" height="22" rx="3" fill="#C0392B"/><text x="256.0" y="20" font-size="11" fill="#16181D">₹42,480.00</text><text x="0" y="52" font-size="11" fill="#6B7280">GLOBAL LOGISTICS CO</text><rect x="150" y="37" width="77.8" height="22" rx="3" fill="#C0392B"/><text x="233.8" y="52" font-size="11" fill="#16181D">₹33,040.00</text><text x="0" y="84" font-size="11" fill="#6B7280">Prime Packaging Soluti</text><rect x="150" y="69" width="26.4" height="22" rx="3" fill="#C0392B"/><text x="182.4" y="84" font-size="11" fill="#16181D">₹11,210.00</text><text x="0" y="116" font-size="11" fill="#6B7280">VIKAS ENTERPRISES</text><rect x="150" y="101" width="25.0" height="22" rx="3" fill="#C0392B"/><text x="181.0" y="116" font-size="11" fill="#16181D">₹10,620.00</text><text x="0" y="148" font-size="11" fill="#6B7280">SUNRISE FABRICS PVT LT</text><rect x="150" y="133" width="20.0" height="22" rx="3" fill="#C0392B"/><text x="176.0" y="148" font-size="11" fill="#16181D">₹8,512.00</text><text x="0" y="180" font-size="11" fill="#6B7280">RAJESH TEXTILE MILLS</text><rect x="150" y="165" width="8.3" height="22" rx="3" fill="#C0392B"/><text x="164.3" y="180" font-size="11" fill="#16181D">₹3,524.00</text></svg>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>GST invoices (23)</h2>
+    <table>
+      <thead><tr>
+        <th>Supplier</th><th>GSTIN</th><th>Invoice no.</th><th>Date</th>
+        <th class="num">Taxable value</th><th class="num">Total tax</th>
+        <th class="num">Invoice value</th><th>Classification</th>
+        <th>Status</th><th>Confidence</th>
+      </tr></thead>
+      <tbody><tr class="amount-difference"><td>OM TRADERS</td><td>07AAAOP9012H1Z6</td><td>OT/85</td><td>15 Sep 2026</td><td class="num">₹12,000.00</td><td class="num">₹2,160.00</td><td class="num">₹14,160.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="amount-difference"><td>OM TRADERS</td><td>07AAAOP9012H1Z6</td><td>OT/85</td><td>15 Sep 2026</td><td class="num">₹12,000.00</td><td class="num">₹2,160.00</td><td class="num">₹14,160.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>RAJESH TEXTILE MILLS</td><td>07AABCR1234F1Z2</td><td>RTM/145</td><td>18 Sep 2026</td><td class="num">₹42,000.00</td><td class="num">₹7,560.00</td><td class="num">₹49,560.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>SUNRISE FABRICS PVT LTD</td><td>24AABCS5678G1Z4</td><td>SF-2291</td><td>05 Sep 2026</td><td class="num">₹68,000.00</td><td class="num">₹12,240.00</td><td class="num">₹80,240.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="amount-difference"><td>RAJESH TEXTILE MILLS</td><td>07AABCR1234F1Z2</td><td>RTM/158</td><td>22 Sep 2026</td><td class="num">₹35,000.00</td><td class="num">₹6,300.00</td><td class="num">₹40,710.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="amount-difference"><td>SUNRISE FABRICS PVT LTD</td><td>24AABCS5678G1Z4</td><td>SF-2305</td><td>10 Sep 2026</td><td class="num">₹50,000.00</td><td class="num">₹9,000.00</td><td class="num">₹54,500.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="amount-difference"><td>OM TRADERS</td><td>07AAAOP9012H1Z6</td><td>OT/77</td><td>12 Sep 2026</td><td class="num">₹20,000.00</td><td class="num">₹3,600.00</td><td class="num">₹23,600.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="amount-difference"><td>RAJESH TEXTILE MILLS</td><td>07AABCR1234F1Z2</td><td>RTM/162</td><td>24 Sep 2026</td><td class="num">₹15,000.00</td><td class="num">₹1,800.00</td><td class="num">₹17,700.00</td><td>Amount Difference</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="matched"><td>DELHI TELECOM SERVICES LTD</td><td>07AABCD3344E1Z9</td><td>DTS/998877</td><td>06 Sep 2026</td><td class="num">₹599.00</td><td class="num">₹107.82</td><td class="num">₹706.83</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 97%</td></tr><tr class="matched"><td>VIKAS ENTERPRISES</td><td>07AABCV6789K1Z8</td><td>VE-234</td><td>14 Sep 2026</td><td class="num">₹18,000.00</td><td class="num">₹3,240.00</td><td class="num">₹21,240.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>OM TRADERS</td><td>07AAAOP9012H1Z6</td><td>OT/85</td><td>15 Sep 2026</td><td class="num">₹12,000.00</td><td class="num">₹2,160.00</td><td class="num">₹14,160.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>LEGAL CONSULTANTS &amp; ASSOCIATES</td><td>07AABCL2222Q1Z5</td><td>LC/44</td><td>16 Sep 2026</td><td class="num">₹25,000.00</td><td class="num">₹4,500.00</td><td class="num">₹29,500.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>CELEBRATION CATERERS</td><td>07AABCC3333R1Z7</td><td>CC/12</td><td>19 Sep 2026</td><td class="num">₹8,000.00</td><td class="num">₹1,440.00</td><td class="num">₹9,440.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>SUNRISE FABRICS PVT LTD</td><td>24AABCS5678G1Z4</td><td>SF-2318</td><td>27 Sep 2026</td><td class="num">₹30,000.00</td><td class="num">₹5,400.00</td><td class="num">₹35,400.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>RAJESH TEXTILE MILLS</td><td>07AABCR1234F1Z2</td><td>RTM/170</td><td>29 Sep 2026</td><td class="num">₹22,000.00</td><td class="num">₹3,960.00</td><td class="num">₹25,960.00</td><td>Matched</td><td class="status">Not reviewed</td><td>High — 98%</td></tr><tr class="matched"><td>OM TRADER&#x27;S</td><td>07AAA0P9012H1Z6</td><td>OT/91</td><td>30 Sep 2026</td><td class="num">₹6,000.00</td><td class="num">₹1,080.00</td><td class="num">₹7,080.00</td><td>Matched</td><td class="status">Not reviewed</td><td>Medium — 65%</td></tr><tr class="matched"><td>BRIGHT STAR TRADERS</td><td>07AABCB9988S1Z</td><td>BST/501</td><td>22 Sep 2026</td><td class="num">₹11,000.00</td><td class="num">₹1,980.00</td><td class="num">₹12,980.00</td><td>Matched</td><td class="status">Not reviewed</td><td>Medium — 65%</td></tr><tr class="not-in-portal"><td>OM TRADERS</td><td>07AAAOP9012H1Z6</td><td>OT/85</td><td>15 Sep 2026</td><td class="num">₹12,000.00</td><td class="num">₹2,160.00</td><td class="num">₹14,160.00</td><td>Not in Portal</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="not-in-portal"><td>GLOBAL LOGISTICS CO</td><td>06AABCG3456L1Z9</td><td>GL/551</td><td>20 Sep 2026</td><td class="num">₹28,000.00</td><td class="num">₹5,040.00</td><td class="num">₹33,040.00</td><td>Not in Portal</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="not-in-portal"><td>VIKAS ENTERPRISES</td><td>07AABCV6789K1Z8</td><td>VE-250</td><td>18 Sep 2026</td><td class="num">₹9,000.00</td><td class="num">₹1,620.00</td><td class="num">₹10,620.00</td><td>Not in Portal</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="not-in-portal"><td>SUNRISE FABRICS PVT LTD</td><td>24AABCS5678G1Z4</td><td>CN-SF/CN/118</td><td>26 Sep 2026</td><td class="num">−₹3,400.00</td><td class="num">₹612.00</td><td class="num">₹4,012.00</td><td>Not in Portal</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="not-in-portal"><td>RAJESH TEXTILE MILLS</td><td>07AABCR1234F1Z2</td><td>CN-RTM/CN/29</td><td>28 Sep 2026</td><td class="num">−₹1,800.00</td><td class="num">₹324.00</td><td class="num">₹2,124.00</td><td>Not in Portal</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr><tr class="not-in-books"><td>Prime Packaging Solutions</td><td>07AABCP7890M1Z3</td><td>PPS/912</td><td>09 Sep 2026</td><td class="num">₹9,500.00</td><td class="num">₹1,710.00</td><td class="num">₹11,210.00</td><td>Not in Books</td><td class="status">Not reviewed</td><td>Low — 0%</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Credit notes (2)</h2>
+    <p class="sub">Held separately from the invoice reconciliation and represented
+      for completeness only.</p>
+    <table>
+      <thead><tr>
+        <th>Supplier</th><th>GSTIN</th><th>Note no.</th><th>Type</th><th>Date</th>
+        <th class="num">Taxable value</th><th class="num">Total tax</th>
+        <th class="num">Note value</th>
+      </tr></thead>
+      <tbody><tr><td>Sunrise Fabrics Pvt Ltd</td><td>24AABCS5678G1Z4</td><td>SF/CN/118</td><td>Credit Note</td><td>26 Sep 2026</td><td class="num">₹3,400.00</td><td class="num">₹612.00</td><td class="num">₹4,012.00</td></tr><tr><td>Rajesh Textile Mills</td><td>07AABCR1234F1Z2</td><td>RTM/CN/29</td><td>Credit Note</td><td>28 Sep 2026</td><td class="num">₹2,000.00</td><td class="num">₹360.00</td><td class="num">₹2,360.00</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Data quality &amp; scope notes</h2>
+    <div class="dq"><strong>TDS is not reconciled in this run</strong><dl><dt>What</dt><dd>This run reconciled GST only. No Form 26AS or TDS return was part of it.</dd><br/><dt>Why it matters</dt><dd>Deduction, deposit and 26AS reflection cannot be checked without those files, so any TDS position is unverified.</dd><br/><dt>How to fix</dt><dd>Upload the Form 26AS and TDS source files and run a TDS reconciliation.</dd></dl></div><div class="dq"><strong>1 record(s) have no books side</strong><dl><dt>What</dt><dd>These were seen only on the portal, so no books value could be compared.</dd><br/><dt>Why it matters</dt><dd>They widen the difference without a counterpart amount to net against.</dd><br/><dt>How to fix</dt><dd>Confirm whether they are booked under another ledger or genuinely missing.</dd></dl></div><div class="dq"><strong>5 record(s) have no portal side</strong><dl><dt>What</dt><dd>These were seen only in the books, so no portal value could be compared.</dd><br/><dt>Why it matters</dt><dd>They may be unfiled supplier invoices, or invoices filed in a different period.</dd><br/><dt>How to fix</dt><dd>Check whether the supplier has filed, or whether the invoice belongs to another period.</dd></dl></div><div class="dq"><strong>Tax-component comparison (CGST/SGST/IGST/Cess)</strong><dl><dt>What</dt><dd>Tax-component comparison (CGST/SGST/IGST/Cess) — not available (cess not mapped), so this check is skipped.</dd><br/><dt>Why it matters</dt><dd>Without this check the report can only state the limitation, not a conclusion.</dd><br/><dt>How to fix</dt><dd>Provide the missing column/file and re-run the reconciliation.</dd></dl></div><div class="dq"><strong>2 credit note(s) in the portal file were not reconciled</strong><dl><dt>What</dt><dd>The portal file carries 2 credit note(s) (B2B-CDNR). No books-side debit/credit-note register was uploaded, and credit-note matching is not part of this reconciliation, so they were left out entirely rather than silently dropped.</dd><br/><dt>Why it matters</dt><dd>A reconciliation that silently omits a class of documents would overstate its own completeness.</dd><br/><dt>How to fix</dt><dd>Upload the missing source (e.g. a books-side credit/debit-note register) and re-run if these documents need to be reconciled.</dd></dl></div><div class="dq"><strong>IMS action status covers 20 portal document(s)</strong><dl><dt>What</dt><dd>IMS statuses on the supplied export: Accepted 18, Pending 1, Rejected 1. IMS status is carried through as reference only — it does not drive matching in this build.</dd><br/><dt>Why it matters</dt><dd>IMS status shows what a supplier has filed and what the recipient has actioned in the portal — useful context, but it does not drive matching in this build.</dd><br/><dt>How to fix</dt><dd>No action is required for this reconciliation; review Pending / No Action items directly in the IMS portal if needed.</dd></dl></div><div class="dq"><strong>Source files used (2)</strong><dl><dt>What</dt><dd>092026_07AAECM4521F1Z8_GSTR2B_TESTSET2.xlsx, PurchaseRegister_TESTSET2_MeridianTextiles.xlsx</dd><br/><dt>Why it matters</dt><dd>The report reconciles exactly these files for this period and nothing else.</dd><br/><dt>How to fix</dt><dd>Replace a file and re-run if the source changed.</dd></dl></div><div class="dq"><strong>What this report covers</strong><dl><dt>What</dt><dd>This reconciles the source files above for this period only.</dd><br/><dt>Why it matters</dt><dd>It does not perform a statutory filing and does not pull live portal data.</dd><br/><dt>How to fix</dt><dd>File the return from your filing workflow once the exceptions are decided.</dd></dl></div>
+  </div>
+
+</div>
+</body>
+</html>

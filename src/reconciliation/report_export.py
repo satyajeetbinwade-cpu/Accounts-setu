@@ -165,12 +165,16 @@ def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
             "sgst": round(review.to_number(source.get("sgst")) or 0.0, 2),
             "cess": round(review.to_number(source.get("cess")) or 0.0, 2),
             "total_tax": round(item["tax"], 2),
-            # The invoice's own value (the side that carries it), NOT the
-            # flagged difference. The column is "Invoice value", and the
-            # Overview's gross-on-exceptions SUMIF reads this column, so it
-            # must hold a gross value — a residual/delta here would repeat the
-            # mismatch this fix removes.
-            "invoice_value": round(item["books_value"] or item["portal_value"], 2),
+            # ONE side for every value on the row: portal-side (GSTR-2B is the
+            # ITC evidence that locks into the return), consistent with the tax
+            # columns above, which already read `portal or books`. Previously the
+            # tax columns were portal-side while this one read `books or portal`,
+            # so a single row could blend sides and not add up (S2 RTM/158,
+            # SF-2305, DTS/998877: portal total 706.82 vs books 706.83). A
+            # books-only record (Not in Portal) still falls back to its own
+            # value. It remains a GROSS value because the Overview's
+            # gross-on-exceptions SUMIF reads this column.
+            "invoice_value": round(item["portal_value"] or item["books_value"], 2),
             "classification": item["classification"],
             "status": "Reviewed" if item["reviewed"] else "Not reviewed",
             "difference_type": item["difference_type"],
@@ -410,7 +414,7 @@ def _kpi_card(label: str, value: str, note: str = "") -> str:
 
 def _invoice_rows_html(invoices: list[dict[str, Any]]) -> str:
     if not invoices:
-        return '<tr><td colspan="10" class="muted">No invoice records in this run.</td></tr>'
+        return '<tr><td colspan="11" class="muted">No invoice records in this run.</td></tr>'
     out: list[str] = []
     for inv in invoices:
         cls = (inv["classification"] or "").strip().lower().replace(" ", "-")
@@ -425,6 +429,7 @@ def _invoice_rows_html(invoices: list[dict[str, Any]]) -> str:
             f'<td class="num">{review.format_money(inv["invoice_value"])}</td>'
             f'<td>{_html.escape(inv["classification"])}</td>'
             f'<td class="status">{_html.escape(inv["status"])}</td>'
+            f'<td>{_html.escape(inv["difference_type"] or "—")}</td>'
             f'<td>{_html.escape(inv["confidence"])}</td>'
             f'</tr>'
         )
@@ -546,7 +551,7 @@ def render_html(data: dict[str, Any]) -> str:
         <th>Supplier</th><th>GSTIN</th><th>Invoice no.</th><th>Date</th>
         <th class="num">Taxable value</th><th class="num">Total tax</th>
         <th class="num">Invoice value</th><th>Classification</th>
-        <th>Status</th><th>Confidence</th>
+        <th>Status</th><th>Difference type</th><th>Confidence</th>
       </tr></thead>
       <tbody>{_invoice_rows_html(data["invoices"])}</tbody>
     </table>

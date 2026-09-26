@@ -380,8 +380,8 @@ def test_ambiguity_note_reports_chosen_score_above_runner_up():
 
     config = load_config()["gst"]
     candidates = [
-        (98.0, pd.Series({"gstin": "07AAAAA0000A1Z5", "invoice_number": "A"}), ""),
-        (96.0, pd.Series({"gstin": "07AAAAA0000A1Z5", "invoice_number": "B"}), ""),
+        (98.0, 98.0, pd.Series({"gstin": "07AAAAA0000A1Z5", "invoice_number": "A"}), ""),
+        (96.0, 96.0, pd.Series({"gstin": "07AAAAA0000A1Z5", "invoice_number": "B"}), ""),
     ]
     _chosen, final_score, note, forced = _resolve_ambiguity(candidates, config)
     assert forced is True

@@ -1,0 +1,17 @@
+.git
+.web
+.states
+venv
+tests
+__pycache__
+*.pyc
+*.pyo
+.env
+reflex.lock
+
+# These are excluded because they'll live on Fly volumes instead — see the
+# seed-data caveat in the deploy notes for what this means for the two demo
+# clients (Meridian Fabrics, Test Client) currently shipped in data/.
+data
+db
+uploaded_files
