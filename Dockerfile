@@ -27,8 +27,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium
  
-# App source.
+# App source. NOTE: data/ is deliberately NOT dockerignored — the image keeps
+# a pristine copy of the demo source folders so it can seed an empty volume on
+# first boot (see the CMD below). db/ IS excluded (poc.db must be created on
+# the volume by main.py, never shipped in the image).
 COPY . .
+
+# Stash the bundled demo data OUTSIDE /app/data. At runtime /app/data becomes a
+# symlink to the mounted volume, which shadows the image's copy — so the seed
+# source has to live somewhere the symlink will not cover.
+RUN cp -a /app/data /app/seed_data
  
 # NOTE ON PRODUCTION MODE: we originally planned to run `reflex export
 # --frontend-only --no-zip` here to pre-compile the frontend at build time,
@@ -63,7 +71,16 @@ EXPOSE 8080
 # Fly only supports one volume per machine, so db/ and data/ (which the app
 # hardcodes as separate top-level paths -- see src/db.py, src/data_paths.py)
 # both live as subdirectories of the single mounted volume at /app/persist,
-# symlinked into place at every boot. ln -sfn is idempotent -- safe on restart.
+# symlinked into place at every boot.
+#
+# SEEDING: the volume starts empty, and the app's Reconcile client/period
+# pickers are driven by the folders under data/ (src/shared/discovery.py), not
+# by the DB — so an unseeded volume leaves the whole reconciliation flow
+# unusable (empty Client dropdown, "No periods yet"). On first boot only, copy
+# the image's pristine demo data into the volume. The `-z "$(ls -A ...)"` guard
+# means this never runs again once the volume has content, so it can never
+# clobber real uploads. `rm -rf /app/data` removes the image's real directory
+# (or a stale symlink) so `ln -s` always yields a clean symlink.
 #
 # REFLEX_HOT_RELOAD_EXCLUDE_PATHS is set explicitly (colon-separated, per
 # Reflex's env var format) rather than relying on rxconfig.py's own
@@ -71,4 +88,4 @@ EXPOSE 8080
 # resolves the db/data symlinks to their real target under persist/, which
 # isn't covered by those excluded names, so every SQLite write to poc.db
 # was being treated as a source change and triggering a restart loop.
-CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && ln -sfn /app/persist/db /app/db && ln -sfn /app/persist/data /app/data && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && python main.py && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && if [ -z \"$(ls -A /app/persist/data 2>/dev/null)\" ] && [ -d /app/seed_data ]; then cp -a /app/seed_data/. /app/persist/data/; fi && rm -rf /app/data && ln -s /app/persist/data /app/data && ln -sfn /app/persist/db /app/db && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && python main.py && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]

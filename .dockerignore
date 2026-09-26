@@ -9,9 +9,10 @@ __pycache__
 .env
 reflex.lock
 
-# These are excluded because they'll live on Fly volumes instead — see the
-# seed-data caveat in the deploy notes for what this means for the two demo
-# clients (Meridian Fabrics, Test Client) currently shipped in data/.
-data
+# db/ and uploaded_files/ are excluded because they live on the Fly volume.
+# data/ IS included on purpose: it ships the two demo clients (Meridian
+# Fabrics, Test Client) so the container can seed the empty volume on first
+# boot (see the CMD in the Dockerfile). Without this the deployed app had no
+# client/period folders at all and Reconcile's client picker was empty.
 db
 uploaded_files

@@ -89,50 +89,74 @@ def _context_stage() -> rx.Component:
                     "1. Context",
                     "Client, period and recon type. Pick all three and this step completes itself.",
                 ),
-                rx.hstack(
-                    rx.vstack(
-                        rx.text("Client", style=t.TEXT["label"]),
-                        rx.select(
-                            ReconcileState.clients,
-                            value=ReconcileState.ctx_client,
-                            on_change=ReconcileState.set_ctx_client,
-                            width="220px",
+                # The client picker is driven by the folders under
+                # data/<client>/<period>/<source_type>/ (src/shared/discovery.py),
+                # NOT by the client DB — so a server with no data folders yet
+                # renders empty dropdowns that look broken. Say so plainly.
+                rx.cond(
+                    ReconcileState.clients.length() > 0,
+                    rx.hstack(
+                        rx.vstack(
+                            rx.text("Client", style=t.TEXT["label"]),
+                            rx.select(
+                                ReconcileState.clients,
+                                value=ReconcileState.ctx_client,
+                                on_change=ReconcileState.set_ctx_client,
+                                width="220px",
+                            ),
+                            spacing="1",
+                            align="start",
                         ),
-                        spacing="1",
-                        align="start",
-                    ),
-                    rx.vstack(
-                        rx.text("Period", style=t.TEXT["label"]),
-                        rx.select.root(
-                            rx.select.trigger(width="160px", placeholder="No periods yet"),
-                            rx.select.content(
-                                rx.select.group(
-                                    rx.foreach(
-                                        ReconcileState.period_options,
-                                        lambda option: rx.select.item(option.label, value=option.value),
+                        rx.vstack(
+                            rx.text("Period", style=t.TEXT["label"]),
+                            rx.select.root(
+                                rx.select.trigger(width="160px", placeholder="No periods yet"),
+                                rx.select.content(
+                                    rx.select.group(
+                                        rx.foreach(
+                                            ReconcileState.period_options,
+                                            lambda option: rx.select.item(option.label, value=option.value),
+                                        ),
                                     ),
                                 ),
+                                value=ReconcileState.ctx_period,
+                                on_change=ReconcileState.set_ctx_period,
                             ),
-                            value=ReconcileState.ctx_period,
-                            on_change=ReconcileState.set_ctx_period,
+                            spacing="1",
+                            align="start",
                         ),
-                        spacing="1",
-                        align="start",
+                        rx.vstack(
+                            rx.text("Recon type", style=t.TEXT["label"]),
+                            rx.select(
+                                ReconcileState.recon_types,
+                                value=ReconcileState.ctx_recon_type,
+                                on_change=ReconcileState.set_ctx_recon_type,
+                                width="150px",
+                            ),
+                            spacing="1",
+                            align="start",
+                        ),
+                        spacing="4",
+                        align="end",
+                        wrap="wrap",
                     ),
                     rx.vstack(
-                        rx.text("Recon type", style=t.TEXT["label"]),
-                        rx.select(
-                            ReconcileState.recon_types,
-                            value=ReconcileState.ctx_recon_type,
-                            on_change=ReconcileState.set_ctx_recon_type,
-                            width="150px",
+                        c.warning_banner(
+                            "No client data folders exist on this server yet, so there is "
+                            "nothing to reconcile. Upload source files in Smart Ingestion, "
+                            "or seed the demo data (Meridian Fabrics / Test Client)."
                         ),
-                        spacing="1",
+                        rx.box(height="6px"),
+                        c.empty_state(
+                            "Reconcile reads the folders under "
+                            "data/<client>/<period>/<source_type>/ on the server. "
+                            "None exist yet.",
+                            icon="folder-open",
+                        ),
+                        spacing="2",
+                        width="100%",
                         align="start",
                     ),
-                    spacing="4",
-                    align="end",
-                    wrap="wrap",
                 ),
                 rx.cond(
                     ReconcileState.ctx_client != "",
