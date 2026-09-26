@@ -114,10 +114,45 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
 # The touchpoint whose model the ingestion layer actually reads at runtime.
 INGESTION_TOUCHPOINT = "ingestion_mapping"
 
+# Placeholder touchpoints from C3-extended's routing table. They are seeded
+# INACTIVE and carry NO model assignment — they must never be presented as if
+# they work (the standing Coming-with-[Module] rule). They exist so the
+# registry shows their (disabled) rows rather than hiding them.
+# (touchpoint_key, label, category, description, sort_order)
+SEED_PLACEHOLDER_ASSIGNMENTS: list[tuple[str, str, str, str, int]] = [
+    (
+        "corrective_entry_drafting",
+        "Corrective entry drafting",
+        "Analysis",
+        "Coming with Module 3 — drafts corrective journal entries from a resolved exception.",
+        20,
+    ),
+    (
+        "audit_query_drafting",
+        "Audit query drafting",
+        "Analysis",
+        "Coming with Module 5 — drafts an audit query from a flagged item's evidence.",
+        21,
+    ),
+    (
+        "anomaly_scoring",
+        "Anomaly scoring",
+        "Analysis",
+        "Coming with Module 1 — scores a transaction for anomaly likelihood.",
+        22,
+    ),
+]
+
 
 def run_seed(conn: sqlite3.Connection) -> None:
-    """Seed the touchpoint list. Idempotent and additive — an existing row's
-    model assignment is never overwritten."""
+    """Seed the provider set, the touchpoint list, and the inactive
+    placeholders. Idempotent and additive — an existing row's model
+    assignment is never overwritten."""
+    from src.ai_models import providers as prov
+
+    for spec in prov.PROVIDER_SPECS.values():
+        adb.upsert_provider(conn, **spec.to_row())
+
     for key, label, category, description, primary, fallback, order in SEED_ASSIGNMENTS:
         adb.upsert_assignment(
             conn,
@@ -128,5 +163,18 @@ def run_seed(conn: sqlite3.Connection) -> None:
             primary_model=primary,
             fallback_model=fallback,
             is_active=True,
+            sort_order=order,
+        )
+
+    for key, label, category, description, order in SEED_PLACEHOLDER_ASSIGNMENTS:
+        adb.upsert_assignment(
+            conn,
+            touchpoint_key=key,
+            label=label,
+            category=category,
+            description=description,
+            primary_model=None,
+            fallback_model=None,
+            is_active=False,
             sort_order=order,
         )

@@ -146,6 +146,8 @@ class Module2State(AuthState):
     tds_reasoning: str = ""
     tds_available: bool = False
     tds_c5_used: bool = False
+    tds_provider: str = ""
+    tds_model: str = ""
 
     flash: str = ""
     error: str = ""
@@ -465,6 +467,8 @@ class Module2State(AuthState):
         self.tds_rate = f"{rate}%" if rate is not None else "—"
         self.tds_reasoning = out.get("reasoning") or ""
         self.tds_c5_used = bool(out.get("c5_context_used"))
+        self.tds_provider = out.get("provider") or ""
+        self.tds_model = out.get("model") or ""
 
 
 # ---------------------------------------------------------------------------

@@ -53,9 +53,7 @@ KEY_TEMPERATURE = "ingestion_ai.llm.temperature"
 KEY_CREDENTIAL_ID = "ingestion_ai.llm.credential_id"
 
 # Fallbacks used only when config/ai_config.yaml itself is unreadable.
-_FALLBACK_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 _FALLBACK_MODEL = "anthropic/claude-opus-4.1"
-_FALLBACK_API_KEY_ENV = "OPENROUTER_API_KEY"
 _FALLBACK_TIMEOUT = 120
 _FALLBACK_MAX_TOKENS = 2000
 _FALLBACK_TEMPERATURE = 0.0
@@ -143,13 +141,34 @@ def _registry_model() -> Optional[str]:
 
 
 def _default_base_url() -> str:
+    """A legacy display value only — the gateway owns the real transport.
+
+    Prefers the config file's value, then the platform provider registry, so
+    no provider URL is hardcoded outside src/ai_models/providers.py.
+    """
     cfg = _load_ai_config()
-    return (cfg.get("openrouter") or {}).get("base_url") or _FALLBACK_BASE_URL
+    configured = (cfg.get("openrouter") or {}).get("base_url")
+    if configured:
+        return configured
+    from src.ai_models import providers as prov
+
+    return prov.PROVIDER_SPECS["openrouter"].chat_url
 
 
 def _api_key_env_name() -> str:
+    """The env var consulted for the ingestion provider's key (display only).
+
+    Falls back to the platform provider registry rather than a hardcoded
+    provider name, so no provider reference lives outside providers.py.
+    """
     cfg = _load_ai_config()
-    return (cfg.get("openrouter") or {}).get("api_key_env") or _FALLBACK_API_KEY_ENV
+    from src.ai_models import providers as prov
+
+    return (
+        (cfg.get("openrouter") or {}).get("api_key_env")
+        or prov.PROVIDER_SPECS["openrouter"].api_key_env
+        or ""
+    )
 
 
 def _resolve_api_key(*, db_path=None) -> tuple[str, str, Optional[str]]:
@@ -205,37 +224,57 @@ def resolve_llm_config(*, db_path=None) -> dict[str, Any]:
 def llm_status(*, db_path=None) -> dict[str, Any]:
     """Non-raising status descriptor for the settings screen and for
     callers that want to explain *why* ingestion is unavailable without
-    triggering an exception. Never returns the key itself."""
-    model = _setting(KEY_MODEL) or _registry_model() or _default_model()
-    base_url = _setting(KEY_BASE_URL) or _default_base_url()
-    credential_id = _setting(KEY_CREDENTIAL_ID)
+    triggering an exception. Never returns the key itself.
+
+    The provider + model are read from the central registry (the ingestion
+    touchpoint's primary leg), so this reflects the multi-provider
+    configuration rather than a legacy base-URL setting.
+    """
+    provider_key = "openrouter"
+    model: Optional[str] = None
     masked_ref: Optional[str] = None
-    if credential_id:
-        try:
-            from src.vault import service as vault
-
-            for row in vault.list_credentials(db_path=db_path):
-                if str(row["credential_id"]) == str(credential_id):
-                    masked_ref = row["masked_ref"]
-                    break
-        except Exception:  # noqa: BLE001
-            masked_ref = None
-
     try:
-        _api_key, key_source, _ = _resolve_api_key(db_path=db_path)
-        configured = True
-        reason = None
-    except LLMError as exc:
-        key_source = None
-        configured = False
-        reason = str(exc).split("|", 1)[-1]
+        from src.ai_models import service as ai_models
+
+        leg = ai_models.effective_leg("ingestion_mapping", db_path=db_path)
+        primary = (leg or {}).get("primary") or {}
+        provider_key = primary.get("provider") or "openrouter"
+        model = primary.get("model")
+        row = ai_models.get_provider_row(provider_key, db_path=db_path) or {}
+        masked_ref = row.get("masked_ref")
+    except Exception:  # noqa: BLE001
+        provider_key = "openrouter"
+
+    if not model:
+        model = _setting(KEY_MODEL) or _default_model()
+
+    base_url = _setting(KEY_BASE_URL) or _default_base_url()
+    try:
+        from src.ai_models import providers as prov
+
+        base_url = prov.get_spec(provider_key).chat_url
+    except Exception:  # noqa: BLE001
+        pass
+
+    configured = False
+    key_source: Optional[str] = None
+    reason: Optional[str] = None
+    try:
+        from src.ai_models import service as ai_models
+
+        configured, key_source = ai_models.provider_key_configured(provider_key, db_path=db_path)
+        if not configured:
+            reason = f"No API key is stored for the {provider_key} provider."
+    except Exception as exc:  # noqa: BLE001
+        reason = str(exc)
 
     return {
         "configured": configured,
         "model": model,
+        "provider": provider_key,
         "base_url": base_url,
         "key_source": key_source,
-        "credential_id": int(credential_id) if credential_id else None,
+        "credential_id": _setting(KEY_CREDENTIAL_ID),
         "masked_ref": masked_ref,
         "env_var": _api_key_env_name(),
         "reason": reason,
@@ -299,68 +338,52 @@ def set_llm_limits(
 # ---------------------------------------------------------------------------
 
 
-def _post_chat(payload: dict[str, Any], *, db_path=None) -> tuple[str, int, str]:
-    """Shared transport for every chat-completion call (text or vision).
+def _gateway_call(
+    touchpoint_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    images: Optional[list[tuple[str, bytes]]] = None,
+    model_override: Optional[str] = None,
+    db_path=None,
+) -> tuple[str, int, str]:
+    """Call a touchpoint through the AI gateway.
 
-    Resolves config, POSTs the payload, and returns
-    ``(raw_text, latency_ms, model_id)``. Raises LLMError (typed prefix)
-    on any failure. The API key is never logged, stored, or returned.
+    The gateway owns provider resolution and Primary→Fallback failover; this
+    layer no longer knows a provider URL or auth scheme. Returns
+    ``(text, latency_ms, model_id)``.
+
+    ``TouchpointUnavailableError`` is translated into the same typed-prefix
+    ``LLMError`` contract callers already handle.
     """
-    cfg = resolve_llm_config(db_path=db_path)
-    model_id = payload.get("model") or cfg["model"]
-    payload = {**payload, "model": model_id}
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        cfg["base_url"],
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {cfg['api_key']}",
-        },
-        method="POST",
-    )
+    from src.ai_models import gateway
 
-    start = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=cfg["timeout_seconds"]) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        code = e.code
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            pass
-        if code in (401, 403):
-            raise LLMError(f"auth_error|HTTP {code} {body}") from e
-        if code == 429:
-            raise LLMError(f"rate_limit|HTTP {code} {body}") from e
-        raise LLMError(f"api_error|HTTP {code} {body}") from e
-    except (TimeoutError, socket.timeout) as e:
-        raise LLMError(f"timeout|request exceeded {cfg['timeout_seconds']}s: {e}") from e
-    except (urllib.error.URLError, OSError) as e:
-        raise LLMError(f"api_error|{e.__class__.__name__}: {e}") from e
-
-    latency_ms = int((time.monotonic() - start) * 1000)
-    return raw, latency_ms, model_id
+        text, meta = gateway.call_touchpoint_text(
+            touchpoint_key, system_prompt, user_prompt,
+            images=images,
+            max_tokens=_setting_int(KEY_MAX_TOKENS, _FALLBACK_MAX_TOKENS),
+            temperature=_setting_float(KEY_TEMPERATURE, _FALLBACK_TEMPERATURE),
+            actor="system:ingestion",
+            timeout=_setting_int(KEY_TIMEOUT, _FALLBACK_TIMEOUT),
+            model_override=model_override,
+            db_path=db_path,
+        )
+    except gateway.TouchpointUnavailableError as exc:
+        raise LLMError(exc.typed or f"config_error|{exc}") from exc
+    return text, int(meta.get("latency_ms") or 0), str(meta.get("model") or "")
 
 
 def call_llm(
-    system_prompt: str, user_prompt: str, *, db_path=None, model_override: Optional[str] = None,
+    system_prompt: str, user_prompt: str, *, db_path=None,
+    model_override: Optional[str] = None, touchpoint_key: str = "ingestion_mapping",
 ) -> tuple[str, int, str]:
     """Call the configured model with a plain-text prompt. Returns
     (raw_text, latency_ms, model_id)."""
-    cfg = resolve_llm_config(db_path=db_path)
-    payload = {
-        "model": model_override or cfg["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": cfg["max_tokens"],
-        "temperature": cfg["temperature"],
-    }
-    return _post_chat(payload, db_path=db_path)
+    return _gateway_call(
+        touchpoint_key, system_prompt, user_prompt,
+        model_override=model_override, db_path=db_path,
+    )
 
 
 def call_llm_vision(
@@ -370,38 +393,22 @@ def call_llm_vision(
     *,
     db_path=None,
     model_override: Optional[str] = None,
+    touchpoint_key: str = "ingestion_mapping",
 ) -> tuple[str, int, str]:
     """Call a VISION-capable model with one or more images attached.
 
-    ``images`` is a list of ``(mime_type, raw_bytes)`` — e.g.
-    ``("image/png", png_bytes)``. Each image is sent as an OpenRouter
-    ``image_url`` content part with a base64 data URI, which is the
-    provider-agnostic shape every vision model on OpenRouter accepts.
+    ``images`` is a list of ``(mime_type, raw_bytes)``. The gateway translates
+    the images into whatever shape the resolved provider accepts, so callers
+    never build a provider-specific payload.
 
     Returns (raw_text, latency_ms, model_id). Raises LLMError on failure.
     """
     if not images:
         raise LLMError("config_error|call_llm_vision requires at least one image.")
-
-    cfg = resolve_llm_config(db_path=db_path)
-    content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
-    for mime, raw in images:
-        b64 = base64.b64encode(raw).decode("ascii")
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64}"},
-        })
-
-    payload = {
-        "model": model_override or cfg["model"],
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content},
-        ],
-        "max_tokens": cfg["max_tokens"],
-        "temperature": cfg["temperature"],
-    }
-    return _post_chat(payload, db_path=db_path)
+    return _gateway_call(
+        touchpoint_key, system_prompt, user_prompt, images=images,
+        model_override=model_override, db_path=db_path,
+    )
 
 
 def call_llm_vision_json(
@@ -411,12 +418,13 @@ def call_llm_vision_json(
     *,
     db_path=None,
     model_override: Optional[str] = None,
+    touchpoint_key: str = "ingestion_mapping",
 ) -> tuple[dict[str, Any], int, str, str]:
     """Vision call + JSON parse. Returns (parsed, latency_ms, model_id, raw)."""
-    raw, latency_ms, model_id = call_llm_vision(
-        system_prompt, user_prompt, images, db_path=db_path, model_override=model_override
+    content, latency_ms, model_id = call_llm_vision(
+        system_prompt, user_prompt, images, db_path=db_path,
+        model_override=model_override, touchpoint_key=touchpoint_key,
     )
-    content = _extract_message_content(raw)
     parsed = parse_json_response(content)
     return parsed, latency_ms, model_id, content
 
@@ -492,7 +500,8 @@ def _extract_message_content(raw: str) -> str:
 
 
 def call_llm_json(
-    system_prompt: str, user_prompt: str, *, db_path=None, model_override: Optional[str] = None,
+    system_prompt: str, user_prompt: str, *, db_path=None,
+    model_override: Optional[str] = None, touchpoint_key: str = "ingestion_mapping",
 ) -> tuple[dict[str, Any], int, str, str]:
     """Call the model and parse its JSON reply.
 
@@ -500,8 +509,8 @@ def call_llm_json(
     LLMError on transport, envelope, or JSON-parse failure.
     """
     raw, latency_ms, model_id = call_llm(
-        system_prompt, user_prompt, db_path=db_path, model_override=model_override
+        system_prompt, user_prompt, db_path=db_path,
+        model_override=model_override, touchpoint_key=touchpoint_key,
     )
-    content = _extract_message_content(raw)
-    parsed = parse_json_response(content)
-    return parsed, latency_ms, model_id, content
+    parsed = parse_json_response(raw)
+    return parsed, latency_ms, model_id, raw

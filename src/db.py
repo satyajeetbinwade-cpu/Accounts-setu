@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS ai_analysis (
     classification    TEXT    NOT NULL,
     difference_type   TEXT,
     model_used        TEXT    NOT NULL,
+    provider_used     TEXT,               -- the provider that resolved the call (multi-provider)
     routing_reason    TEXT    NOT NULL,
     status            TEXT    NOT NULL,   -- 'success' | 'failed'
     issue_summary     TEXT,
@@ -152,6 +153,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("difference", "itc_at_risk", "gross_value"):
         if col not in result_cols:
             conn.execute(f"ALTER TABLE match_results ADD COLUMN {col} REAL")
+    conn.commit()
+
+    # AI attribution: which provider resolved the call (multi-provider). The
+    # model id alone no longer implies the provider once Anthropic/Deepseek/
+    # Sarvam can be selected directly.
+    analysis_cols = {row[1] for row in conn.execute("PRAGMA table_info(ai_analysis)")}
+    if "provider_used" not in analysis_cols:
+        conn.execute("ALTER TABLE ai_analysis ADD COLUMN provider_used TEXT")
     conn.commit()
 
 

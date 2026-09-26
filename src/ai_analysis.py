@@ -353,69 +353,32 @@ def _get_api_key(config: dict[str, Any]) -> str:
 def call_openrouter(
     system_prompt: str,
     user_prompt: str,
-    model_id: str,
     config: dict[str, Any],
-) -> tuple[str, int]:
-    """Call OpenRouter. Returns (raw_text, latency_ms).
+) -> tuple[str, int, dict[str, Any]]:
+    """Call the reconciliation-explanation touchpoint through the AI gateway.
+
+    The gateway owns provider resolution and Primary→Fallback failover, so
+    this layer no longer knows a provider URL or auth scheme (despite the
+    legacy name). Returns ``(raw_text, latency_ms, meta)`` where meta carries
+    the resolved provider + model for attribution.
 
     Raises AIAnalysisError with an error "type" embedded in .args[0] so the
-    caller can classify it by error_type. We do not use a third-party HTTP
-    client (requests is not a dependency of this PoC); urllib keeps the stack
-    locked.
+    caller can classify it by error_type.
     """
-    api_key = _get_api_key(config)
-    orc = config["openrouter"]
-    base_url = orc["base_url"]
-    timeout = int(orc.get("timeout_seconds", 120))
+    from src.ai_models import gateway
 
-    payload = {
-        "model": model_id,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": int(orc.get("max_tokens", 1500)),
-        "temperature": float(orc.get("temperature", 0.1)),
-    }
-    data = json.dumps(payload).encode("utf-8")
-
-    req = urllib.request.Request(
-        base_url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        method="POST",
-    )
-
-    start = time.monotonic()
+    orc = config.get("openrouter") or {}
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        latency = int((time.monotonic() - start) * 1000)
-        code = e.code
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        if code in (401, 403):
-            raise AIAnalysisError(f"auth_error|HTTP {code} {body}")
-        if code == 429:
-            raise AIAnalysisError(f"rate_limit|HTTP {code} {body}")
-        # 5xx or other transport failure
-        raise AIAnalysisError(f"api_error|HTTP {code} {body}")
-    except (TimeoutError, socket.timeout) as e:
-        latency = int((time.monotonic() - start) * 1000)
-        raise AIAnalysisError(f"timeout|request exceeded timeout: {e}")
-    except (urllib.error.URLError, OSError) as e:
-        latency = int((time.monotonic() - start) * 1000)
-        raise AIAnalysisError(f"api_error|{e.__class__.__name__}: {e}")
-
-    latency = int((time.monotonic() - start) * 1000)
-    return raw, latency
+        raw_text, meta = gateway.call_touchpoint_text(
+            "recon_explanation", system_prompt, user_prompt,
+            max_tokens=int(orc.get("max_tokens", 1500)),
+            temperature=float(orc.get("temperature", 0.1)),
+            actor="system:ai_analysis",
+            timeout=int(orc.get("timeout_seconds", 120)),
+        )
+    except gateway.TouchpointUnavailableError as exc:
+        raise AIAnalysisError(exc.typed or f"config_error|{exc}") from exc
+    return raw_text, int(meta.get("latency_ms") or 0), meta
 
 
 def _extract_json_object(text: str) -> str:
@@ -502,7 +465,7 @@ def get_cached_analysis(
     row = conn.execute(
         """
         SELECT id, run_id, result_id, fingerprint, recon_type, classification,
-               difference_type, model_used, routing_reason, status,
+               difference_type, model_used, provider_used, routing_reason, status,
                issue_summary, probable_causes, suggested_fix, reasoning,
                confidence, data_sufficient, raw_response, error_type,
                error_detail, latency_ms, created_at
@@ -517,7 +480,7 @@ def get_cached_analysis(
         return None
     cols = [
         "id", "run_id", "result_id", "fingerprint", "recon_type", "classification",
-        "difference_type", "model_used", "routing_reason", "status", "issue_summary",
+        "difference_type", "model_used", "provider_used", "routing_reason", "status", "issue_summary",
         "probable_causes", "suggested_fix", "reasoning", "confidence",
         "data_sufficient", "raw_response", "error_type", "error_detail",
         "latency_ms", "created_at",
@@ -536,11 +499,11 @@ def _insert_analysis(conn: sqlite3.Connection, rec: dict[str, Any]) -> int:
         """
         INSERT INTO ai_analysis
             (run_id, result_id, fingerprint, recon_type, classification,
-             difference_type, model_used, routing_reason, status,
+             difference_type, model_used, provider_used, routing_reason, status,
              issue_summary, probable_causes, suggested_fix, reasoning,
              confidence, data_sufficient, raw_response, error_type,
              error_detail, latency_ms, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             rec["run_id"],
@@ -550,6 +513,7 @@ def _insert_analysis(conn: sqlite3.Connection, rec: dict[str, Any]) -> int:
             rec["classification"],
             rec.get("difference_type"),
             rec["model_used"],
+            rec.get("provider_used"),
             rec["routing_reason"],
             rec["status"],
             rec.get("issue_summary"),
@@ -654,6 +618,7 @@ def analyze_result(
         "classification": classification,
         "difference_type": result.get("difference_type"),
         "model_used": model_id,
+        "provider_used": None,
         "routing_reason": routing_reason,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -678,9 +643,7 @@ def analyze_result(
     )
 
     try:
-        raw_text, latency_ms = call_openrouter(
-            system_prompt, user_prompt, model_id, config
-        )
+        raw_text, latency_ms, meta = call_openrouter(system_prompt, user_prompt, config)
     except AIAnalysisError as e:
         base_rec.update(_failure_from_exc(e))
         base_rec["latency_ms"] = None
@@ -702,6 +665,8 @@ def analyze_result(
     base_rec.update(
         {
             "status": "success",
+            "model_used": meta.get("model") or model_id,
+            "provider_used": meta.get("provider"),
             "issue_summary": parsed["issue_summary"],
             "probable_causes": json.dumps(parsed["probable_causes"]),
             "suggested_fix": parsed["suggested_fix"],
@@ -808,7 +773,7 @@ def get_latest_analysis(
     row = conn.execute(
         """
         SELECT id, run_id, result_id, fingerprint, recon_type, classification,
-               difference_type, model_used, routing_reason, status,
+               difference_type, model_used, provider_used, routing_reason, status,
                issue_summary, probable_causes, suggested_fix, reasoning,
                confidence, data_sufficient, raw_response, error_type,
                error_detail, latency_ms, created_at

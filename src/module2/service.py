@@ -212,19 +212,19 @@ def materiality_threshold_for(sub_type: str, *, client_id: Optional[int] = None,
 
 
 # ---------------------------------------------------------------------------
-# C3-ext model routing — STUBBED (C3-ext isn't built yet in this repo).
-# Same-shape swap once C3-ext ships: replace the body, keep the signature.
+# C3-ext model routing — now genuinely routed through the central AI model
+# registry (Setup → AI Models). Kept as a thin descriptor so callers that read
+# ``routing`` keep working.
 # ---------------------------------------------------------------------------
 
 
 def _route_via_c3ext(touchpoint_key: str) -> dict[str, Any]:
-    """Stub for C3-ext's model-routing table. Returns a fixed descriptor
-    noting this call was NOT genuinely routed. Never raises — routing
-    absence must degrade to "AI unavailable — proceed manually", matching
-    C3-ext's own documented degrade path."""
+    """Describe routing for a touchpoint. The provider + model are resolved at
+    call time by ``src.ai_models.gateway`` from the registry, so this is
+    informational only. Never raises."""
     return {
-        "routed": False, "touchpoint": touchpoint_key,
-        "reason": "C3-ext not yet built in this repo",
+        "routed": True, "touchpoint": touchpoint_key,
+        "reason": "Routed via the AI model registry (Setup → AI Models).",
     }
 
 
@@ -854,53 +854,104 @@ def list_change_log(*, limit: int = 200, db_path=None) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _tds_section_options(*, db_path=None) -> list[dict[str, Any]]:
+    """The TDS sections C1 knows about, so the model is constrained to a real
+    section and can never invent one."""
+    try:
+        from src.rules import service as rules
+
+        out: list[dict[str, Any]] = []
+        for r in rules.list_regulatory_rules(db_path=db_path):
+            if r.get("domain") == "TDS" and r.get("section"):
+                out.append({
+                    "section": str(r["section"]),
+                    "rate_or_rule": str(r.get("rate_or_rule") or ""),
+                })
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def classify_tds_from_narration(
     narration: str, *, client_id: Optional[int] = None, db_path=None,
 ) -> dict[str, Any]:
-    """Suggest a TDS section classification from free-text narration.
+    """Suggest a TDS section from free-text narration via the configured AI
+    touchpoint (provider + model resolved by the AI gateway, with primary →
+    fallback failover).
 
-    Returns a descriptor with the suggested section, the reasoning, and the
-    DETERMINISTIC rate looked up from C1 for that section. The model never
-    invents a rate — the rate always comes from C1's section table.
-
-    C3-ext is not built in this repo, so routing is stubbed (routing_stub=1)
-    and the classification degrades to "AI unavailable — proceed manually"
-    rather than fabricating a suggestion.
+    The rate is ALWAYS looked up deterministically from C1 — the model never
+    invents a rate. When both legs of the touchpoint are unavailable the call
+    degrades to "AI unavailable — proceed manually." rather than fabricating a
+    suggestion.
     """
     routing = _route_via_c3ext("tds_classification")
     c5_context = _c5_runtime_context("tds_classification", client_id)
 
-    # Deterministic keyword heuristic standing in for the live model call —
-    # same shape as F3-AI's mapper heuristic. Never invents a rate.
-    text = (narration or "").lower()
-    section = None
-    if any(w in text for w in ("rent", "lease", "premises")):
-        section = "194I"
-    elif any(w in text for w in ("professional", "consult", "legal", "audit")):
-        section = "194J"
-    elif any(w in text for w in ("contract", "labour", "work")):
-        section = "194C"
-    elif any(w in text for w in ("interest",)):
-        section = "194A"
-    elif any(w in text for w in ("commission", "brokerage")):
-        section = "194H"
+    def _unavailable(reason: str, meta: Optional[dict[str, Any]] = None, detail: str = "") -> dict[str, Any]:
+        return {
+            "available": False, "section": None, "rate": None, "reasoning": reason,
+            "detail": detail,
+            "routing": routing, "c5_context_used": bool(c5_context),
+            "provider": (meta or {}).get("provider"), "model": (meta or {}).get("model"),
+            "latency_ms": (meta or {}).get("latency_ms"),
+        }
+
+    text = (narration or "").strip()
+    if not text:
+        return _unavailable("No narration to classify.")
+
+    sections = _tds_section_options(db_path=db_path)
+    allowed = {s["section"] for s in sections}
+    section_lines = "\n".join(
+        f"  - {s['section']}: {s['rate_or_rule']}" for s in sections
+    ) or "  (none configured)"
+
+    system_prompt = (
+        "You are a TDS classification assistant for an Indian accounting firm. "
+        "Given a free-text narration, choose the SINGLE most likely TDS section. "
+        "You MUST choose from this list of sections configured in the platform:\n"
+        f"{section_lines}\n"
+        "Never invent a section, and NEVER state a rate — the rate is looked up "
+        "separately from the platform's regulatory table. "
+        'Respond with JSON only: {"section": "<code or null>", "confidence": <0-100>, '
+        '"reasoning": "<one or two sentences>"}.'
+    )
+    user_prompt = f"{text}\n\n{c5_context}" if c5_context else text
+
+    try:
+        from src.ai_models import gateway
+
+        parsed, meta = gateway.call_touchpoint_json(
+            "tds_classification", system_prompt, user_prompt,
+            max_tokens=400, temperature=0.0,
+            actor="system:module2", client_id=client_id, db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure degrades honestly
+        return _unavailable("AI unavailable — proceed manually.", None, detail=str(exc))
+
+    section = str(parsed.get("section") or "").strip() or None
+    if section is not None and allowed and section not in allowed:
+        # The model proposed a section C1 does not know — do not trust it.
+        section = None
+    reasoning = str(parsed.get("reasoning") or "").strip()
 
     if section is None:
-        return {
-            "available": False, "section": None, "rate": None,
-            "reasoning": "AI unavailable — proceed manually.",
-            "routing": routing, "c5_context_used": bool(c5_context),
-        }
+        return _unavailable(
+            reasoning or "AI could not determine a section — proceed manually.", meta,
+        )
 
     # Rate lookup is ALWAYS deterministic against C1's section table.
     rate = _deterministic_section_rate(section, db_path=db_path)
     return {
         "available": True, "section": section, "rate": rate,
-        "reasoning": (
+        "reasoning": reasoning or (
             f"Narration suggests section {section}. The rate shown is looked up "
             "deterministically from C1 — the model never sets a rate."
         ),
+        "confidence": parsed.get("confidence"),
         "routing": routing, "c5_context_used": bool(c5_context),
+        "provider": meta.get("provider"), "model": meta.get("model"),
+        "latency_ms": meta.get("latency_ms"),
     }
 
 

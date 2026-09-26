@@ -112,11 +112,13 @@ def set_thresholds(*, auto_apply: int, manual: int, actor: str, db_path=None) ->
 
 
 def _route_via_c3ext(touchpoint_key: str = "ingestion_mapping") -> dict[str, Any]:
-    """Stub for C3-ext's model-routing table. Returns a fixed descriptor
-    noting this call was NOT genuinely routed. Never raises — routing
-    absence must degrade to the heuristic mapper, matching C3-ext's own
-    documented "AI unavailable — proceed manually" degrade path."""
-    return {"routed": False, "touchpoint": touchpoint_key, "reason": "C3-ext not yet built in this repo"}
+    """Describe routing for the ingestion touchpoint. The provider + model are
+    resolved at call time by ``src.ai_models.gateway`` from the registry, so
+    this is informational only. Never raises."""
+    return {
+        "routed": True, "touchpoint": touchpoint_key,
+        "reason": "Routed via the AI model registry (Setup → AI Models).",
+    }
 
 
 def _c5_runtime_context(client_id: Optional[int] = None) -> str:

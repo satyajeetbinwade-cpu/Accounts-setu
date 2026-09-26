@@ -158,8 +158,8 @@ def list_touchpoints(*, db_path=None) -> list[dict[str, Any]]:
             if assignment and assignment.get("primary_model"):
                 row["primary_model"] = assignment["primary_model"]
                 row["fallback_model"] = assignment.get("fallback_model") or row["fallback_model"]
-                row["primary_provider"] = "OpenRouter"
-                row["fallback_provider"] = "OpenRouter"
+                row["primary_provider"] = assignment.get("primary_provider") or "openrouter"
+                row["fallback_provider"] = assignment.get("fallback_provider") or "openrouter"
     except Exception:  # noqa: BLE001 — registry must never break this module
         pass
     return rows

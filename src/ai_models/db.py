@@ -57,31 +57,60 @@ def upsert_assignment(
     fallback_model: Optional[str],
     is_active: bool,
     sort_order: int,
+    primary_provider: Optional[str] = "openrouter",
+    fallback_provider: Optional[str] = "openrouter",
 ) -> None:
     """Insert a touchpoint, or update its descriptive fields.
 
-    Deliberately does NOT overwrite ``primary_model``/``fallback_model`` on
-    an existing row: those are admin decisions, and a re-seed must never
-    silently revert a model an admin chose (same additive-upsert rule every
-    other seed in this build order follows). Model changes go through
-    ``set_assignment_models()``.
+    Deliberately does NOT overwrite ``primary_model``/``fallback_model`` (or
+    the provider legs, or ``is_active``) on an existing row: those are admin
+    decisions, and a re-seed must never silently revert a model an admin chose
+    or an activation an admin toggled (same additive-upsert rule every other
+    seed in this build order follows). Model/provider changes go through
+    ``set_assignment_legs()``; activation goes through ``set_assignment_active``.
     """
     conn.execute(
         """
         INSERT INTO ai_model_assignments
             (touchpoint_key, label, category, description, primary_model, fallback_model,
-             is_active, sort_order)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             primary_provider, fallback_provider, is_active, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(touchpoint_key) DO UPDATE SET
             label = excluded.label,
             category = excluded.category,
             description = excluded.description,
-            is_active = excluded.is_active,
             sort_order = excluded.sort_order
         """,
         (
             touchpoint_key, label, category, description, primary_model, fallback_model,
-            1 if is_active else 0, sort_order,
+            primary_provider, fallback_provider, 1 if is_active else 0, sort_order,
+        ),
+    )
+    conn.commit()
+
+
+def set_assignment_legs(
+    conn: sqlite3.Connection,
+    touchpoint_key: str,
+    *,
+    primary_provider: Optional[str],
+    primary_model: Optional[str],
+    fallback_provider: Optional[str],
+    fallback_model: Optional[str],
+    actor: str,
+) -> None:
+    """Set both legs (provider + model) of a touchpoint."""
+    conn.execute(
+        """
+        UPDATE ai_model_assignments
+           SET primary_provider = ?, primary_model = ?,
+               fallback_provider = ?, fallback_model = ?,
+               updated_at = ?, updated_by = ?
+         WHERE touchpoint_key = ?
+        """,
+        (
+            primary_provider, primary_model, fallback_provider, fallback_model,
+            _now(), actor, touchpoint_key,
         ),
     )
     conn.commit()
@@ -182,5 +211,193 @@ def list_change_log(conn: sqlite3.Connection, *, limit: int = 200) -> list[dict[
     return _rows_to_dicts(
         conn,
         "SELECT * FROM ai_model_change_log ORDER BY log_id DESC LIMIT ?",
+        (int(limit),),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Providers (the fixed platform-defined set)
+# ---------------------------------------------------------------------------
+
+
+def upsert_provider(
+    conn: sqlite3.Connection,
+    *,
+    provider_key: str,
+    label: str,
+    kind: str,
+    chat_url: str,
+    catalog_url: Optional[str],
+    catalog_mode: str,
+    auth_style: str,
+    static_models: Optional[str],
+    is_enabled: int = 1,
+    sort_order: int = 0,
+) -> None:
+    """Insert a provider, or refresh its transport description.
+
+    Never overwrites ``is_enabled`` (an admin toggle) or ``static_models`` (an
+    admin-maintained list) on an existing row — a re-seed must not undo either.
+    """
+    conn.execute(
+        """
+        INSERT INTO ai_providers
+            (provider_key, label, kind, chat_url, catalog_url, catalog_mode,
+             auth_style, static_models, is_enabled, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider_key) DO UPDATE SET
+            label = excluded.label,
+            kind = excluded.kind,
+            chat_url = excluded.chat_url,
+            catalog_url = excluded.catalog_url,
+            catalog_mode = excluded.catalog_mode,
+            auth_style = excluded.auth_style,
+            sort_order = excluded.sort_order
+        """,
+        (
+            provider_key, label, kind, chat_url, catalog_url, catalog_mode,
+            auth_style, static_models, 1 if is_enabled else 0, sort_order,
+        ),
+    )
+    conn.commit()
+
+
+def list_providers(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return _rows_to_dicts(conn, "SELECT * FROM ai_providers ORDER BY sort_order, provider_key")
+
+
+def get_provider(conn: sqlite3.Connection, provider_key: str) -> Optional[dict[str, Any]]:
+    return _row_to_dict(
+        conn, "SELECT * FROM ai_providers WHERE provider_key = ?", (provider_key,)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Provider credentials (a binding to a C4 vault credential id — never a secret)
+# ---------------------------------------------------------------------------
+
+
+def get_provider_credential(conn: sqlite3.Connection, provider_key: str) -> Optional[dict[str, Any]]:
+    return _row_to_dict(
+        conn, "SELECT * FROM ai_provider_credentials WHERE provider_key = ?", (provider_key,)
+    )
+
+
+def set_provider_credential(
+    conn: sqlite3.Connection,
+    provider_key: str,
+    *,
+    credential_id: Optional[int],
+    status: str,
+    status_detail: Optional[str],
+    updated_by: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO ai_provider_credentials
+            (provider_key, credential_id, status, status_detail, last_checked_at, updated_at, updated_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(provider_key) DO UPDATE SET
+            credential_id = excluded.credential_id,
+            status = excluded.status,
+            status_detail = excluded.status_detail,
+            last_checked_at = excluded.last_checked_at,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        """,
+        (provider_key, credential_id, status, status_detail, _now(), _now(), updated_by),
+    )
+    conn.commit()
+
+
+def set_provider_status(
+    conn: sqlite3.Connection, provider_key: str, *, status: str, status_detail: Optional[str],
+) -> None:
+    conn.execute(
+        "UPDATE ai_provider_credentials SET status = ?, status_detail = ?, last_checked_at = ? "
+        "WHERE provider_key = ?",
+        (status, status_detail, _now(), provider_key),
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Provider model catalogue cache
+# ---------------------------------------------------------------------------
+
+
+def list_provider_models(conn: sqlite3.Connection, provider_key: str) -> list[dict[str, Any]]:
+    return _rows_to_dicts(
+        conn,
+        "SELECT * FROM ai_provider_models WHERE provider_key = ? ORDER BY name COLLATE NOCASE",
+        (provider_key,),
+    )
+
+
+def replace_provider_models(
+    conn: sqlite3.Connection, provider_key: str, models: list[dict[str, Any]], *, source: str,
+) -> None:
+    """Replace one provider's cached catalogue wholesale (retired ids must not
+    linger — the cache is a mirror, not a history)."""
+    fetched_at = _now()
+    conn.execute("DELETE FROM ai_provider_models WHERE provider_key = ?", (provider_key,))
+    conn.executemany(
+        """
+        INSERT INTO ai_provider_models
+            (provider_key, model_id, name, context_length, prompt_price, completion_price,
+             modality, source, fetched_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                provider_key, m["model_id"], m.get("name"), m.get("context_length"),
+                m.get("prompt_price"), m.get("completion_price"), m.get("modality"),
+                source, fetched_at,
+            )
+            for m in models
+        ],
+    )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Fallback events (the source for the Recent Fallbacks panel)
+# ---------------------------------------------------------------------------
+
+
+def insert_fallback_event(
+    conn: sqlite3.Connection,
+    *,
+    touchpoint_key: str,
+    leg: str,
+    primary_provider: Optional[str],
+    primary_model: Optional[str],
+    resolved_provider: str,
+    resolved_model: str,
+    reason: Optional[str],
+    latency_ms: Optional[int],
+    actor: Optional[str],
+    client_id: Optional[int],
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO ai_fallback_events
+            (touchpoint_key, leg, primary_provider, primary_model, resolved_provider,
+             resolved_model, reason, latency_ms, actor, client_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            touchpoint_key, leg, primary_provider, primary_model, resolved_provider,
+            resolved_model, reason, latency_ms, actor, client_id, _now(),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_fallback_events(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+    return _rows_to_dicts(
+        conn,
+        "SELECT * FROM ai_fallback_events ORDER BY event_id DESC LIMIT ?",
         (int(limit),),
     )

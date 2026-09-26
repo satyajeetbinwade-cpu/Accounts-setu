@@ -86,10 +86,110 @@ CREATE TABLE IF NOT EXISTS ai_model_change_log (
     actor           TEXT    NOT NULL,
     created_at      TEXT    NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- Multi-provider extension (C3-ext v2). Fixed platform-defined provider set —
+-- Admin selects among these; registering an arbitrary fifth provider is
+-- explicitly deferred.
+-- ---------------------------------------------------------------------------
+
+-- ONE row per platform-defined provider. The transport (URL / auth style /
+-- catalogue mode) lives here and in src/ai_models/providers.py — never
+-- hardcoded in a calling module.
+CREATE TABLE IF NOT EXISTS ai_providers (
+    provider_key    TEXT    PRIMARY KEY,   -- openrouter | anthropic | deepseek | sarvam
+    label           TEXT    NOT NULL,
+    kind            TEXT    NOT NULL,      -- openai_compatible | anthropic | sarvam
+    chat_url        TEXT    NOT NULL,
+    catalog_url     TEXT,                  -- NULL when the provider has no catalogue endpoint
+    catalog_mode    TEXT    NOT NULL,      -- 'live' | 'static'
+    auth_style      TEXT    NOT NULL,      -- 'bearer' | 'x-api-key'
+    static_models   TEXT,                  -- JSON list, used when catalog_mode='static'
+    is_enabled      INTEGER NOT NULL DEFAULT 1,
+    sort_order      INTEGER NOT NULL DEFAULT 0
+);
+
+-- ONE credential binding per provider. The real secret lives in C4's vault;
+-- this table only binds a provider to a vault credential_id and caches the
+-- live connection status. Never stores a secret.
+CREATE TABLE IF NOT EXISTS ai_provider_credentials (
+    provider_key     TEXT    PRIMARY KEY,
+    credential_id    INTEGER,
+    status           TEXT    NOT NULL DEFAULT 'unconfigured',  -- live|invalid|unreachable|unconfigured
+    status_detail    TEXT,
+    last_checked_at  TEXT,
+    updated_at       TEXT,
+    updated_by       TEXT
+);
+
+-- Per-provider model catalogue cache. Live where the provider exposes a
+-- catalogue endpoint; the seeded static list where it does not. The registry
+-- degrades to this cache (never an empty dropdown) when a live pull fails.
+CREATE TABLE IF NOT EXISTS ai_provider_models (
+    provider_key      TEXT    NOT NULL,
+    model_id          TEXT    NOT NULL,
+    name              TEXT,
+    context_length    INTEGER,
+    prompt_price      REAL,
+    completion_price  REAL,
+    modality          TEXT,
+    source            TEXT    NOT NULL DEFAULT 'live',  -- live|static
+    fetched_at        TEXT,
+    PRIMARY KEY (provider_key, model_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_provider_models_provider
+    ON ai_provider_models(provider_key);
+
+-- The source for the "Recent Fallbacks" panel. Records WHICH provider the
+-- fallback actually resolved to, not merely that one occurred. Also emitted
+-- (best-effort) to C4's vault_security_events.
+CREATE TABLE IF NOT EXISTS ai_fallback_events (
+    event_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    touchpoint_key    TEXT    NOT NULL,
+    leg               TEXT    NOT NULL,   -- the leg attempted first: primary|fallback
+    primary_provider  TEXT,
+    primary_model     TEXT,
+    resolved_provider TEXT    NOT NULL,
+    resolved_model    TEXT    NOT NULL,
+    reason            TEXT,
+    latency_ms        INTEGER,
+    actor             TEXT,
+    client_id         INTEGER,
+    created_at        TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_fallback_events_created
+    ON ai_fallback_events(created_at);
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for pre-existing databases.
+
+    ``CREATE TABLE IF NOT EXISTS`` never adds a column to an existing table,
+    so the multi-provider columns on ``ai_model_assignments`` must be added
+    via PRAGMA + ALTER (the established repo pattern). Existing rows default
+    to OpenRouter — the only provider that existed before this extension.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(ai_model_assignments)")}
+    if "primary_provider" not in cols:
+        conn.execute("ALTER TABLE ai_model_assignments ADD COLUMN primary_provider TEXT")
+    if "fallback_provider" not in cols:
+        conn.execute("ALTER TABLE ai_model_assignments ADD COLUMN fallback_provider TEXT")
+    conn.execute(
+        "UPDATE ai_model_assignments SET primary_provider = 'openrouter' "
+        "WHERE primary_provider IS NULL"
+    )
+    conn.execute(
+        "UPDATE ai_model_assignments SET fallback_provider = 'openrouter' "
+        "WHERE fallback_provider IS NULL"
+    )
+    conn.commit()
 
 
 def init_ai_models_schema(conn: sqlite3.Connection) -> None:
     """Create the AI model registry tables if missing. Idempotent."""
     conn.executescript(AI_MODELS_SCHEMA)
+    _migrate(conn)
     conn.commit()

@@ -1368,6 +1368,13 @@ class ReconcileState(AuthState):
     # Filters + table
     # ------------------------------------------------------------------
     def _matches(self, item: dict) -> bool:
+        # The reviewer is "asking for Matched rows" whenever the `matched` view
+        # is active (KPI card / donut slice) OR the Matched classification chip
+        # is selected. The default Review view is the exception list, so Matched
+        # rows are otherwise hidden — but an explicit Matched request must never
+        # be swallowed by that default, or the chip would report a count yet
+        # render an empty table.
+        wants_matched = self.filter_view == "matched" or self.filter_classification == "Matched"
         if self.filter_view == "matched":
             if item["bucket"] != "Matched":
                 return False
@@ -1379,7 +1386,7 @@ class ReconcileState(AuthState):
                 return False
             if item["bucket"] == "Matched":
                 return False
-        elif self.filter_view != "reviewed" and item["bucket"] == "Matched":
+        elif self.filter_view != "reviewed" and not wants_matched and item["bucket"] == "Matched":
             # The default view is the exception list.
             return False
         if self.filter_view == "reviewed" and not item["reviewed"]:

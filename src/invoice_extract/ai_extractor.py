@@ -172,7 +172,6 @@ def extract_with_ai(
 
     path = _route(source_format, file_bytes)
     touchpoint = TOUCHPOINT_VISUAL if path == "visual" else TOUCHPOINT_STRUCTURED
-    model_override = _touchpoint_model(touchpoint, db_path=db_path)
 
     try:
         if path == "visual":
@@ -184,7 +183,7 @@ def extract_with_ai(
                 _user_prompt(filename=filename, source_format=source_format, with_bbox=True),
                 images,
                 db_path=db_path,
-                model_override=model_override,
+                touchpoint_key=touchpoint,
             )
         else:
             text = _text_for(filename, file_bytes, source_format)
@@ -192,7 +191,7 @@ def extract_with_ai(
                 _SYSTEM_PROMPT,
                 _user_prompt(filename=filename, source_format=source_format, text=text),
                 db_path=db_path,
-                model_override=model_override,
+                touchpoint_key=touchpoint,
             )
     except Exception as exc:  # noqa: BLE001 — any failure => caller falls back
         return [], path, {
