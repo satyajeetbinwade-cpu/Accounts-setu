@@ -213,6 +213,30 @@ def has_text_layer(file_bytes: bytes) -> bool:
         return _looks_like_text(_pdf_text(file_bytes))
 
 
+def can_serve_pdf_structurally(file_bytes: bytes) -> bool:
+    """Can the STRUCTURED path actually give the model this PDF's text?
+
+    ``has_text_layer()`` alone is NOT sufficient. It probes the PDF with a
+    text-aware parser (PyMuPDF), which reports a real text layer for a PDF whose
+    glyphs are stored as HEX strings — ``[<54617820496e...>]TJ`` — the encoding
+    used by MuPDF/Chrome/Word and most Type0-CID ERP & GST generators.
+    ``_pdf_text``, the reader that actually builds the structured prompt, only
+    recognises LITERAL ``(...) Tj`` strings, so for such a file it returns "".
+
+    Dispatching structured anyway sent the model an EMPTY document: every field
+    came back "not present" ("Needs review — 16 flagged") under a badge that
+    still read "AI · <model> / Structured touchpoint (text/table parsing)" —
+    the silent failure behind LST_1042.pdf.
+
+    The decision is therefore taken from the SAME text the structured call would
+    send. When that text is not recoverable the file is treated as VISUAL, so
+    the vision touchpoint reads the RENDERED PAGE instead of an empty string.
+    """
+    if not has_text_layer(file_bytes):
+        return False
+    return _looks_like_text(_pdf_text(file_bytes))
+
+
 def probe_file(filename: str, file_bytes: bytes, source_format: str) -> dict[str, Any]:
     """Cheap structural probe run BEFORE extraction, so a genuinely broken
     file is reported as an extraction FAILURE rather than silently becoming
@@ -302,12 +326,16 @@ def extract(
         text = _docx_text(file_bytes, filename)
         return _extract_from_text(text), "structured"
     if source_format == "pdf":
-        if has_text_layer(file_bytes):
+        # Only STRUCTURED when this module can actually hand the model the
+        # PDF's text; a PDF whose text is hex-encoded is unreadable here, so it
+        # goes down the visual path rather than being sent as an empty document.
+        if can_serve_pdf_structurally(file_bytes):
             return _extract_from_text(_pdf_text(file_bytes)), "structured"
-        # Image-based (scanned) PDF — no usable text layer: visual path.
-        # The raw ``_pdf_text`` output is deliberately NOT passed as signal:
-        # for a scan it is binary noise, and feeding it in could fabricate a
-        # token match. Only the filename/embedded-text signal is used.
+        # Image-based (scanned) PDF — or a text PDF whose text this reader
+        # cannot recover: visual path. The raw ``_pdf_text`` output is
+        # deliberately NOT passed as signal: for a scan it is binary noise, and
+        # feeding it in could fabricate a token match. Only the filename/
+        # embedded-text signal is used.
         signal = _visual_signal(filename, file_bytes, "")
         return _extract_from_text(signal), "visual"
     if source_format == "image":

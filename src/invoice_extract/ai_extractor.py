@@ -236,15 +236,17 @@ def extract_with_ai(
 def _route(source_format: str, file_bytes: bytes) -> str:
     """visual vs structured, matching extractor.extraction_path_for().
 
-    Classification is by ACTUAL CONTENT, never by file extension alone. For
-    a PDF that means probing whether it truly carries an extractable text
-    layer: a native-text PDF goes STRUCTURED, an image-only / scanned PDF
-    (the ``.pdf`` extension but no real text) goes VISUAL.
+    Classification is by ACTUAL CONTENT, never by file extension alone, and for
+    a PDF it is taken from the SAME text the structured call would send (see
+    ``extractor.can_serve_pdf_structurally``). A PDF with a text layer we can
+    read goes STRUCTURED; an image-only / scanned PDF — or one whose text is
+    stored in a form this reader cannot recover (e.g. hex strings) — goes
+    VISUAL, so the model reads the rendered page rather than an empty document.
     """
     if source_format == "image":
         return "visual"
     if source_format == "pdf":
-        return "structured" if extractor.has_text_layer(file_bytes) else "visual"
+        return "structured" if extractor.can_serve_pdf_structurally(file_bytes) else "visual"
     return "structured"
 
 
