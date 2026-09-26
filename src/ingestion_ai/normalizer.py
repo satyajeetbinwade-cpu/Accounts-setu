@@ -218,7 +218,12 @@ _CAPABILITY_FIELDS: dict[str, tuple[str, ...]] = {
     "match_by_invoice": ("invoice_number", "voucher_number", "challan_number"),
     "match_by_date": ("invoice_date", "deposit_date"),
     "check_taxable_value": ("taxable_value",),
-    "check_tax_amounts": ("cgst", "sgst", "igst", "cess", "total_tax"),
+    # The CGST/SGST/IGST comparison stands on its own — cess is a separate,
+    # rarely-populated head and must NOT gate it. Requiring cess here silently
+    # disabled the whole tax-component (incl. the CGST/SGST-vs-IGST split)
+    # check on any books export that simply doesn't carry a cess column.
+    "check_tax_amounts": ("cgst", "sgst", "igst", "total_tax"),
+    "check_cess": ("cess",),
     "check_rounding": ("rounding_adjustment",),
     "check_invoice_total": ("invoice_value",),
     "check_tds_amounts": ("amount_paid_credited", "tax_deducted", "tax_deposited"),
@@ -234,7 +239,8 @@ _CAPABILITY_LABELS: dict[str, str] = {
     "match_by_invoice": "Matching by invoice / voucher number",
     "match_by_date": "Date-based matching and timing checks",
     "check_taxable_value": "Taxable-value comparison",
-    "check_tax_amounts": "Tax-component comparison (CGST/SGST/IGST/Cess)",
+    "check_tax_amounts": "Tax-component comparison (CGST/SGST/IGST)",
+    "check_cess": "Cess comparison",
     "check_invoice_total": "Invoice-total comparison",
     "check_tds_amounts": "TDS amount comparison",
     "check_section": "TDS section validation",
@@ -2106,7 +2112,18 @@ def _canonical_frame_for(
     able to make. A partial report that states its own limits beats a dead end.
     """
     stored = get_stored_result(client, period, source_type, filename, db_path=db_path)
-    if stored is not None and stored.get("status") in (STATUS_OK, STATUS_PARTIAL, STATUS_BLOCKED):
+    # A GSTR-2B / IMS export has a KNOWN fixed layout parsed deterministically
+    # by the F6 bridge. Replaying a stored mapping for such a file re-derives
+    # from a SINGLE sheet and silently drops every other sheet (B2B-CDNR, …),
+    # so the deterministic parse is ALWAYS re-run for these source types — the
+    # same precedence `normalize_source_file` already gives the bridge over the
+    # shape cache.
+    replay_stored = (
+        stored is not None
+        and stored.get("status") in (STATUS_OK, STATUS_PARTIAL, STATUS_BLOCKED)
+        and not f6_bridge.supports(source_type)
+    )
+    if replay_stored:
         # A stored result written by an OLDER build may carry a mapping the
         # current code can no longer re-apply faithfully — most importantly a
         # rate-bucket aggregate stored as a display string ("A + B + C")
@@ -2382,7 +2399,13 @@ def load_canonical_pair(
     except Exception:  # noqa: BLE001
         pass
 
+    # Every SUPPLIED source is listed, not just the one picked for matching:
+    # an IMS export alongside the GSTR-2B still contributes its own coverage
+    # note, and a report that names it as a source is what makes that note's
+    # provenance unambiguous (a coverage note must never look like it came
+    # from a file the run doesn't list).
+    supplied = {str(fn) for fn in sel.values() if fn and str(fn) != "__source_key"}
     source_files = sorted(
-        {books_pick[1]} | ({portal_pick[1]} if portal_pick else set())
+        supplied | {books_pick[1]} | ({portal_pick[1]} if portal_pick else set())
     )
     return books_df, portal_df, source_files, caveats, run_notes

@@ -139,6 +139,12 @@ _DIFF_BASIS: dict[str, str] = {
     "Duplicate in Books": "invoice_value",
     "Duplicate in Portal": "invoice_value",
     "Timing Difference": "invoice_value",
+    # Multi-factor / type disagreements are measured on the full invoice value
+    # so the Difference column is Portal invoice value − Books invoice value
+    # (a BSH/515-style row must read the ₹1,180 full gap, not the ₹1,000
+    # taxable-only sub-component).
+    "Unexplained": "invoice_value",
+    "Document Type Mismatch": "invoice_value",
     "Short Deduction": "tax_deducted",
     "Excess Deduction": "tax_deducted",
 }
@@ -506,6 +512,13 @@ def classify_cause(
         return "missing_in_books"
     if c == "Not in Portal":
         return "missing_in_portal"
+
+    # A NON-amount disagreement (document type / timing) can have a nil value
+    # difference yet is not "rounding" — it is a judgement item. Without this
+    # a Document Type Mismatch whose amounts agree would be grouped under
+    # "Rounding only", which reads as dismissible.
+    if clean(difference_type) in ("Document Type Mismatch", "Timing Difference"):
+        return "value_difference"
 
     if difference is None:
         difference, _ = item_difference(c, difference_type, books, portal, recon_type)
@@ -1085,20 +1098,35 @@ def build_review_model(
     # ------------------------------------------------------------------
     # §1 — ITC AT STAKE (the headline figure)
     #
-    # The money genuinely at risk is the INPUT TAX on the invoices that never
-    # reached the books — not their gross invoice value, which is ~7x larger
-    # and not what a reviewer can reclaim or lose. Gross invoice value stays
-    # available (supplier chart, detail table) but is never a top-line number.
+    # The money genuinely at risk is the INPUT TAX across EVERY exception
+    # bucket (Not in Books + Not in Portal + Amount Difference) — not their
+    # gross invoice value, which is far larger and not what a reviewer can
+    # reclaim or lose. Gross invoice value stays available (supplier chart,
+    # detail table) but is never a top-line number.
     #
-    #   itc_at_stake_tax = SUM(tax) over records classified Not in Books
+    #   itc_at_stake_tax = SUM(tax) over ALL exception rows  ← the headline
     #   period_itc_total = SUM(tax) over every invoice in the run
     #   itc_at_stake_pct = itc_at_stake_tax / period_itc_total
+    #
+    # The headline MUST equal the sum of the "Split by cause" buckets shown on
+    # the same screen. It previously bound to the "Not in Books" bucket alone,
+    # so a run whose exposure also sat in Amount-Difference and Not-in-Portal
+    # rows printed a headline roughly 1/4 of the real total while the cause bar
+    # (and the integrity recount) read the full sum.
     # ------------------------------------------------------------------
-    not_in_books_items = [i for i in items if i["bucket"] in ("Not in Books", "Missing")]
-    itc_at_stake_tax = round(sum(i["tax"] for i in not_in_books_items), 2)
+    itc_at_stake_tax = round(sum(i["tax"] for i in exceptions), 2)
     period_itc_total = round(sum(i["tax"] for i in items), 2)
     itc_at_stake_pct = (
         round(itc_at_stake_tax / period_itc_total * 100.0, 2) if period_itc_total else 0.0
+    )
+
+    # The gross invoice value on the exception items — ONE computation shared
+    # by the KPI strip, the integrity footer and the report (which must equal
+    # the Excel's SUMIF over the invoice-value column). Each row contributes
+    # the SAME single-side invoice value the report renders (portal-first, the
+    # 2B being the ITC evidence), never a row's sub-component difference.
+    exception_gross_value = round(
+        sum((i["portal_value"] or i["books_value"]) for i in exceptions), 2
     )
     # Tax at stake per exception bucket — the KPI cards lead with these, never
     # with gross invoice value.
@@ -1188,11 +1216,11 @@ def build_review_model(
         "portal_invoice_count": sum(1 for i in items if i["portal"]),
         "reviewed_count": reviewed_count,
         "unreviewed_count": total - reviewed_count,
-        # Value-at-risk run aggregates (D6). `gross_value` is the invoice
-        # value of the Not in Books / Not in Portal items only; `itc_at_risk`
-        # is the tax genuinely at risk across every exception.
-        "gross_value": round(sum(i["gross_value"] for i in exceptions), 2),
-        "gross_value_display": format_money(sum(i["gross_value"] for i in exceptions)),
+        # Value-at-risk run aggregates (D6). `gross_value` is the gross invoice
+        # value of ALL exception items (the ONE shared computation above);
+        # `itc_at_risk` is the tax genuinely at risk across every exception.
+        "gross_value": exception_gross_value,
+        "gross_value_display": format_money(exception_gross_value),
         "itc_at_risk": round(sum(i["itc_at_risk"] for i in exceptions), 2),
         "itc_at_risk_display": format_money(sum(i["itc_at_risk"] for i in exceptions)),
         "amount_difference_count": sum(1 for i in exceptions if i["bucket"] == "Amount Difference"),
@@ -1265,4 +1293,32 @@ def build_review_model(
         "confidence_counts": confidence_counts,
         "review_counts": review_counts,
         "itc": itc,
+    }
+
+
+def headline_integrity(model: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive the headline from the exception ROWS and compare it to the
+    figure the screen actually displays.
+
+    This is a genuinely independent recount: ``recount`` sums each exception
+    row's own tax, while ``headline`` is the exact value bound into the
+    headline (`kpi["itc_at_stake_tax"]`, which also drives the Excel/HTML
+    headline). The two must agree to the paisa. The previous check compared
+    the row recount against a separate internal cause total — never against the
+    displayed headline — so a headline bound to only one bucket passed a
+    recount the display never reached.
+    """
+    items = model.get("items") or []
+    kpi = model.get("kpi") or {}
+    exceptions = [i for i in items if i.get("bucket") != "Matched"]
+    recount = round(sum(float(i.get("tax") or 0.0) for i in exceptions), 2)
+    headline = round(float(kpi.get("itc_at_stake_tax") or 0.0), 2)
+    cause_sum = round(sum(float(s.get("tax_value") or 0.0)
+                          for s in (model.get("cause_segments") or [])), 2)
+    return {
+        "headline": headline,
+        "recount": recount,
+        "cause_sum": cause_sum,
+        "exception_count": len(exceptions),
+        "ties": abs(headline - recount) < 0.05 and abs(recount - cause_sum) < 0.05,
     }

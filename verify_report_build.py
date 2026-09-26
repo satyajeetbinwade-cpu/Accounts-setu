@@ -202,7 +202,7 @@ def main() -> int:
                 return float("nan")
 
         checks = {
-            "ITC at stake (tax on Not in Books)": (k["itc_at_stake_tax"], _f("ITC at stake (tax on Not in Books)")),
+            "ITC at stake (tax on exceptions)": (k["itc_at_stake_tax"], _f("ITC at stake (tax on exceptions)")),
             "Period ITC (total tax in run)": (k["period_itc_total"], _f("Period ITC (total tax in run)")),
             "Invoices": (float(k["total_count"]), _f("Invoices")),
             "Matched": (float(k["matched_count"]), _f("Matched")),

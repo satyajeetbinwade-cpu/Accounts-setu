@@ -55,13 +55,21 @@ DIFFERENCE_TYPES = (
 # Credit-note-like document types whose values should be ITC-negative.
 _CREDIT_NOTE_TYPES = {"Credit Note"}
 
-# Credit/debit notes are a SEPARATE document class: the portal carries them on
-# its B2B-CDNR sheet (reported by the report's own Credit Notes card, never
-# reconciled as invoices). Books rows carrying one of these markers must be
+# CREDIT notes are a SEPARATE document class: the portal carries them on its
+# B2B-CDNR sheet (reported by the report's own Credit Notes card, never
+# reconciled as invoices). Books rows carrying a credit-note marker must be
 # kept OUT of the invoice-matching pool, or every one of them becomes a false
 # "Not in Portal" exception that contradicts that label.
-_NOTE_TYPES = {"Credit Note", "Debit Note"}
-_NOTE_MARKER_RE = re.compile(r"^(CN|DN)\s*[-/]", re.IGNORECASE)
+#
+# DEBIT notes are deliberately NOT excluded: a debit note (additional freight,
+# rate revision, etc.) is a genuine charge whose ITC the client claims, and the
+# portal carries its counterpart on the same B2B-CDNR sheet. Excluding the
+# books half left the portal half as a nameless "Not in Books" exception and
+# the books half unmatched — two orphan rows where the correct answer is one
+# Matched pair.
+_NOTE_TYPES = {"Credit Note"}
+_CREDIT_MARKER_RE = re.compile(r"^CN\s*[-/]", re.IGNORECASE)
+_DEBIT_MARKER_RE = re.compile(r"^DN\s*[-/]", re.IGNORECASE)
 
 # Document types routed to separate matching pools.
 _REVERSE_CHARGE_TYPES = {"Reverse Charge"}
@@ -91,18 +99,31 @@ def _validate_gstin_structure(gstin: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _has_gstin(value: Any) -> bool:
+    """Whether a record actually captured a GSTIN (blank/NaN/None/'0' = no)."""
+    s = str(value if value is not None else "").strip().upper()
+    return s not in ("", "NAN", "NONE", "NAT", "0", "0.0")
+
+
 def _gstin_structurally_invalid(gstin: str) -> bool:
-    """True only when the GSTIN is GROSSLY malformed (wrong length).
+    """True only when a GSTIN is PRESENT but GROSSLY malformed (wrong length).
 
     A 15-character GSTIN that merely fails the character pattern (e.g. a '0'
     typed for an 'O') is a single-character TYPO, not a structural defect: the
     supplier identity is still corroborated by other evidence (a fuzzy party
     name, or an exact match on both sides). Only a structurally malformed
     GSTIN — which cannot identify the supplier at all — attracts the distinct
-    deduction, so an invalid-GSTIN match no longer lands on the same score as
-    an ordinary fuzzy-name match by coincidence.
+    deduction.
+
+    An ABSENT GSTIN (blank/NaN) is not "malformed": there is nothing to
+    malform, and the missing-GSTIN fuzzy fallback already applies its own,
+    separate confidence treatment. Penalising it here would push a legitimate
+    fuzzy party match below the Medium band by coincidence.
     """
-    return len(str(gstin or "").strip().upper()) != 15
+    s = str(gstin or "").strip().upper()
+    if not _has_gstin(s):
+        return False
+    return len(s) != 15
 
 
 # ---------------------------------------------------------------------------
@@ -561,15 +582,18 @@ def preprocess_portal(
 
 
 def _books_note_type(invoice_number: Any, invoice_value: Any, taxable_value: Any) -> str | None:
-    """The credit/debit-note marker on a BOOKS row, or None for an invoice.
+    """The CREDIT-note marker on a BOOKS row, or None for an ordinary document.
 
     Two signals, either of which is enough:
-      * a CN-/DN- invoice-number prefix (a note booked with a POSITIVE value),
+      * a CN- invoice-number prefix (a credit note booked with a POSITIVE value),
       * a negative invoice value or taxable value (the sign convention).
+
+    A DN- prefix is deliberately NOT a marker: a debit note is an ordinary
+    charge and must match like any other purchase (Test Set 3 S3-F1).
     """
     s = str(invoice_number or "").strip()
-    if _NOTE_MARKER_RE.match(s):
-        return "Debit Note" if s.upper().startswith("DN") else "Credit Note"
+    if _CREDIT_MARKER_RE.match(s):
+        return "Credit Note"
     for v in (invoice_value, taxable_value):
         try:
             if float(v or 0) < 0:
@@ -580,29 +604,40 @@ def _books_note_type(invoice_number: Any, invoice_value: Any, taxable_value: Any
 
 
 def preprocess_books(books_df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
-    """Pre-process books records: add internal keys, and tag + sign-normalise
-    credit/debit notes so they can be isolated from the invoice pool."""
+    """Pre-process books records: add internal keys, derive the document type,
+    and tag + sign-normalise CREDIT notes so they can be isolated from the
+    invoice pool (debit notes stay in the pool — see ``_books_note_type``)."""
     df = books_df.copy()
     df["_bid"] = range(len(df))
     df["_norm_inv"] = df["invoice_number"].apply(lambda v: _normalize_invoice_number(v, config))
     df["_trail_num"] = df["invoice_number"].apply(lambda v: _trailing_numeric_key(v, config))
     df["_fy"] = df["invoice_date"].apply(_financial_year)
 
-    # Derive document type: CN-/DN- prefix OR a negative value/amount.
+    # Document type: the books export's own column when it carries one (rare),
+    # else "Invoice" — the portal's "Regular" normalises to the same value, so
+    # an ordinary purchase agrees and only a genuine type disagreement (an SEZ
+    # supply booked as a domestic purchase) surfaces.
     df["_doc_type"] = "Invoice"
+    if "document_type" in df.columns:
+        df["_doc_type"] = df.apply(lambda r: _map_document_type(r, config or {}), axis=1)
+
     value_cols = ["taxable_value", "cgst", "sgst", "igst", "cess", "total_tax", "invoice_value"]
     for idx, row in df.iterrows():
         note_type = _books_note_type(
             row.get("invoice_number"), row.get("invoice_value"), row.get("taxable_value")
         )
-        if not note_type:
-            continue
-        df.at[idx, "_doc_type"] = note_type
-        # ITC-negative, the same convention preprocess_portal applies.
-        for col in value_cols:
-            v = float(row.get(col, 0) or 0)
-            if v > 0:
-                df.at[idx, col] = -v
+        if note_type == "Credit Note":
+            df.at[idx, "_doc_type"] = "Credit Note"
+            # ITC-negative, the same convention preprocess_portal applies.
+            for col in value_cols:
+                v = float(row.get(col, 0) or 0)
+                if v > 0:
+                    df.at[idx, col] = -v
+        elif _DEBIT_MARKER_RE.match(str(row.get("invoice_number") or "").strip()):
+            # A debit note is labelled (so it agrees with the portal's own
+            # "Debit Note" type) but stays in the pool and keeps its sign —
+            # it is a charge, not a credit-note reversal.
+            df.at[idx, "_doc_type"] = "Debit Note"
 
     df["_amendment_note"] = ""
     return df
@@ -640,11 +675,39 @@ _EXCLUDE_COLS = ["_bid", "_pid", "_norm_inv", "_trail_num", "_fy",
                  "_doc_type", "_amendment_note"]
 
 
+def _component_shares(record: pd.Series, total: float) -> dict[str, float]:
+    """Each tax component's share of a record's own total tax."""
+    if not total:
+        return {c: 0.0 for c in TAX_COMPONENTS}
+    return {c: abs(float(record.get(c, 0) or 0)) / abs(total) for c in TAX_COMPONENTS}
+
+
+def _tax_split_differs(
+    br: pd.Series, pr: pd.Series, total_tax_b: float, total_tax_p: float,
+) -> bool:
+    """True when the DISTRIBUTION of tax across CGST/SGST/IGST/Cess differs
+    materially between the two sides — e.g. the books booked an inter-state
+    supply as CGST+SGST while the portal shows IGST. Only meaningful when the
+    components genuinely disagree (a within-tolerance residual is not a split
+    difference), so a matched multi-rate invoice is never flagged."""
+    sb = _component_shares(br, total_tax_b)
+    sp = _component_shares(pr, total_tax_p)
+    return any(abs(sb[c] - sp[c]) > 0.02 for c in TAX_COMPONENTS)
+
+
 def _compare_pair(
     br: pd.Series, pr: pd.Series, config: dict,
 ) -> tuple[str, str | None, str]:
     """Compare a books-portal pair. Return (classification, difference_type,
-    detail_fragment) describing what agrees and what doesn't."""
+    detail_fragment) describing what agrees and what doesn't.
+
+    Every INDEPENDENT discrepancy is collected before a label is chosen: one
+    discrepancy keeps its specific difference_type, and two or more collapse to
+    the "Unexplained" catch-all with each issue enumerated in the reason. The
+    old first-match-wins order silently discarded the split and document-type
+    problems whenever a taxable-value difference was present (Test Set 3
+    BSH/515 carried three simultaneous issues and surfaced only one).
+    """
     tv_b = float(br.get("taxable_value", 0) or 0)
     tv_p = float(pr.get("taxable_value", 0) or 0)
     iv_b = float(br.get("invoice_value", 0) or 0)
@@ -668,76 +731,96 @@ def _compare_pair(
     doc_type_b = str(br.get("_doc_type", "Invoice"))
     doc_type_p = str(pr.get("_doc_type", "Invoice"))
     doc_agree = doc_type_b == doc_type_p
-
-    # --- Tax split mismatch (highest-value finding) ---
     total_tax_agree = _within_tolerance(total_tax_b, total_tax_p, config)
-    if total_tax_agree and not components_agree:
-        detail = (
-            f"Tax Split Mismatch: total tax agrees at {_fmt(total_tax_b)}, "
-            f"but components differ — {'; '.join(component_details)}. "
-            f"Indicates a place-of-supply difference."
-        )
-        return "Amount Difference", "Tax Split Mismatch", detail
 
-    if not doc_agree:
-        detail = (
-            f"Document Type Mismatch: books has '{doc_type_b}', portal has '{doc_type_p}'."
-        )
-        return "Amount Difference", "Document Type Mismatch", detail
-
-    if not tv_agree:
-        detail = (
-            f"Taxable Value Difference: books {_fmt(tv_b)} vs portal {_fmt(tv_p)}, "
-            f"difference {_fmt(abs(tv_b - tv_p))}."
-        )
-        return "Amount Difference", "Taxable Value Difference", detail
-
-    if not components_agree:
-        detail = (
-            f"Tax Amount Difference: {'; '.join(component_details)}."
-        )
-        return "Amount Difference", "Tax Amount Difference", detail
-
-    # Check rate mismatch — only when the two sides imply DIFFERENT rates.
-    # A blended rate across several buckets (e.g. 2.5% + 9% = 15.6%) is a
-    # legitimate multi-rate invoice, not a mismatch, when both sides agree on
-    # it. The previous code flagged any rate that wasn't a single standard
-    # slab, turning every multi-rate match into a false "Rate Mismatch".
+    # Implied rates — used to decide whether a total-tax difference is an
+    # independent tax error or merely the taxable-value difference flowing
+    # through at the same rate (RTM/158: books under-booked the bill, tax
+    # recomputed proportionately — that is ONE issue, Taxable Value Difference).
     rate_b = _effective_rate(br)
     rate_p = _effective_rate(pr)
-    if rate_b is not None and rate_p is not None:
-        if abs(rate_b - rate_p) > 0.5:
-            detail = (
-                f"Rate Mismatch: books implies {rate_b}%, portal implies {rate_p}%."
+    rates_differ = (rate_b is not None and rate_p is not None and abs(rate_b - rate_p) > 0.5)
+
+    issues: list[tuple[str, str]] = []
+
+    if not tv_agree:
+        issues.append((
+            "Taxable Value Difference",
+            f"Taxable Value Difference: books {_fmt(tv_b)} vs portal {_fmt(tv_p)}, "
+            f"difference {_fmt(abs(tv_b - tv_p))}.",
+        ))
+
+    if not total_tax_agree and rates_differ and tv_agree:
+        issues.append((
+            "Tax Amount Difference",
+            f"Tax Amount Difference: {'; '.join(component_details) or _fmt(abs(total_tax_b - total_tax_p))}.",
+        ))
+
+    if not components_agree and _tax_split_differs(br, pr, total_tax_b, total_tax_p):
+        issues.append((
+            "Tax Split Mismatch",
+            f"Tax Split Mismatch: total tax books {_fmt(total_tax_b)} vs portal "
+            f"{_fmt(total_tax_p)}, but the components are distributed differently "
+            f"— {'; '.join(component_details)}. Indicates a place-of-supply difference.",
+        ))
+
+    if not doc_agree:
+        issues.append((
+            "Document Type Mismatch",
+            f"Document Type Mismatch: books has '{doc_type_b}', portal has '{doc_type_p}'.",
+        ))
+
+    if not issues:
+        # Rate mismatch — only when the two sides imply DIFFERENT rates while
+        # every component agreed. A blended rate across several buckets
+        # (e.g. 2.5% + 9% = 15.6%) is a legitimate multi-rate invoice, not a
+        # mismatch, when both sides agree on it.
+        if rates_differ:
+            return (
+                "Amount Difference", "Rate Mismatch",
+                f"Rate Mismatch: books implies {rate_b}%, portal implies {rate_p}%.",
             )
-            return "Amount Difference", "Rate Mismatch", detail
 
-    # Check for rounding — a difference OUTSIDE the amount tolerance but
-    # inside the rounding tolerance. A difference already inside the amount
-    # tolerance is agreement, not a rounding difference; the previous code
-    # flagged every sub-rupee difference as "Rounding", turning exact matches
-    # (e.g. a ₹0.02 tax residual) into exceptions.
-    iv_diff = abs(iv_b - iv_p)
-    any_rounding = False
-    for comp in TAX_COMPONENTS + ["taxable_value"]:
-        cb = float(br.get(comp, 0) or 0)
-        cp = float(pr.get(comp, 0) or 0)
-        if not _within_tolerance(cb, cp, config) and _is_rounding(cb, cp, config):
-            any_rounding = True
+        # Rounding — a difference OUTSIDE the amount tolerance but inside the
+        # rounding tolerance. A difference already inside the amount tolerance
+        # is agreement, not a rounding difference.
+        any_rounding = False
+        for comp in TAX_COMPONENTS + ["taxable_value"]:
+            cb = float(br.get(comp, 0) or 0)
+            cp = float(pr.get(comp, 0) or 0)
+            if not _within_tolerance(cb, cp, config) and _is_rounding(cb, cp, config):
+                any_rounding = True
 
-    if any_rounding:
+        if any_rounding:
+            return (
+                "Amount Difference", "Rounding",
+                f"All values agree within rounding tolerance; "
+                f"invoice value books {_fmt(iv_b)} vs portal {_fmt(iv_p)}.",
+            )
+
+        iv_diff = abs(iv_b - iv_p)
         detail = (
-            f"All values agree within rounding tolerance; "
-            f"invoice value books {_fmt(iv_b)} vs portal {_fmt(iv_p)}."
+            f"taxable value, CGST, SGST, IGST and cess all agree"
+            f"{' within ' + _fmt(float(config['amount_tolerance']['absolute'])) if iv_diff > 0 else ''}."
         )
-        return "Amount Difference", "Rounding", detail
+        return "Matched", None, detail
 
-    # Full match
+    if len(issues) == 1:
+        diff_type, detail = issues[0]
+        return "Amount Difference", diff_type, detail
+
+    # Two or more independent discrepancies — no single sub-type explains the
+    # document, so it is the catch-all and every issue is enumerated.
+    date_fragment = ""
+    dd = _date_diff_days(br.get("invoice_date"), pr.get("invoice_date"))
+    if dd:
+        date_fragment = f" Dates differ by {dd} day(s)."
     detail = (
-        f"taxable value, CGST, SGST, IGST and cess all agree"
-        f"{' within ' + _fmt(float(config['amount_tolerance']['absolute'])) if iv_diff > 0 else ''}."
+        "Multiple discrepancies on this document — "
+        + " | ".join(d for _t, d in issues)
+        + date_fragment
     )
-    return "Matched", None, detail
+    return "Amount Difference", "Unexplained", detail
 
 
 def _core_counts(df: pd.DataFrame) -> dict[tuple[str, str], int]:
@@ -1064,6 +1147,11 @@ def _match_pool(
     # ---- Pass 4: Fuzzy party name + amount + date ----
     baseline_fz = float(baselines["fuzzy_party"])
     threshold = float(config["fuzzy_threshold"])
+    # When one side captured NO GSTIN at all there is nothing to key identity
+    # on, so the party name carries more of the signal and the bar is relaxed
+    # — but ONLY with an EXACT amount and an EXACT date, so a blank GSTIN can
+    # never turn an approximate name into a loose match on drifting figures.
+    missing_gstin_threshold = float(config.get("fuzzy_missing_gstin_threshold", threshold))
     for _, br in _unmatched_books().iterrows():
         bid = br["_bid"]
         if bid in matched_bids:
@@ -1073,6 +1161,7 @@ def _match_pool(
         name_b = str(br.get("party_name", "")).strip()
         iv_b = float(br.get("invoice_value", 0) or 0)
         date_b = br.get("invoice_date")
+        books_has_gstin = _has_gstin(gstin_b)
         if not name_b:
             continue
 
@@ -1082,18 +1171,32 @@ def _match_pool(
             if pid in matched_pids:
                 continue
             iv_p = float(pr.get("invoice_value", 0) or 0)
-            if not _within_tolerance(iv_b, iv_p, config):
-                continue
-            if not _date_within_window(date_b, pr.get("invoice_date"), config):
-                continue
+            missing_gstin = not books_has_gstin or not _has_gstin(pr.get("gstin"))
+            if missing_gstin:
+                # Blank GSTIN: amount and date must agree EXACTLY, and the
+                # party-name bar is the relaxed one.
+                if abs(iv_b - iv_p) > 0.005:
+                    continue
+                if _date_diff_days(date_b, pr.get("invoice_date")) != 0:
+                    continue
+                fz_threshold = missing_gstin_threshold
+            else:
+                if not _within_tolerance(iv_b, iv_p, config):
+                    continue
+                if not _date_within_window(date_b, pr.get("invoice_date"), config):
+                    continue
+                fz_threshold = threshold
             name_p = str(pr.get("party_name", "")).strip()
             fz_score = fuzz.token_sort_ratio(name_b.lower(), name_p.lower())
-            if fz_score < threshold:
+            if fz_score < fz_threshold:
                 continue
             prox = _proximity(abs(iv_b - iv_p), float(config["amount_tolerance"]["absolute"]))
             frag = (
                 f" via fuzzy party name match ({fz_score:.0f}%: "
-                f"'{name_b}' ↔ '{name_p}')"
+                f"'{name_b}' ↔ '{name_p}'"
+                + (", one side had no GSTIN captured, matched on exact amount and date"
+                   if missing_gstin else "")
+                + ")"
             )
             # The structural-GSTIN deduction belongs to EVERY pass, not just
             # the exact ones: a match whose GSTIN is grossly malformed is a
@@ -1293,19 +1396,34 @@ def match_gst(
     books = preprocess_books(books_df, config)
     b2b_portal, rc_portal, import_portal, summary = preprocess_portal(portal_df, config)
 
-    # Credit/debit notes are a SEPARATE document class. The portal carries them
-    # on its B2B-CDNR sheet (declared by the report's own Credit Notes card and
-    # never reconciled as invoices), so a books row carrying a note marker must
-    # be kept OUT of the invoice-matching pool — otherwise every one of them
-    # becomes a false "Not in Portal" exception that contradicts that label.
+    # CREDIT notes are a SEPARATE document class. The portal carries them on
+    # its B2B-CDNR sheet (declared by the report's own Credit Notes card and
+    # never reconciled as invoices), so a books CREDIT-note row must be kept
+    # OUT of the invoice-matching pool — otherwise every one of them becomes a
+    # false "Not in Portal" exception that contradicts that label. Debit notes
+    # stay in the pool (see `_books_note_type`).
     note_mask = books["_doc_type"].isin(_NOTE_TYPES)
     note_count = int(note_mask.sum())
     if note_count:
         print(
-            f"[GST] {note_count} books credit/debit note row(s) excluded from the "
+            f"[GST] {note_count} books credit note row(s) excluded from the "
             f"invoice-matching pool (reported separately by the Credit Notes card)."
         )
         books = books[~note_mask].copy()
+
+    # The SAME exclusion applies to the portal side. A GSTR-2B carries credit
+    # notes on its B2B-CDNR sheet; once their note number/date/value are parsed
+    # they have a usable identity, so without this they would enter the invoice
+    # pool and surface as false "Not in Books" exceptions — contradicting the
+    # Credit Notes card that already reports them. Debit notes are untouched.
+    portal_credit_mask = b2b_portal["_doc_type"].isin(_CREDIT_NOTE_TYPES)
+    portal_credit_count = int(portal_credit_mask.sum())
+    if portal_credit_count:
+        print(
+            f"[GST] {portal_credit_count} portal credit note row(s) excluded from "
+            f"the invoice-matching pool (reported separately by the Credit Notes card)."
+        )
+        b2b_portal = b2b_portal[~portal_credit_mask].copy()
 
     _print_preprocessing_summary(summary)
 

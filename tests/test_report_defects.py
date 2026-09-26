@@ -270,7 +270,10 @@ def test_xlsx_ships_cached_values(monkeypatch, tmp_path):
     }
     gross = next(v for k, v in values.items() if k.startswith("Gross invoice value"))
     assert gross == pytest.approx(12757.26, abs=0.01)
-    assert values["ITC at stake (tax on Not in Books)"] == pytest.approx(1946.02, abs=0.01)
+    # The headline is the tax across EVERY exception bucket, not the Not-in-Books
+    # bucket alone. On this fixture every exception IS Not in Books, so the value
+    # is unchanged — the point is the binding, and the label now says so.
+    assert values["ITC at stake (tax on exceptions)"] == pytest.approx(1946.02, abs=0.01)
     assert values["Invoices"] == 4
     assert values["Matched"] == 3
     # A cached-value-only reader must never see a blank KPI.

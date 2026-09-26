@@ -27,6 +27,13 @@ GST_CANONICAL_FIELDS = [
     "gstin",
     "party_name",
     "invoice_number",
+    # The portal's INVOICE TYPE for the line (GSTR-2B "Invoice Details →
+    # Invoice type": Regular / SEZ supplies with payment of tax / …). Carried
+    # through so the engine can compare it against the books document type and
+    # raise a Document Type Mismatch when the two disagree, independent of
+    # whether the amounts agree. Books exports usually carry no equivalent
+    # column, so the books side defaults to "Invoice".
+    "document_type",
     "invoice_date",
     "taxable_value",
     "cgst",

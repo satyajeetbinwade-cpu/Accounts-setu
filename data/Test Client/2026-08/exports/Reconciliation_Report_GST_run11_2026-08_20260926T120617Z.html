@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>GST Reconciliation Report — Test Client Aug 2026</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 28px;
+  background: #EEF0F2; color: #16181D;
+  /* System-font stack: the report must render identically with no network. */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-size: 13px; line-height: 1.45;
+}
+.page { max-width: 1080px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.card {
+  background: #FFFFFF; border: 1px solid #E7E9EC; border-radius: 10px;
+  padding: 16px 18px; margin-bottom: 16px;
+}
+.sub { color: #6B7280; font-size: 12px; margin: 0; }
+.muted { color: #9CA3AF; font-size: 12px; margin: 6px 0 0; }
+.headline { font-size: 34px; font-weight: 700; letter-spacing: -0.03em; line-height: 1.05; }
+.badge {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  background: #FDEBEA; color: #C0392B; font-weight: 600; font-size: 12px;
+  border: 1px solid #F6C9C5;
+}
+.kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.kpi { border: 1px solid #E7E9EC; border-radius: 9px; padding: 12px 14px; background: #FFFFFF; }
+.kpi .label { color: #6B7280; font-size: 11px; text-transform: uppercase;
+               letter-spacing: 0.05em; font-weight: 600; }
+.kpi .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+.kpi .note { color: #9CA3AF; font-size: 11px; margin-top: 2px; }
+.charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.bar-card { grid-column: 1 / -1; }
+.donut { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.legend { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+.legend li { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.legend strong { margin-left: 6px; }
+.dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { text-align: left; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em;
+      color: #6B7280; border-bottom: 1px solid #E7E9EC; padding: 7px 8px; }
+td { padding: 7px 8px; border-bottom: 1px solid #E7E9EC; vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.matched td { background: #F3FAF6; }
+tr.amount-difference td { background: #FDF4E3; }
+tr.not-in-books td { background: #FDEBEA; }
+tr.not-in-portal td { background: #EAF0FB; }
+.status { font-weight: 600; }
+.dq { border-bottom: 1px solid #E7E9EC; padding: 10px 0; }
+.dq strong { display: block; margin-bottom: 4px; }
+.dq dl { margin: 0; font-size: 12px; }
+.dq dt { font-weight: 600; color: #6B7280; display: inline-block; min-width: 108px; }
+.dq dd { display: inline; margin: 0 0 0 4px; }
+@media print {
+  body { background: #FFFFFF; padding: 0; }
+  .card { break-inside: avoid; }
+  thead { display: table-header-group; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="card">
+    <h1>GST Reconciliation Report</h1>
+    <p class="sub">
+      Test Client · Aug 2026
+      · GSTIN 07AAACP9472A1ZJ
+      · Run 11
+    </p>
+    <p class="sub">Generated 26 Sep 2026 12:06 UTC · Source files:
+      082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx, PurchaseRegister(Bill-wise) (1).xlsx</p>
+  </div>
+
+  <div class="card">
+    <div class="headline">₹1,946.02</div>
+    <div><span class="label">ITC at stake (tax on exceptions)</span>
+      &nbsp;<span class="badge">1.94%</span>
+      <span class="muted">of ₹1,00,459.48 period ITC</span>
+    </div>
+    <p class="sub">4 item(s) · Run 11 ·
+      Aug 2026 GST</p>
+  </div>
+
+  <div class="card">
+    <h2>Key figures</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="label">ITC at stake (tax)</div><div class="value">₹1,946.02</div><div class="note">1.94% of period ITC</div></div>
+      <div class="kpi"><div class="label">Period ITC</div><div class="value">₹1,00,459.48</div><div class="note">total tax in this run</div></div>
+      <div class="kpi"><div class="label">Invoices</div><div class="value">39</div><div class="note">35 matched</div></div>
+      <div class="kpi"><div class="label">Exceptions</div><div class="value">4</div><div class="note">1 reviewed</div></div>
+      <div class="kpi"><div class="label">Credit notes</div><div class="value">12</div><div class="note">excluded from invoice counts</div></div>
+      <div class="kpi"><div class="label">Credit note tax</div><div class="value">₹9,840.72</div><div class="note">not reconciled this run</div></div>
+    </div>
+    <p class="muted">Gross invoice value on the exception items was
+      ₹12,757.26 — shown here for context only; it is
+      not the exposure.</p>
+  </div>
+
+  <div class="charts">
+    <div class="card">
+      <h2>Classification</h2>
+      <div class="donut"><svg viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Records"><circle cx="100" cy="100" r="70.0" fill="none" stroke="#1F7A4D" stroke-width="26.0" stroke-dasharray="394.713 45.110" stroke-dashoffset="-0.000" transform="rotate(-90 100 100)"/><circle cx="100" cy="100" r="70.0" fill="none" stroke="#C0392B" stroke-width="26.0" stroke-dasharray="45.110 394.713" stroke-dashoffset="-394.713" transform="rotate(-90 100 100)"/><text x="100" y="97" text-anchor="middle" font-size="12" fill="#6B7280">Records</text><text x="100" y="115" text-anchor="middle" font-size="15" font-weight="700" fill="#16181D">39</text></svg><ul class="legend"><li><span class="dot" style="background:#1F7A4D"></span>Matched<strong>35</strong></li><li><span class="dot" style="background:#C0392B"></span>Not in Books<strong>4</strong></li></ul></div>
+    </div>
+    <div class="card">
+      <h2>Input tax credit split</h2>
+      <div class="donut"><svg viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Eligible ITC"><circle cx="100" cy="100" r="70.0" fill="none" stroke="#1F7A4D" stroke-width="26.0"/><text x="100" y="97" text-anchor="middle" font-size="12" fill="#6B7280">Eligible ITC</text><text x="100" y="115" text-anchor="middle" font-size="15" font-weight="700" fill="#16181D">₹43,667.83</text></svg><ul class="legend"><li><span class="dot" style="background:#1F7A4D"></span>Eligible ITC<strong>₹43,667.83</strong></li></ul></div>
+    </div>
+    <div class="card bar-card">
+      <h2>Top suppliers by unmatched invoice value</h2>
+      <svg viewBox="0 0 320 138" width="100%" height="138" role="img" aria-label="Top suppliers by unmatched invoice value"><text x="0" y="20" font-size="11" fill="#6B7280">Jelux Solutions</text><rect x="150" y="5" width="100.0" height="22" rx="3" fill="#C0392B"/><text x="256.0" y="20" font-size="11" fill="#16181D">₹11,800.00</text><text x="0" y="52" font-size="11" fill="#6B7280">Bharti Airtel Limited</text><rect x="150" y="37" width="6.0" height="22" rx="3" fill="#C0392B"/><text x="162.0" y="52" font-size="11" fill="#16181D">₹706.82</text><text x="0" y="84" font-size="11" fill="#6B7280">ICICI BANK LIMITED</text><rect x="150" y="69" width="2.0" height="22" rx="3" fill="#C0392B"/><text x="158.0" y="84" font-size="11" fill="#16181D">₹226.84</text><text x="0" y="116" font-size="11" fill="#6B7280">central bank of india</text><rect x="150" y="101" width="2.0" height="22" rx="3" fill="#C0392B"/><text x="158.0" y="116" font-size="11" fill="#16181D">₹23.60</text></svg>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>GST invoices (39)</h2>
+    <table>
+      <thead><tr>
+        <th>Supplier</th><th>GSTIN</th><th>Invoice no.</th><th>Date</th>
+        <th class="num">Taxable value</th><th class="num">Total tax</th>
+        <th class="num">Invoice value</th><th>Classification</th>
+        <th>Status</th><th>Difference type</th><th>Confidence</th>
+      </tr></thead>
+      <tbody><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T11439</td><td>01 Aug 2026</td><td class="num">₹16,460.00</td><td class="num">₹2,962.80</td><td class="num">₹19,423.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T11451</td><td>01 Aug 2026</td><td class="num">₹22,530.00</td><td class="num">₹4,055.40</td><td class="num">₹26,585.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>ROOP LAXMI SAREES (P) LTD.</td><td>07AACCR8869H1ZU</td><td>2915</td><td>03 Aug 2026</td><td class="num">₹7,693.00</td><td class="num">₹384.64</td><td class="num">₹8,078.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>3499</td><td>03 Aug 2026</td><td class="num">₹30,475.00</td><td class="num">₹1,523.76</td><td class="num">₹31,999.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>3500</td><td>03 Aug 2026</td><td class="num">₹26,465.00</td><td class="num">₹1,323.26</td><td class="num">₹27,788.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T11579</td><td>03 Aug 2026</td><td class="num">₹25,350.00</td><td class="num">₹4,563.00</td><td class="num">₹29,913.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T12253</td><td>10 Aug 2026</td><td class="num">₹14,510.00</td><td class="num">₹2,611.80</td><td class="num">₹17,122.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T12408</td><td>11 Aug 2026</td><td class="num">₹44,590.00</td><td class="num">₹8,026.20</td><td class="num">₹52,616.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T12732</td><td>13 Aug 2026</td><td class="num">₹6,850.00</td><td class="num">₹1,233.00</td><td class="num">₹8,083.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T13053</td><td>17 Aug 2026</td><td class="num">₹14,945.00</td><td class="num">₹2,690.10</td><td class="num">₹17,635.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T13093</td><td>17 Aug 2026</td><td class="num">₹29,545.00</td><td class="num">₹1,477.30</td><td class="num">₹31,022.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T13131</td><td>17 Aug 2026</td><td class="num">₹26,965.00</td><td class="num">₹4,853.70</td><td class="num">₹31,819.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T13502</td><td>19 Aug 2026</td><td class="num">₹13,990.00</td><td class="num">₹2,518.20</td><td class="num">₹16,508.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>MONA FASHION</td><td>07APLPT8045C1ZN</td><td>1913</td><td>21 Aug 2026</td><td class="num">₹25,431.00</td><td class="num">₹1,271.56</td><td class="num">₹26,703.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>POOJA DESIGNERS PVT. LTD.</td><td>07AAGCP9332D1ZG</td><td>3386</td><td>22 Aug 2026</td><td class="num">₹25,748.00</td><td class="num">₹1,287.42</td><td class="num">₹27,035.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>ROOP LAXMI SAREES (P) LTD.</td><td>07AACCR8869H1ZU</td><td>3524</td><td>22 Aug 2026</td><td class="num">₹35,850.00</td><td class="num">₹1,792.60</td><td class="num">₹37,643.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T13985</td><td>22 Aug 2026</td><td class="num">₹23,340.00</td><td class="num">₹4,201.20</td><td class="num">₹27,541.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T14127</td><td>22 Aug 2026</td><td class="num">₹24,390.00</td><td class="num">₹4,390.20</td><td class="num">₹28,780.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>4284</td><td>24 Aug 2026</td><td class="num">₹33,670.00</td><td class="num">₹3,243.50</td><td class="num">₹36,914.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SWAASTIK TRADING COMPANY</td><td>24DCNPB1786A1ZX</td><td>7953</td><td>24 Aug 2026</td><td class="num">₹22,090.00</td><td class="num">₹3,976.20</td><td class="num">₹26,066.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SWAASTIK TRADING COMPANY</td><td>24DCNPB1786A1ZX</td><td>7955</td><td>24 Aug 2026</td><td class="num">₹4,570.00</td><td class="num">₹228.50</td><td class="num">₹4,799.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T14305</td><td>24 Aug 2026</td><td class="num">₹13,450.00</td><td class="num">₹2,421.00</td><td class="num">₹15,871.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T14374</td><td>24 Aug 2026</td><td class="num">₹8,765.00</td><td class="num">₹438.26</td><td class="num">₹9,203.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T14445</td><td>25 Aug 2026</td><td class="num">₹7,995.00</td><td class="num">₹1,439.10</td><td class="num">₹9,434.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>PUSHPANJALI FASHION</td><td>07APRPG2889P1ZV</td><td>65</td><td>26 Aug 2026</td><td class="num">₹20,635.00</td><td class="num">₹1,031.76</td><td class="num">₹21,667.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T14781</td><td>27 Aug 2026</td><td class="num">₹7,075.00</td><td class="num">₹1,273.50</td><td class="num">₹8,349.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>4507</td><td>29 Aug 2026</td><td class="num">₹22,545.00</td><td class="num">₹4,058.10</td><td class="num">₹26,603.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15042</td><td>29 Aug 2026</td><td class="num">₹11,160.00</td><td class="num">₹2,008.80</td><td class="num">₹13,169.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15076</td><td>29 Aug 2026</td><td class="num">₹7,075.00</td><td class="num">₹1,273.50</td><td class="num">₹8,349.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15093</td><td>29 Aug 2026</td><td class="num">₹17,355.00</td><td class="num">₹3,123.90</td><td class="num">₹20,479.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15145</td><td>31 Aug 2026</td><td class="num">₹18,985.00</td><td class="num">₹3,417.30</td><td class="num">₹22,402.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15157</td><td>31 Aug 2026</td><td class="num">₹17,600.00</td><td class="num">₹3,168.00</td><td class="num">₹20,768.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15158</td><td>31 Aug 2026</td><td class="num">₹32,685.00</td><td class="num">₹5,099.40</td><td class="num">₹37,784.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15176</td><td>31 Aug 2026</td><td class="num">₹23,485.00</td><td class="num">₹4,227.30</td><td class="num">₹27,712.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="matched"><td>SURAJ BHAN SUNIL KUMAR &amp;CO.</td><td>07AAXFS9006M1ZC</td><td>T15254</td><td>31 Aug 2026</td><td class="num">₹38,440.00</td><td class="num">₹6,919.20</td><td class="num">₹45,359.00</td><td>Matched</td><td class="status">Not reviewed</td><td>—</td><td>High — 98%</td></tr><tr class="not-in-books"><td>Bharti Airtel Limited</td><td>07AAACB2894G1ZP</td><td>HF2707I005456843</td><td>06 Aug 2026</td><td class="num">₹599.00</td><td class="num">₹107.82</td><td class="num">₹706.82</td><td>Not in Books</td><td class="status">Reviewed</td><td>—</td><td>Low — 0%</td></tr><tr class="not-in-books"><td>central bank of india</td><td>07AAACC2498P1Z5</td><td>27071C0000155202</td><td>31 Aug 2026</td><td class="num">₹20.00</td><td class="num">₹3.60</td><td class="num">₹23.60</td><td>Not in Books</td><td class="status">Not reviewed</td><td>—</td><td>Low — 0%</td></tr><tr class="not-in-books"><td>ICICI BANK LIMITED</td><td>27AAACI1195H3ZK</td><td>7406PC6080067461</td><td>31 Aug 2026</td><td class="num">₹192.24</td><td class="num">₹34.60</td><td class="num">₹226.84</td><td>Not in Books</td><td class="status">Not reviewed</td><td>—</td><td>Low — 0%</td></tr><tr class="not-in-books"><td>Jelux Solutions</td><td>06AAVFJ3532D1ZD</td><td>27</td><td>01 Aug 2026</td><td class="num">₹10,000.00</td><td class="num">₹1,800.00</td><td class="num">₹11,800.00</td><td>Not in Books</td><td class="status">Not reviewed</td><td>—</td><td>Low — 0%</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Credit notes (12)</h2>
+    <p class="sub">Held separately from the invoice reconciliation and represented
+      for completeness only.</p>
+    <table>
+      <thead><tr>
+        <th>Supplier</th><th>GSTIN</th><th>Note no.</th><th>Type</th><th>Date</th>
+        <th class="num">Taxable value</th><th class="num">Total tax</th>
+        <th class="num">Note value</th>
+      </tr></thead>
+      <tbody><tr><td>ROOPLAXMI SAREES PRIVATE LIMITED</td><td>07AACCR8869H1ZU</td><td>CDN/465/26-27</td><td>Credit Note</td><td>16 Aug 2026</td><td class="num">₹361.00</td><td class="num">₹64.98</td><td class="num">₹426.00</td></tr><tr><td>ROOPLAXMI SAREES PRIVATE LIMITED</td><td>07AACCR8869H1ZU</td><td>CDN/501/26-27</td><td>Credit Note</td><td>29 Aug 2026</td><td class="num">₹1,193.00</td><td class="num">₹157.28</td><td class="num">₹1,350.00</td></tr><tr><td>ROOPLAXMI SAREES PRIVATE LIMITED</td><td>07AACCR8869H1ZU</td><td>CN/1026/26-27</td><td>Credit Note</td><td>08 Aug 2026</td><td class="num">₹6,650.00</td><td class="num">₹1,197.00</td><td class="num">₹7,847.00</td></tr><tr><td>ROOPLAXMI SAREES PRIVATE LIMITED</td><td>07AACCR8869H1ZU</td><td>CN/1077/26-27</td><td>Credit Note</td><td>16 Aug 2026</td><td class="num">₹8,953.00</td><td class="num">₹447.64</td><td class="num">₹9,401.00</td></tr><tr><td>ROOPLAXMI SAREES PRIVATE LIMITED</td><td>07AACCR8869H1ZU</td><td>CN/1160/26-27</td><td>Credit Note</td><td>27 Aug 2026</td><td class="num">₹11,890.00</td><td class="num">₹2,140.20</td><td class="num">₹14,030.00</td></tr><tr><td>Suraj Bhan Sunil Kumar And Co</td><td>07AAXFS9006M1ZC</td><td>CD-248/08-2026</td><td>Credit Note</td><td>22 Aug 2026</td><td class="num">₹3,444.50</td><td class="num">₹365.50</td><td class="num">₹3,810.00</td></tr><tr><td>Suraj Bhan Sunil Kumar And Co</td><td>07AAXFS9006M1ZC</td><td>CD-400/08-2026</td><td>Credit Note</td><td>31 Aug 2026</td><td class="num">₹3,577.26</td><td class="num">₹571.74</td><td class="num">₹4,149.00</td></tr><tr><td>Suraj Bhan Sunil Kumar And Co</td><td>07AAXFS9006M1ZC</td><td>SRI-2538/26-27</td><td>Credit Note</td><td>21 Aug 2026</td><td class="num">₹1,660.00</td><td class="num">₹83.00</td><td class="num">₹1,743.00</td></tr><tr><td>Suraj Bhan Sunil Kumar And Co</td><td>07AAXFS9006M1ZC</td><td>SRI-2703/26-27</td><td>Credit Note</td><td>31 Aug 2026</td><td class="num">₹18,930.00</td><td class="num">₹3,407.40</td><td class="num">₹22,337.00</td></tr><tr><td>PUSHPANJALI FASHIONS</td><td>07APRPG2889P1ZV</td><td>14</td><td>Credit Note</td><td>27 Aug 2026</td><td class="num">₹4,510.00</td><td class="num">₹225.50</td><td class="num">₹4,736.00</td></tr><tr><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>JSISC26-27-01210</td><td>Credit Note</td><td>03 Aug 2026</td><td class="num">₹6,100.00</td><td class="num">₹1,098.00</td><td class="num">₹7,198.00</td></tr><tr><td>JAGDISH AND SONS INDIA LLP</td><td>07AAMFJ9163F1Z1</td><td>JSSC-00557/26-27</td><td>Credit Note</td><td>20 Aug 2026</td><td class="num">₹1,649.52</td><td class="num">₹82.48</td><td class="num">₹1,732.00</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Data quality &amp; scope notes</h2>
+    <div class="dq"><strong>Rounding adjustments on 31 invoice(s)</strong><dl><dt>What</dt><dd>31 source rows carry a non-zero rounding/round-off residual. The engine keeps it out of the taxable and tax totals and folds it into the invoice value.</dd><br/><dt>Why it matters</dt><dd>Rounding residuals are normal in Indian invoices but a persistent pattern can hide a mapping offset.</dd><br/><dt>How to fix</dt><dd>No action needed unless the residuals are large or one-sided; if so, check the &#x27;Other Amt.&#x27; column mapping.</dd></dl></div><div class="dq"><strong>TDS is not reconciled in this run</strong><dl><dt>What</dt><dd>This run reconciled GST only. No Form 26AS or TDS return was part of it.</dd><br/><dt>Why it matters</dt><dd>Deduction, deposit and 26AS reflection cannot be checked without those files, so any TDS position is unverified.</dd><br/><dt>How to fix</dt><dd>Upload the Form 26AS and TDS source files and run a TDS reconciliation.</dd></dl></div><div class="dq"><strong>4 record(s) have no books side</strong><dl><dt>What</dt><dd>These were seen only on the portal, so no books value could be compared.</dd><br/><dt>Why it matters</dt><dd>They widen the difference without a counterpart amount to net against.</dd><br/><dt>How to fix</dt><dd>Confirm whether they are booked under another ledger or genuinely missing.</dd></dl></div><div class="dq"><strong>Tax-component comparison (CGST/SGST/IGST/Cess)</strong><dl><dt>What</dt><dd>Tax-component comparison (CGST/SGST/IGST/Cess) — not available (cess not mapped), so this check is skipped.</dd><br/><dt>Why it matters</dt><dd>Without this check the report can only state the limitation, not a conclusion.</dd><br/><dt>How to fix</dt><dd>Provide the missing column/file and re-run the reconciliation.</dd></dl></div><div class="dq"><strong>12 credit note(s) in the portal file were not reconciled</strong><dl><dt>What</dt><dd>The portal file carries 12 credit note(s) (B2B-CDNR). No books-side debit/credit-note register was uploaded, and credit-note matching is not part of this reconciliation, so they were left out entirely rather than silently dropped.</dd><br/><dt>Why it matters</dt><dd>A reconciliation that silently omits a class of documents would overstate its own completeness.</dd><br/><dt>How to fix</dt><dd>Upload the missing source (e.g. a books-side credit/debit-note register) and re-run if these documents need to be reconciled.</dd></dl></div><div class="dq"><strong>IMS action status covers 80 portal document(s)</strong><dl><dt>What</dt><dd>IMS statuses on the supplied export: Accepted 41, No Action Taken 27, Pending 12. IMS status is carried through as reference only — it does not drive matching in this build.</dd><br/><dt>Why it matters</dt><dd>IMS status shows what a supplier has filed and what the recipient has actioned in the portal — useful context, but it does not drive matching in this build.</dd><br/><dt>How to fix</dt><dd>No action is required for this reconciliation; review Pending / No Action items directly in the IMS portal if needed.</dd></dl></div><div class="dq"><strong>Source files used (2)</strong><dl><dt>What</dt><dd>082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx, PurchaseRegister(Bill-wise) (1).xlsx</dd><br/><dt>Why it matters</dt><dd>The report reconciles exactly these files for this period and nothing else.</dd><br/><dt>How to fix</dt><dd>Replace a file and re-run if the source changed.</dd></dl></div><div class="dq"><strong>What this report covers</strong><dl><dt>What</dt><dd>This reconciles the source files above for this period only.</dd><br/><dt>Why it matters</dt><dd>It does not perform a statutory filing and does not pull live portal data.</dd><br/><dt>How to fix</dt><dd>File the return from your filing workflow once the exceptions are decided.</dd></dl></div>
+  </div>
+
+</div>
+</body>
+</html>

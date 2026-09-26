@@ -64,8 +64,28 @@ def _find_header_row(raw: pd.DataFrame, needle: str) -> Optional[int]:
     return None
 
 
+def _note_number_column(raw: pd.DataFrame, header_row: int) -> Optional[int]:
+    """Index of the B2B-CDNR sheet's note-number column, if present.
+
+    The label sits on the CHILD header row ("Credit note/Debit note number"),
+    not the parent row the header search keys on."""
+    for row_idx in (header_row + 1, header_row):
+        if row_idx >= len(raw):
+            continue
+        cells = [str(v).strip().lower() for v in raw.iloc[row_idx]]
+        col = next((i for i, c in enumerate(cells)
+                    if "note number" in c or "credit note number" in c), None)
+        if col is not None:
+            return col
+    return None
+
+
 def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
-    """A note declaring how many portal credit notes were not reconciled."""
+    """A note declaring how many portal CREDIT notes were not reconciled.
+
+    Debit-note rows are excluded: a debit note is a genuine charge that IS
+    reconciled against the books (Test Set 3 S3-F1), so counting it here would
+    assert an omission that did not happen."""
     total = 0
     for sheet in _CREDIT_NOTE_SHEETS:
         raw = _read_sheet(path, sheet)
@@ -74,7 +94,13 @@ def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
         header_row = _find_header_row(raw, "gstin of supplier")
         if header_row is None:
             continue
-        total += len(_data_rows(raw, header_row))
+        num_col = _note_number_column(raw, header_row)
+        for _, row in _data_rows(raw, header_row).iterrows():
+            if num_col is not None:
+                number = str(row.iloc[num_col]).strip().upper()
+                if number.startswith("DN"):
+                    continue  # debit note — matched as an invoice, not omitted
+            total += 1
     if not total:
         return None
     return {

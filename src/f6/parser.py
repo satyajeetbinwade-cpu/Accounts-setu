@@ -82,8 +82,19 @@ def _apply_scalar_transform(value: Any, transform: Optional[str], date_format: s
     m = _TRANSFORM_DATE_RE.match(transform)
     if m:
         fmt = m.group(1)
+        raw = str(value).strip()
         try:
-            return pd.to_datetime(str(value).strip(), format=fmt, errors="coerce").strftime("%Y-%m-%d")
+            parsed = pd.to_datetime(raw, format=fmt, errors="coerce")
+            if pd.isna(parsed):
+                # The layout declares one separator/order but a real export
+                # may ship another ("29-09-2026" where the config says
+                # "%d/%m/%Y"). Retry day-first rather than silently dropping
+                # EVERY date in the file — only as a fallback, so a correctly
+                # formatted file is untouched.
+                parsed = pd.to_datetime(raw, dayfirst=True, errors="coerce")
+            if pd.isna(parsed):
+                return None
+            return parsed.strftime("%Y-%m-%d")
         except Exception:  # noqa: BLE001
             return None
     if transform == "yes_no_to_bool":

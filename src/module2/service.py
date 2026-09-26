@@ -649,7 +649,11 @@ def _compute_eligible_credit(
     for r in results:
         books = _load_record(r.get("books_record"))
         portal = _load_record(r.get("portal_record"))
-        tax = _tax_of(books) or _tax_of(portal)
+        # PORTAL-first, the same side the Review model and the report use for
+        # a row's tax. Reading books-first made the eligible-credit figure
+        # drift from the matched rows' portal tax by a row's books-side
+        # rounding (SG/301: books 3,241.80 vs portal 3,240.00 — a ₹1.80 gap).
+        tax = _tax_of(portal) or _tax_of(books)
         classification = r["classification"]
 
         total_itc += tax

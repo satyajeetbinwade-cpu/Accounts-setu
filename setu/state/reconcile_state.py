@@ -1331,28 +1331,35 @@ class ReconcileState(AuthState):
             except Exception:  # noqa: BLE001
                 pass
 
-        # Independent recompute — a genuinely separate code path. §1: the
-        # headline is the TAX at stake, so the recount is done in tax too.
-        items = self._model["items"]
-        exceptions = [i for i in items if i["bucket"] != "Matched"]
-        row_sum = round(sum(i["tax"] for i in exceptions), 2)
-        cause_sum = round(sum(s.get("tax_value") or 0.0 for s in self._model["cause_segments"]), 2)
+        # Independent recompute. §1: the headline is the TAX at stake, so the
+        # recount is done in tax too — and it is compared against the figure
+        # the screen DISPLAYS (the headline binding), not against an internal
+        # total the display never reaches. A headline bound to a single bucket
+        # therefore fails this check even though the cause bar is self-consistent.
+        chk = review.headline_integrity(self._model)
         rows.append(IntegrityRow(
             label="Headline ties to rows",
-            result="PASS" if abs(row_sum - cause_sum) < 0.05 else "FAIL",
-            detail=f"{len(exceptions)} row(s) recounted → {review.format_money(row_sum)}",
+            result="PASS" if chk["ties"] else "FAIL",
+            detail=(
+                f"headline {review.format_money(chk['headline'])} vs "
+                f"{chk['exception_count']} row(s) recounted → "
+                f"{review.format_money(chk['recount'])}"
+            ),
         ))
         # Gross invoice value remains a secondary, explicitly labelled figure —
-        # never the "requiring attention" number.
-        gross_row_sum = round(sum(i["difference"] for i in exceptions), 2)
-        headline_tax = round(float(self._model["kpi"]["itc_at_stake_tax"]), 2)
+        # never the "requiring attention" number. It is read from the ONE
+        # shared kpi figure (never re-derived from a row's sub-component
+        # difference), so it matches the KPI strip and the report exactly.
+        items = self._model["items"]
+        exceptions = [i for i in items if i["bucket"] != "Matched"]
+        headline_tax = chk["headline"]
         headline_gross = round(float(self._model["kpi"]["gross_value"]), 2)
         rows.append(IntegrityRow(
             label="Headline is tax, not invoice value",
             result="PASS" if headline_tax != headline_gross or headline_tax == 0 else "FAIL",
             detail=(
                 f"headline tax {review.format_money(headline_tax)} · "
-                f"gross {review.format_money(gross_row_sum)} kept as a secondary figure"
+                f"gross {review.format_money(headline_gross)} kept as a secondary figure"
             ),
         ))
         tagged = sum(1 for i in exceptions if i["cause"])

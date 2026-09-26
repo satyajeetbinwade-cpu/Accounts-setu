@@ -180,7 +180,7 @@ def main() -> int:
         if label and ws.cell(row=r, column=2).value is not None:
             kpi_rows[label] = ws.cell(row=r, column=2).value
     required = [
-        "ITC at stake (tax on Not in Books)", "Period ITC (total tax in run)",
+        "ITC at stake (tax on exceptions)", "Period ITC (total tax in run)",
         "ITC at stake % of period ITC", "Invoices", "Matched", "Exceptions",
         "Not in books", "Not in portal", "Amount difference", "Credit notes",
         "Credit note tax", "Gross invoice value on exceptions (context only)",

@@ -71,18 +71,36 @@ GSTR2B_DEFERRED_SHEETS = [
 ]
 
 
-def _gstr2b_b2b_family_rules(supplier_col: str = "gstin of supplier") -> list[dict[str, Any]]:
+def _gstr2b_b2b_family_rules(
+    supplier_col: str = "gstin of supplier", *, is_note_sheet: bool = False,
+) -> list[dict[str, Any]]:
     """Shared field_rules for B2B / B2BA / B2B-CDNR / B2B-CDNRA — all four
-    share the same row-5/6 merged-header layout (§5.1)."""
+    share the same row-5/6 merged-header layout (§5.1).
+
+    The B2B-CDNR / B2B-CDNRA sheets label the document block "Credit note/Debit
+    note details" rather than "Invoice Details", so ``is_note_sheet`` selects
+    the matching flattened labels. Without this, a CDNR row parsed with blank
+    document identity and leaked into the pool as a nameless "Not in Books"
+    exception (the debit note this test set carries).
+    """
+    number_col = ("credit note/debit note details :: note number" if is_note_sheet
+                  else "invoice details :: invoice number")
+    date_col = ("credit note/debit note details :: note date" if is_note_sheet
+                else "invoice details :: invoice date")
+    value_col = ("credit note/debit note details :: note value (₹)" if is_note_sheet
+                 else "invoice details :: invoice value(₹)")
+    type_col = ("credit note/debit note details :: note type" if is_note_sheet
+                else "invoice details :: invoice type")
     return [
         {"canonical_field": "gstin", "kind": "direct", "source_columns": [supplier_col]},
         {"canonical_field": "party_name", "kind": "direct", "source_columns": ["trade/legal name"]},
-        {"canonical_field": "invoice_number", "kind": "direct",
-         "source_columns": ["invoice details :: invoice number"]},
+        {"canonical_field": "invoice_number", "kind": "direct", "source_columns": [number_col]},
+        # The portal's own invoice/note type — carried through so a
+        # portal-vs-books document-type disagreement can be detected.
+        {"canonical_field": "document_type", "kind": "direct", "source_columns": [type_col]},
         {"canonical_field": "invoice_date", "kind": "derived",
-         "source_columns": ["invoice details :: invoice date"], "transform": "parse_date:%d/%m/%Y"},
-        {"canonical_field": "invoice_value", "kind": "direct",
-         "source_columns": ["invoice details :: invoice value(₹)"]},
+         "source_columns": [date_col], "transform": "parse_date:%d/%m/%Y"},
+        {"canonical_field": "invoice_value", "kind": "direct", "source_columns": [value_col]},
         {"canonical_field": "taxable_value", "kind": "direct", "source_columns": ["taxable value (₹)"]},
         {"canonical_field": "igst", "kind": "direct", "source_columns": ["tax amount :: integrated tax(₹)"]},
         {"canonical_field": "cgst", "kind": "direct", "source_columns": ["tax amount :: central tax(₹)"]},
@@ -104,12 +122,13 @@ def gstr2b_config() -> dict[str, Any]:
     specimen confirms the parse config."""
     sheets: dict[str, Any] = {}
     for sheet_key in ("b2b", "b2ba", "b2b-cdnr", "b2b-cdnra"):
+        is_note = sheet_key in ("b2b-cdnr", "b2b-cdnra")
         sheets[sheet_key] = {
             "role": "line_items",
             "header": {"type": "pair", "rows": [4, 5]},
             "data_start_row": 6,
             "row_exclusion": {"trailing_blank": True},
-            "field_rules": _gstr2b_b2b_family_rules(),
+            "field_rules": _gstr2b_b2b_family_rules(is_note_sheet=is_note),
         }
     # Deferred sheets: recognised, never parsed. Includes the ITC summary
     # sheets AND the "(Rejected)"/"(ITC Reversal)" variants (§5.1).

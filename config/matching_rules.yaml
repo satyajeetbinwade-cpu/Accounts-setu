@@ -32,6 +32,14 @@ gst:
   # 0-100 score. Higher = stricter. Only used with amount + date constraints.
   fuzzy_threshold: 85
 
+  # Relaxed fuzzy-name bar used ONLY when ONE side's GSTIN is blank/absent —
+  # there is nothing to key the identity on, so the party name carries more of
+  # the signal (an abbreviated trade name like "Om Fashion" vs the portal's
+  # "Om Fashion Hub" scores ~83 and would otherwise be left as two orphans).
+  # The amount and date must still agree EXACTLY, so a blank GSTIN can never
+  # turn an approximate name into a loose match on drifting figures.
+  fuzzy_missing_gstin_threshold: 80
+
   # --- Ambiguity handling ---
   # When the top two candidates' confidence scores are within this margin,
   # force the result to Low confidence.
@@ -80,11 +88,23 @@ gst:
   # --- Document type mappings ---
   # Maps raw document-type values (from GSTR-2B / IMS exports) to normalised
   # types. Values not in this map are classified as "Other".
+  # Maps the INVOICE-TYPE value a portal export carries on each line (GSTR-2B's
+  # "Invoice Details → Invoice type" column) onto the normalised document type
+  # the pair comparison uses. "Regular" maps to "Invoice" so an ordinary
+  # domestic purchase agrees with the books side's own default (books exports
+  # carry no invoice-type column); a genuine SEZ/deemed-export classification
+  # stays distinct so a portal-vs-books disagreement surfaces as a
+  # Document Type Mismatch even when every amount agrees.
   document_type_map:
     gstr2b:
       "Invoices": "Invoice"
       "Invoice": "Invoice"
       "B2B": "Invoice"
+      "Regular": "Invoice"
+      "SEZ supplies with payment of tax": "SEZ"
+      "SEZ supplies without payment of tax": "SEZ"
+      "Deemed exports": "Deemed Export"
+      "Deemed Exports": "Deemed Export"
       "Credit Notes": "Credit Note"
       "Credit Note": "Credit Note"
       "CDN": "Credit Note"

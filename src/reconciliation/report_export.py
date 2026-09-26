@@ -121,11 +121,18 @@ def _credit_notes_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
 
     notes: list[dict[str, Any]] = []
     for _, r in rows.iterrows():
+        reference = review.clean(r.iloc[2])
+        note_type = review.clean(r.iloc[3])
+        # A DEBIT note (also carried on B2B-CDNR) is a genuine charge that IS
+        # reconciled against the books, so it must not be listed here as an
+        # unreconciled credit note — that would double-count the same document.
+        if note_type.lower().startswith("debit") or reference.upper().startswith("DN"):
+            continue
         igst, cgst, sgst, cess = (_num(r.iloc[i]) for i in (10, 11, 12, 13))
         taxable = _num(r.iloc[9])
         note_value = _num(r.iloc[6])
         notes.append({
-            "reference": review.clean(r.iloc[2]),
+            "reference": reference,
             "party": review.clean(r.iloc[1]),
             "gstin": review.clean(r.iloc[0]),
             "note_type": review.clean(r.iloc[3]),
@@ -701,8 +708,13 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
     ws.cell(row=r, column=1, value="Key figures (live formulas)").font = bold
     r += 1
     rows: list[tuple[str, Any, Optional[str], Optional[str]]] = [
-        ("ITC at stake (tax on Not in Books)", f"=SUMIF({cls_col},\"Not in Books\",{tax_col})",
-         _MONEY_FMT, "§1 headline — tax, not gross invoice value"),
+        # §1 — the headline is the tax at stake across EVERY exception bucket
+        # (Not in Books + Not in Portal + Amount Difference), identical to the
+        # cause split and the on-screen headline. Previously this summed the
+        # Not-in-Books bucket alone, so it disagreed with the report's own
+        # headline on any run whose exposure spanned more than one bucket.
+        ("ITC at stake (tax on exceptions)", f"=SUMIF({cls_col},\"<>Matched\",{tax_col})",
+         _MONEY_FMT, "§1 headline — tax on every exception bucket, not gross invoice value"),
         ("Period ITC (total tax in run)", f"=SUM({tax_col})", _MONEY_FMT, ""),
         ("ITC at stake % of period ITC", None, "0.00%", "=B7/B8"),
         ("Invoices", f"=COUNTA({inv_count_col})", "0", ""),
