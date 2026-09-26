@@ -1188,7 +1188,10 @@ class ReconcileState(AuthState):
             card("amount_difference", "Amount difference",
                  review.format_money(k["amount_difference_tax"]),
                  k["amount_difference_count"], f"{k['amount_difference_count']} item(s)",
-                 note=(f"on {review.format_money(k['amount_difference_gross'])} invoice value"
+                 # This number is the SUM OF THE ROWS' VALUE GAPS, not an invoice
+                 # value (a Document-Type-Mismatch row contributes a nil gap but
+                 # still carries its own invoice value) — so label it as a gap.
+                 note=(f"on {review.format_money(k['amount_difference_gross'])} total value gap"
                        if k["amount_difference_gross"] else "")),
             card("not_in_books", "Not in books", review.format_money(k["not_in_books_tax"]),
                  k["not_in_books_count"], f"{k['not_in_books_count']} item(s)",

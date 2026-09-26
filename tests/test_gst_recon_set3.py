@@ -40,10 +40,12 @@ CLIENT = "Test Client"
 PERIOD = "2026-08"
 SELECTED = {"tally": BOOKS.name, "gstr2b": GSTR2B.name, "ims": IMS.name}
 
-# Count reconciliation against Set3_GroundTruth (B1 ambiguity folded to Matched,
-# exactly as the QA count table does).
-EXPECTED_TOTAL = 19
-EXPECTED_MATCHED = 13
+# Count reconciliation against Set3_GroundTruth (Run 6 QA Findings tab): the
+# debit note DN/City/07 is a NOTE, not an invoice, so it is excluded from the
+# invoice pool — 18 rows, 12 Matched, and Period ITC 67,413.60 rather than
+# 19 / 13 / 67,773.60.
+EXPECTED_TOTAL = 18
+EXPECTED_MATCHED = 12
 EXPECTED_AMOUNT_DIFF = 2
 EXPECTED_NOT_IN_BOOKS = 2
 EXPECTED_NOT_IN_PORTAL = 2
@@ -194,14 +196,36 @@ def test_cess_mapping_does_not_disable_tax_component_check(loaded):
 
 # --- Do-not-regress + Set-3 specific residuals ------------------------------
 
-def test_debit_note_is_matched_not_leaked(model):
-    """The debit note (S3-F1) is a genuine charge — it must match, and must NOT
-    appear as an orphan exception or as an unreconciled credit note."""
-    row = _by_ref(model)["DN-DN/City/07"][0]
-    assert row["classification"] == "Matched"
-    # No credit-note leak either way.
+def test_notes_are_excluded_from_the_invoice_pool(model):
+    """The debit note (S3-F1 DN/City/07) is a NOTE, not an invoice. It must not
+    appear anywhere in the invoice table — neither as a false MATCHED row (which
+    inflated Eligible/Period ITC by its own ₹360 tax) nor as an orphan exception.
+    Credit notes are excluded the same way."""
     refs = {str(i["reference"]) for i in model["items"]}
-    assert not any(r.upper().startswith("CN") for r in refs)
+    assert not any(r.upper().startswith("DN") for r in refs), refs
+    assert not any(r.upper().startswith("CN") for r in refs), refs
+    assert "DN/City/07" not in refs
+    # Excluding only the books half would have left the portal half behind as a
+    # false "Not in Books" orphan — so this run must still carry exactly the two
+    # designed Not in Books rows (SG/302 and OFH/15), not three.
+    nib = [i for i in model["items"] if i["classification"] == "Not in Books"]
+    assert sorted(str(i["reference"]) for i in nib) == ["OFH/15", "SG/302"]
+
+
+# --- Per-row 'likely cause' (Run 6 QA Finding 2) ---------------------------
+
+def test_causes_describe_each_rows_own_issue(model):
+    """BSH/515 (a genuine ₹1,180 value gap, Unexplained) is a VALUE difference —
+    not 'below materiality'. OFH/12 (Books == Portal, Document Type Mismatch)
+    gets the type-mismatch cause — not a value difference it does not have."""
+    assert _by_ref(model)["BSH/515"][0]["cause"] == "value_difference"
+    assert _by_ref(model)["BSH/515"][0]["cause_label"] == "Value difference"
+    assert _by_ref(model)["OFH/12"][0]["cause"] == "document_type_mismatch"
+    assert _by_ref(model)["OFH/12"][0]["difference"] == pytest.approx(0.0, abs=0.01)
+    # The two rows' tax stays with its own row in the cause split.
+    seg = {s["cause"]: s for s in model["cause_segments"]}
+    assert seg["value_difference"]["tax_value"] == pytest.approx(8100.0, abs=0.01)
+    assert seg["document_type_mismatch"]["tax_value"] == pytest.approx(2520.0, abs=0.01)
 
 
 def test_no_duplicate_rows_for_shared_key(model):
@@ -257,6 +281,10 @@ def test_report_headline_and_difference_type_render(data_root, db_path):
     for ref in ("BSH/515", "OFH/12"):
         r = rows[ref]
         assert round(r["taxable_value"] + r["total_tax"], 2) == r["invoice_value"], ref
-    # The debit note is reconciled as an invoice, so it is NOT in the separately
-    # reported credit-note list.
-    assert not any("DN" in str(n["reference"]).upper() for n in data["credit_notes"])
+    # The note is excluded from the invoice table, so it IS reported by the
+    # dedicated Credit Notes card — the two can never both claim it.
+    assert k["invoice_count"] == 18
+    assert len(data["credit_notes"]) == 1
+    assert any(str(n["reference"]).upper().startswith("DN") for n in data["credit_notes"])
+    # And Eligible ITC no longer carries the note's ₹360 tax.
+    assert k["period_itc_total"] == pytest.approx(67413.60, abs=0.01)

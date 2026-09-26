@@ -158,6 +158,8 @@ CAUSE_LABELS: dict[str, str] = {
     "rounding_only": "Rounding only",
     "below_materiality": "Below materiality",
     "value_difference": "Value difference",
+    "document_type_mismatch": "Document type mismatch",
+    "timing_difference": "Timing difference",
     "missing_in_books": "Not in books",
     "missing_in_portal": "Not in portal",
 }
@@ -166,6 +168,7 @@ CAUSE_LABELS: dict[str, str] = {
 CAUSE_GROUPS: dict[str, list[str]] = {
     "gap": ["likely_ingestion_gap"],
     "judgement": ["rounding_only", "below_materiality", "value_difference",
+                  "document_type_mismatch", "timing_difference",
                   "missing_in_books", "missing_in_portal"],
 }
 CAUSE_GROUP_LABELS = {
@@ -183,6 +186,8 @@ CAUSE_COLOR_ROLE: dict[str, str] = {
     "rounding_only": "neutral",
     "below_materiality": "neutral",
     "value_difference": "danger",
+    "document_type_mismatch": "ai",
+    "timing_difference": "ai",
     "missing_in_books": "danger",
     "missing_in_portal": "accent",
 }
@@ -499,8 +504,15 @@ def classify_cause(
       and the books invoice total ties to the portal within C1 tolerance. The
       signature of a GST books export that did not carry the tax split. (GST
       only — TDS records have no taxable value, so the signature cannot apply.)
+    * document_type_mismatch / timing_difference — a NON-amount disagreement.
+      It gets its own cause because its value gap is typically nil, so calling
+      it a value difference mislabels a zero-gap row (OFH/12).
     * rounding_only        — |difference| <= rounding tolerance.
-    * below_materiality    — |difference| < C1 materiality threshold.
+    * below_materiality    — a small difference the engine could NOT otherwise
+      characterise (no difference_type). A difference it HAS characterised is a
+      real value difference and is reported as one however small — otherwise a
+      genuine ₹1,180 gap (BSH/515, Unexplained) is grouped away from the rows
+      it belongs with.
     * value_difference     — any other Amount Difference.
     * missing_in_books / missing_in_portal — straight from the classification.
 
@@ -513,12 +525,14 @@ def classify_cause(
     if c == "Not in Portal":
         return "missing_in_portal"
 
-    # A NON-amount disagreement (document type / timing) can have a nil value
-    # difference yet is not "rounding" — it is a judgement item. Without this
-    # a Document Type Mismatch whose amounts agree would be grouped under
-    # "Rounding only", which reads as dismissible.
-    if clean(difference_type) in ("Document Type Mismatch", "Timing Difference"):
-        return "value_difference"
+    # A NON-AMOUNT disagreement gets its own cause. Folding it into "value
+    # difference" tagged a row whose value gap was nil as if it were a value
+    # gap, and left the genuine value gap in a different bucket.
+    dt = clean(difference_type)
+    if dt == "Document Type Mismatch":
+        return "document_type_mismatch"
+    if dt == "Timing Difference":
+        return "timing_difference"
 
     if difference is None:
         difference, _ = item_difference(c, difference_type, books, portal, recon_type)
@@ -534,7 +548,7 @@ def classify_cause(
             return "likely_ingestion_gap"
     if diff <= rounding_tolerance:
         return "rounding_only"
-    if diff < materiality:
+    if not dt and diff < materiality:
         return "below_materiality"
     return "value_difference"
 
@@ -716,8 +730,19 @@ def verdict_text(item: dict[str, Any]) -> str:
         )
     if cause == "value_difference":
         return (
-            f"Books and the portal disagree by {diff} on {party} · {inv}. The amounts are above "
-            "materiality, so this needs an accountant's judgement before filing."
+            f"Books and the portal disagree by {diff} on {party} · {inv}. This needs an "
+            "accountant's judgement before filing."
+        )
+    if cause == "document_type_mismatch":
+        return (
+            f"The amounts on {inv} from {party} agree, but the document type does not — the "
+            "supplier filed it under a different supply type from the one booked. The tax "
+            "treatment follows the portal's type, so this needs a judgement before filing."
+        )
+    if cause == "timing_difference":
+        return (
+            f"{inv} from {party} is in a different period on the two sides. This is usually a "
+            "timing difference rather than an error, but it moves the period the ITC falls in."
         )
     if cause == "missing_in_books":
         return (
@@ -752,6 +777,16 @@ _NEXT_STEPS: dict[str, dict[str, str]] = {
     },
     "below_materiality": {
         "text": "No action needed — the difference is below the materiality threshold.",
+        "badge": "Module 3",
+        "badge_text": "Corrective entry coming with Module 3",
+    },
+    "document_type_mismatch": {
+        "text": "Check the supply type filed in the portal against the voucher type in the books.",
+        "badge": "Module 3",
+        "badge_text": "Corrective entry coming with Module 3",
+    },
+    "timing_difference": {
+        "text": "Confirm the period the document belongs to before claiming the ITC.",
         "badge": "Module 3",
         "badge_text": "Corrective entry coming with Module 3",
     },

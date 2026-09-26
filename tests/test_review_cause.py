@@ -117,14 +117,44 @@ def test_rounding_just_over_boundary_not_rounding():
 # --- below_materiality -----------------------------------------------------
 
 def test_below_materiality_just_under_threshold():
+    """'Below materiality' is reserved for a small difference the engine could
+    NOT characterise (no difference_type)."""
     books = _books(taxable_value=1000.0, total_tax=180.0, invoice_value=1180.0)
     portal = _portal(taxable_value=1000.0, total_tax=180.0, invoice_value=1180.0)
     # force a difference of 9,999.99 (< 10,000 materiality, > rounding tolerance)
     cause = review.classify_cause(
-        "Amount Difference", "Tax Amount Difference", books, portal,
+        "Amount Difference", "", books, portal,
         difference=9999.99, materiality=10000.0,
     )
     assert cause == "below_materiality"
+
+
+def test_characterised_sub_materiality_difference_is_a_value_difference():
+    """A difference the engine HAS characterised (a specific difference_type) is
+    a real value difference however small — grouping it under 'below
+    materiality' hid BSH/515's genuine ₹1,180 gap (Run 6 QA Finding 2)."""
+    books = _books(taxable_value=1000.0, total_tax=180.0, invoice_value=1180.0)
+    portal = _portal(taxable_value=1000.0, total_tax=180.0, invoice_value=1180.0)
+    assert review.classify_cause(
+        "Amount Difference", "Unexplained", books, portal,
+        difference=1180.0, materiality=10000.0,
+    ) == "value_difference"
+
+
+def test_document_type_mismatch_has_its_own_cause():
+    """A NON-amount disagreement must not be tagged a value difference — the row
+    with a Document Type Mismatch has no value gap at all (OFH/12)."""
+    books = _books(taxable_value=14000.0, total_tax=2520.0, invoice_value=16520.0)
+    portal = _portal(taxable_value=14000.0, total_tax=2520.0, invoice_value=16520.0)
+    assert review.classify_cause(
+        "Amount Difference", "Document Type Mismatch", books, portal, difference=0.0,
+    ) == "document_type_mismatch"
+    assert review.classify_cause(
+        "Amount Difference", "Timing Difference", books, portal, difference=0.0,
+    ) == "timing_difference"
+    for cause in ("document_type_mismatch", "timing_difference"):
+        assert cause in review.CAUSE_LABELS
+        assert review.cause_group(cause) == "judgement"
 
 
 def test_materiality_boundary_exactly_at_threshold_is_value_difference():

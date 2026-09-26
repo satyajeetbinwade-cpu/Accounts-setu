@@ -72,6 +72,17 @@ def results(data_root):
 
 
 @pytest.fixture(scope="module")
+def db_path(tmp_path_factory):
+    """An isolated DB so a stored result from another test/run can never be
+    replayed in place of a fresh parse."""
+    from src import bootstrap
+
+    path = tmp_path_factory.mktemp("set2_db") / "poc.db"
+    bootstrap.init_all(path)
+    return path
+
+
+@pytest.fixture(scope="module")
 def model(results):
     return review.build_review_model(
         {"recon_type": "GST", "client": CLIENT, "period": PERIOD}, results
@@ -117,7 +128,25 @@ def test_duplicate_books_is_one_match_plus_one_residual(model):
     )
 
 
-# --- F2 credit-note isolation ------------------------------------------------
+def test_credit_notes_are_reported_in_the_dedicated_section(data_root, db_path):
+    """Set 2's two credit notes (SF/CN/118, RTM/CN/29) have no portal-side
+    counterpart in the invoice pool: they must stay out of the invoice table
+    AND be reported by the Credit Notes card — never one without the other."""
+    from src import runner
+    from src.reconciliation import report_export as ex
+
+    rid = runner.execute_run(
+        CLIENT, PERIOD, "GST", None, load_config(),
+        db_path=db_path, selected_files=SELECTED, actor="test",
+    )
+    data = ex.build_export_data(rid, db_path=db_path)
+    refs = {str(i["reference"]) for i in data["invoices"]}
+    assert not any(r.upper().startswith("CN") for r in refs), refs
+    assert data["kpi"]["invoice_count"] == 19
+    assert sorted(str(n["reference"]) for n in data["credit_notes"]) == [
+        "RTM/CN/29", "SF/CN/118",
+    ]
+
 
 def test_credit_notes_absent_from_invoice_pool(model):
     refs = {str(i["reference"]) for i in model["items"]}

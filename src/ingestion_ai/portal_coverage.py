@@ -81,12 +81,14 @@ def _note_number_column(raw: pd.DataFrame, header_row: int) -> Optional[int]:
 
 
 def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
-    """A note declaring how many portal CREDIT notes were not reconciled.
+    """A note declaring how many portal notes (credit AND debit) were not
+    reconciled.
 
-    Debit-note rows are excluded: a debit note is a genuine charge that IS
-    reconciled against the books (Test Set 3 S3-F1), so counting it here would
-    assert an omission that did not happen."""
+    Both kinds are carried on the B2B-CDNR sheet and both are a separate
+    document class from invoices — neither is reconciled against the books, so
+    both belong in this declaration (Test Set 3 S3-F1 DN/City/07 included)."""
     total = 0
+    debit_total = 0
     for sheet in _CREDIT_NOTE_SHEETS:
         raw = _read_sheet(path, sheet)
         if raw is None or raw.empty:
@@ -96,22 +98,22 @@ def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
             continue
         num_col = _note_number_column(raw, header_row)
         for _, row in _data_rows(raw, header_row).iterrows():
-            if num_col is not None:
-                number = str(row.iloc[num_col]).strip().upper()
-                if number.startswith("DN"):
-                    continue  # debit note — matched as an invoice, not omitted
             total += 1
+            number = str(row.iloc[num_col if num_col is not None else 2]).strip().upper()
+            if number.startswith("DN"):
+                debit_total += 1
     if not total:
         return None
+    label = "credit/debit note(s)" if debit_total else "credit note(s)"
     return {
         "code": "credit_notes_not_reconciled",
         "kind": "unreconciled_source",
-        "title": f"{total} credit note(s) in the portal file were not reconciled",
+        "title": f"{total} {label} in the portal file were not reconciled",
         "detail": (
-            f"The portal file carries {total} credit note(s) (B2B-CDNR). No books-side "
-            "debit/credit-note register was uploaded, and credit-note matching is not "
-            "part of this reconciliation, so they were left out entirely rather than "
-            "silently dropped."
+            f"The portal file carries {total} {label} (B2B-CDNR). No books-side "
+            "credit/debit-note register was uploaded, and note matching is not part "
+            "of this reconciliation, so they were kept out of the invoice table "
+            "entirely rather than silently dropped."
         ),
         "count": total,
     }

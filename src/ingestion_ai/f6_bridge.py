@@ -172,22 +172,26 @@ def parse_portal_export(
             df = df.loc[has_identity]
             warnings.append(f"{dropped} row(s) dropped — no usable GSTIN/invoice number.")
 
-    # CREDIT notes are a separate document class: the report's own Credit Notes
-    # card reads them straight from the raw file, and they are never reconciled
-    # as invoices. Drop them from the canonical frame (keeping DEBIT notes, which
-    # are ordinary charges that DO reconcile) so a re-parsed CDNR sheet can never
-    # re-introduce them into the invoice pool as false exceptions.
+    # CREDIT and DEBIT notes are a separate document class: the report's own
+    # Credit / debit notes card reads them straight from the raw file, and they
+    # are never reconciled as invoices. Drop them from the canonical frame so a
+    # re-parsed CDNR sheet can never re-introduce them into the invoice pool —
+    # as false exceptions (no counterpart) or as a false MATCHED row that
+    # inflates ITC (Test Set 3 S3-F1 DN/City/07).
     if "document_type" in df.columns:
-        cn_mask = df["document_type"].astype(str).str.strip().str.lower().isin(
-            {"credit note", "credit notes", "cdn", "cr note", "c note"}
+        note_mask = df["document_type"].astype(str).str.strip().str.lower().isin(
+            {
+                "credit note", "credit notes", "cdn", "cr note", "c note",
+                "debit note", "debit notes", "dn", "dr note", "d note",
+            }
         )
-        cn_count = int(cn_mask.sum())
-        if cn_count:
+        note_count = int(note_mask.sum())
+        if note_count:
             warnings.append(
-                f"{cn_count} credit-note row(s) excluded from the invoice frame "
+                f"{note_count} credit/debit-note row(s) excluded from the invoice frame "
                 "(reported separately by the Credit Notes card)."
             )
-            df = df.loc[~cn_mask]
+            df = df.loc[~note_mask]
 
     if df.empty:
         return None

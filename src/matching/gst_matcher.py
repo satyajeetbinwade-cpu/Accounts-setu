@@ -55,19 +55,20 @@ DIFFERENCE_TYPES = (
 # Credit-note-like document types whose values should be ITC-negative.
 _CREDIT_NOTE_TYPES = {"Credit Note"}
 
-# CREDIT notes are a SEPARATE document class: the portal carries them on its
-# B2B-CDNR sheet (reported by the report's own Credit Notes card, never
-# reconciled as invoices). Books rows carrying a credit-note marker must be
-# kept OUT of the invoice-matching pool, or every one of them becomes a false
-# "Not in Portal" exception that contradicts that label.
+# The portal carries BOTH its credit and its debit notes on the same B2B-CDNR
+# sheet, and the report's own Credit / debit notes card reads them straight
+# from that file. Both are therefore a SEPARATE document class from invoices
+# and are excluded from the invoice-matching pool on BOTH sides — books AND
+# portal — BEFORE any matching pass runs.
 #
-# DEBIT notes are deliberately NOT excluded: a debit note (additional freight,
-# rate revision, etc.) is a genuine charge whose ITC the client claims, and the
-# portal carries its counterpart on the same B2B-CDNR sheet. Excluding the
-# books half left the portal half as a nameless "Not in Books" exception and
-# the books half unmatched — two orphan rows where the correct answer is one
-# Matched pair.
-_NOTE_TYPES = {"Credit Note"}
+# Excluding only one side, or only when no counterpart is found, produced the
+# two known defects: a note with no portal counterpart became a false
+# "Not in Portal" exception, and a note that DID have a portal counterpart
+# became a false MATCHED row that inflated Eligible / Period ITC (Test Set 3
+# S3-F1 DN/City/07). A debit note is a genuine charge, but it is still a note.
+_DEBIT_NOTE_TYPES = {"Debit Note"}
+# Note document types removed from the invoice-matching pool on both sides.
+_NOTE_POOL_TYPES = _CREDIT_NOTE_TYPES | _DEBIT_NOTE_TYPES
 _CREDIT_MARKER_RE = re.compile(r"^CN\s*[-/]", re.IGNORECASE)
 _DEBIT_MARKER_RE = re.compile(r"^DN\s*[-/]", re.IGNORECASE)
 
@@ -582,18 +583,22 @@ def preprocess_portal(
 
 
 def _books_note_type(invoice_number: Any, invoice_value: Any, taxable_value: Any) -> str | None:
-    """The CREDIT-note marker on a BOOKS row, or None for an ordinary document.
+    """The NOTE-document marker on a BOOKS row, or None for an ordinary document.
 
-    Two signals, either of which is enough:
+    Three signals, any of which is enough:
       * a CN- invoice-number prefix (a credit note booked with a POSITIVE value),
+      * a DN- invoice-number prefix (a debit note),
       * a negative invoice value or taxable value (the sign convention).
 
-    A DN- prefix is deliberately NOT a marker: a debit note is an ordinary
-    charge and must match like any other purchase (Test Set 3 S3-F1).
+    Both note kinds are returned so the caller can tag the row — and both are
+    kept out of the invoice-matching pool, because a note is reported by the
+    report's Credit / debit notes card rather than reconciled as an invoice.
     """
     s = str(invoice_number or "").strip()
     if _CREDIT_MARKER_RE.match(s):
         return "Credit Note"
+    if _DEBIT_MARKER_RE.match(s):
+        return "Debit Note"
     for v in (invoice_value, taxable_value):
         try:
             if float(v or 0) < 0:
@@ -605,8 +610,8 @@ def _books_note_type(invoice_number: Any, invoice_value: Any, taxable_value: Any
 
 def preprocess_books(books_df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
     """Pre-process books records: add internal keys, derive the document type,
-    and tag + sign-normalise CREDIT notes so they can be isolated from the
-    invoice pool (debit notes stay in the pool — see ``_books_note_type``)."""
+    and tag + sign-normalise notes so they can be isolated from the invoice
+    pool (both CREDIT and DEBIT notes — see ``_books_note_type``)."""
     df = books_df.copy()
     df["_bid"] = range(len(df))
     df["_norm_inv"] = df["invoice_number"].apply(lambda v: _normalize_invoice_number(v, config))
@@ -633,10 +638,10 @@ def preprocess_books(books_df: pd.DataFrame, config: dict | None = None) -> pd.D
                 v = float(row.get(col, 0) or 0)
                 if v > 0:
                     df.at[idx, col] = -v
-        elif _DEBIT_MARKER_RE.match(str(row.get("invoice_number") or "").strip()):
-            # A debit note is labelled (so it agrees with the portal's own
-            # "Debit Note" type) but stays in the pool and keeps its sign —
-            # it is a charge, not a credit-note reversal.
+        elif note_type == "Debit Note":
+            # A debit note keeps its sign (it is a charge, not a reversal) but
+            # is still a note — tagging it makes the pool exclusion below and
+            # the portal's own "Debit Note" type agree.
             df.at[idx, "_doc_type"] = "Debit Note"
 
     df["_amendment_note"] = ""
@@ -1396,34 +1401,37 @@ def match_gst(
     books = preprocess_books(books_df, config)
     b2b_portal, rc_portal, import_portal, summary = preprocess_portal(portal_df, config)
 
-    # CREDIT notes are a SEPARATE document class. The portal carries them on
-    # its B2B-CDNR sheet (declared by the report's own Credit Notes card and
-    # never reconciled as invoices), so a books CREDIT-note row must be kept
-    # OUT of the invoice-matching pool — otherwise every one of them becomes a
-    # false "Not in Portal" exception that contradicts that label. Debit notes
-    # stay in the pool (see `_books_note_type`).
-    note_mask = books["_doc_type"].isin(_NOTE_TYPES)
+    # CREDIT and DEBIT notes (both carried on the portal's B2B-CDNR sheet) are a
+    # SEPARATE document class: the report's own Credit / debit notes card reads
+    # them straight from the portal file and they are never reconciled as
+    # invoices. A books note row is therefore kept OUT of the invoice-matching
+    # pool UNCONDITIONALLY, before any pass runs — otherwise it either becomes a
+    # false "Not in Portal" exception (no counterpart) or, when it does find a
+    # portal counterpart, a false MATCHED row that inflates ITC (Test Set 3
+    # S3-F1 DN/City/07). This is the books half of that one rule.
+    note_mask = books["_doc_type"].isin(_NOTE_POOL_TYPES)
     note_count = int(note_mask.sum())
     if note_count:
         print(
-            f"[GST] {note_count} books credit note row(s) excluded from the "
+            f"[GST] {note_count} books credit/debit note row(s) excluded from the "
             f"invoice-matching pool (reported separately by the Credit Notes card)."
         )
         books = books[~note_mask].copy()
 
-    # The SAME exclusion applies to the portal side. A GSTR-2B carries credit
-    # notes on its B2B-CDNR sheet; once their note number/date/value are parsed
-    # they have a usable identity, so without this they would enter the invoice
-    # pool and surface as false "Not in Books" exceptions — contradicting the
-    # Credit Notes card that already reports them. Debit notes are untouched.
-    portal_credit_mask = b2b_portal["_doc_type"].isin(_CREDIT_NOTE_TYPES)
-    portal_credit_count = int(portal_credit_mask.sum())
-    if portal_credit_count:
+    # The SAME exclusion applies to the portal side. A GSTR-2B carries notes on
+    # its B2B-CDNR sheet; once their note number/date/value are parsed they have
+    # a usable identity, so without this the portal half of a note would enter
+    # the invoice pool and surface as a false "Not in Books" exception —
+    # contradicting the same card. Excluding BOTH halves is what keeps a note
+    # out of the invoice table entirely instead of leaving an orphan behind.
+    portal_note_mask = b2b_portal["_doc_type"].isin(_NOTE_POOL_TYPES)
+    portal_note_count = int(portal_note_mask.sum())
+    if portal_note_count:
         print(
-            f"[GST] {portal_credit_count} portal credit note row(s) excluded from "
+            f"[GST] {portal_note_count} portal credit/debit note row(s) excluded from "
             f"the invoice-matching pool (reported separately by the Credit Notes card)."
         )
-        b2b_portal = b2b_portal[~portal_credit_mask].copy()
+        b2b_portal = b2b_portal[~portal_note_mask].copy()
 
     _print_preprocessing_summary(summary)
 

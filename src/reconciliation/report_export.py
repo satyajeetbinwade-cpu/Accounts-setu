@@ -111,10 +111,13 @@ def _num(v: Any) -> float:
 
 
 def _credit_notes_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
-    """The portal credit notes (B2B-CDNR) this run declared as unreconciled.
+    """The portal notes (B2B-CDNR) this run declared as unreconciled.
 
-    These are a separate document class from invoices — they are NOT in the
-    match results and must never be folded into the invoice counts (§6).
+    These are a separate document class from invoices — both CREDIT and DEBIT
+    notes are excluded from the invoice pipeline before any matching pass, so
+    they are NOT in the match results and must never be folded into the invoice
+    counts (§6). Both kinds are listed here, which is what makes this card
+    agree with the 'excluded from invoice counts' KPI label.
     """
     path = _portal_file_for_run(run)
     if path is None:
@@ -135,12 +138,9 @@ def _credit_notes_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
     notes: list[dict[str, Any]] = []
     for _, r in rows.iterrows():
         reference = review.clean(r.iloc[2])
-        note_type = review.clean(r.iloc[3])
-        # A DEBIT note (also carried on B2B-CDNR) is a genuine charge that IS
-        # reconciled against the books, so it must not be listed here as an
-        # unreconciled credit note — that would double-count the same document.
-        if note_type.lower().startswith("debit") or reference.upper().startswith("DN"):
-            continue
+        # A DEBIT note is now reported here too: notes are excluded from the
+        # invoice pipeline before matching, so this card is the ONLY place the
+        # note is accounted for — omitting it would hide the document entirely.
         igst, cgst, sgst, cess = (_num(r.iloc[i]) for i in (10, 11, 12, 13))
         taxable = _num(r.iloc[9])
         note_value = _num(r.iloc[6])
