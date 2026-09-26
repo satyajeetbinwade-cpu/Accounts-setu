@@ -50,6 +50,14 @@ from src.invoice_extract.seed import CANONICAL_FIELD_KEYS
 TOUCHPOINT_VISUAL = "invoice_extraction_visual"
 TOUCHPOINT_STRUCTURED = "invoice_extraction_structured"
 
+
+def touchpoint_for_path(path: str) -> str:
+    """The C3-ext touchpoint key a routing decision dispatches to. This is
+    the single mapping from the content-based ``visual``/``structured``
+    decision to the model assignment that is actually used (and stored per
+    upload as ``extraction_path``)."""
+    return TOUCHPOINT_VISUAL if path == "visual" else TOUCHPOINT_STRUCTURED
+
 # Cap how much text we send for structured files — invoices are small, and
 # a runaway sheet shouldn't blow the context window.
 _MAX_TEXT_CHARS = 24000
@@ -171,7 +179,7 @@ def extract_with_ai(
     from src.ingestion_ai import llm
 
     path = _route(source_format, file_bytes)
-    touchpoint = TOUCHPOINT_VISUAL if path == "visual" else TOUCHPOINT_STRUCTURED
+    touchpoint = touchpoint_for_path(path)
 
     try:
         if path == "visual":
@@ -221,12 +229,17 @@ def extract_with_ai(
 
 
 def _route(source_format: str, file_bytes: bytes) -> str:
-    """visual vs structured, matching extractor.extraction_path_for()."""
+    """visual vs structured, matching extractor.extraction_path_for().
+
+    Classification is by ACTUAL CONTENT, never by file extension alone. For
+    a PDF that means probing whether it truly carries an extractable text
+    layer: a native-text PDF goes STRUCTURED, an image-only / scanned PDF
+    (the ``.pdf`` extension but no real text) goes VISUAL.
+    """
     if source_format == "image":
         return "visual"
     if source_format == "pdf":
-        text = extractor._pdf_text(file_bytes)
-        return "structured" if extractor._has_meaningful_text(text) else "visual"
+        return "structured" if extractor.has_text_layer(file_bytes) else "visual"
     return "structured"
 
 

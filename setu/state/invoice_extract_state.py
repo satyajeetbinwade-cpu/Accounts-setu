@@ -431,11 +431,16 @@ class InvoiceExtractState(SharedUploadState):
         from src.invoice_extract import extractor
 
         if fmt == "pdf":
-            text = extractor._pdf_text(data)
-            if text.strip():
-                self.preview_text = text.strip()[:4000]
-                self.preview_kind = "text"
-                return
+            # Content-based, not extension-based: a native-text PDF previews
+            # as its text; a scanned/image-only PDF has no real text layer,
+            # so render the first page to an image rather than showing
+            # decompressed binary stream noise as if it were content.
+            if extractor.has_text_layer(data):
+                text = extractor._pdf_text(data)
+                if text.strip():
+                    self.preview_text = text.strip()[:4000]
+                    self.preview_kind = "text"
+                    return
             # Scanned PDF — no text layer. Render the first page to an image
             # so the reviewer sees the actual document, not a blank pane.
             from src.invoice_extract import ai_extractor

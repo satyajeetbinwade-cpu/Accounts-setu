@@ -55,6 +55,12 @@ PDF_EXTS = {"pdf"}
 EXCEL_EXTS = {"xls", "xlsx", "csv"}
 WORD_EXTS = {"doc", "docx"}
 
+# How many PDF pages are probed when deciding whether a PDF carries a real
+# text layer. A native-text PDF has text on its first page, so a bounded
+# probe keeps a pathological scan from being decoded in full just to be
+# classified.
+_MAX_TEXT_PROBE_PAGES = 20
+
 # Header-alias vocabulary per canonical field, used only for STRUCTURED
 # files (column-header matching). Mirrors ingestion_ai/mapper.py's approach.
 _COLUMN_ALIASES: dict[str, list[str]] = {
@@ -161,6 +167,43 @@ def extraction_path_for(source_format: str, *, has_text_layer: bool = True) -> s
     return "structured"
 
 
+def has_text_layer(file_bytes: bytes) -> bool:
+    """Content-based test: does this PDF actually carry an extractable text
+    layer?
+
+    This is the authoritative source of the visual-vs-structured decision
+    for a PDF — the file extension only says ".pdf", it says nothing about
+    whether the content is native text or a scanned page image.
+
+    A real text layer is identified through a TEXT-AWARE parser (PyMuPDF),
+    which reads the page content operators, rather than by scanning raw
+    decompressed stream bytes. An image-only ("scanned") PDF stores its
+    pixels in the very same streams; after decompression those bytes can
+    contain parenthesised runs that superficially resemble text operators
+    but are pure binary noise — the historical mis-route this function
+    exists to prevent.
+
+    Falls back to the raw ``_pdf_text`` heuristic only when no text parser
+    is available, and then applies a printable/text-likeness guard so binary
+    image data can never masquerade as a text layer.
+    """
+    try:
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        try:
+            parts: list[str] = []
+            for page in doc[: _MAX_TEXT_PROBE_PAGES]:
+                parts.append(page.get_text("text") or "")
+                if _has_meaningful_text(" ".join(parts)):
+                    return True
+            return _has_meaningful_text(" ".join(parts))
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001 — no parser / unreadable => use heuristic
+        return _looks_like_text(_pdf_text(file_bytes))
+
+
 def probe_file(filename: str, file_bytes: bytes, source_format: str) -> dict[str, Any]:
     """Cheap structural probe run BEFORE extraction, so a genuinely broken
     file is reported as an extraction FAILURE rather than silently becoming
@@ -250,11 +293,13 @@ def extract(
         text = _docx_text(file_bytes, filename)
         return _extract_from_text(text), "structured"
     if source_format == "pdf":
-        text = _pdf_text(file_bytes)
-        if _has_meaningful_text(text):
-            return _extract_from_text(text), "structured"
+        if has_text_layer(file_bytes):
+            return _extract_from_text(_pdf_text(file_bytes)), "structured"
         # Image-based (scanned) PDF — no usable text layer: visual path.
-        signal = _visual_signal(filename, file_bytes, text)
+        # The raw ``_pdf_text`` output is deliberately NOT passed as signal:
+        # for a scan it is binary noise, and feeding it in could fabricate a
+        # token match. Only the filename/embedded-text signal is used.
+        signal = _visual_signal(filename, file_bytes, "")
         return _extract_from_text(signal), "visual"
     if source_format == "image":
         signal = _visual_signal(filename, file_bytes, "")
@@ -699,6 +744,23 @@ def _pdf_text(file_bytes: bytes) -> str:
 
 def _has_meaningful_text(text: str) -> bool:
     return len(re.sub(r"[^A-Za-z0-9]", "", text or "")) >= 20
+
+
+def _looks_like_text(text: str) -> bool:
+    """True only when ``text`` is plausibly real document text rather than
+    binary stream noise that happened to contain parenthesised byte runs.
+
+    Used by the stdlib fallback in ``has_text_layer`` when no text parser is
+    available: a genuine text layer is overwhelmingly printable and contains
+    real words, whereas decompressed image data is dense with control bytes.
+    """
+    if not _has_meaningful_text(text):
+        return False
+    sample = text[:4000]
+    printable = sum(1 for ch in sample if ch.isprintable())
+    ratio = printable / max(1, len(sample))
+    words = re.findall(r"[A-Za-z]{3,}", sample)
+    return ratio >= 0.85 and len(words) >= 3
 
 
 def _visual_signal(filename: str, file_bytes: bytes, pdf_text: str) -> str:
