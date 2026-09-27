@@ -11,13 +11,14 @@ Design notes (see the F2 build prompt + its 27-Sep-2026 revision):
   three clients in the roster, not one client with three branches. There is
   no branch sub-entity, no per-branch status, and no rollup across sibling
   registrations (explicitly deferred).
-- EndClient therefore carries `gstin` directly (single, optional), plus the
-  required primary contact block (email/phone/address — the former branch
-  address folds in here; `state` is no longer a separate field, it is part
-  of the free-text address).
-- Validation that needs more than one column (at least one of PAN/TAN;
-  required contact block) lives in src/clients/service.py, not as DB
-  constraints, so the UI gets one plain-language message per rule.
+- EndClient therefore carries `gstin` directly (single, optional), plus a
+  primary contact block (email/phone/address — the former branch address
+  folds in here; `state` is no longer a separate field, it is part of the
+  free-text address). The contact block is OPTIONAL: it is collected when the
+  client has it, but never blocks a save.
+- Validation that needs more than one column (legal name; at least one of
+  PAN/TAN) lives in src/clients/service.py, not as DB constraints, so the UI
+  gets one plain-language message per rule.
 - ContactDirectoryEntry is internal-reference only, never linked to a
   login row (the End-Client login is a single shared credential).
 - ChartOfAccounts / HistoricalSnapshot are manual entry only this phase

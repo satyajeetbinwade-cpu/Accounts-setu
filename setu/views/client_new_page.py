@@ -5,8 +5,8 @@ roster now contains zero form fields.
 
 One GST registration = one client, so there is exactly ONE GSTIN field and no
 "State (for the primary GSTIN)" input — the state belongs in the free-text
-address. At least one of PAN or TAN is required, and the primary contact
-block (email/phone/address) is required; the inline message and the disabled
+address. At least one of PAN or TAN is required; the primary contact block
+(email/phone/address) is OPTIONAL. The inline message and the disabled
 Save button both come from the SERVICE's own validator, so the hint can never
 disagree with what the save enforces.
 """
@@ -60,16 +60,16 @@ def _form_card() -> rx.Component:
                 placeholder="27AABCM1234K1Z9",
             ),
             c.divider(),
-            rx.text("Primary contact", style=t.TEXT["card_title"]),
+            rx.text("Primary contact (optional)", style=t.TEXT["card_title"]),
             rx.grid(
-                _field("Email *", NewClientState.email, NewClientState.set_email),
-                _field("Phone *", NewClientState.phone, NewClientState.set_phone),
+                _field("Email", NewClientState.email, NewClientState.set_email),
+                _field("Phone", NewClientState.phone, NewClientState.set_phone),
                 columns="2",
                 spacing="4",
                 width="100%",
             ),
             _field(
-                "Address * (include the state — it isn't a separate field any more)",
+                "Address (include the state — it isn't a separate field any more)",
                 NewClientState.address,
                 NewClientState.set_address,
             ),

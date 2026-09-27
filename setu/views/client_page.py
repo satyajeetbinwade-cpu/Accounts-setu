@@ -333,10 +333,10 @@ def _identity_field(
 
 
 def _client_details_card() -> rx.Component:
-    """Legal name, assigned team and the required primary contact block.
+    """Legal name, assigned team and the (optional) primary contact block.
 
     One form, one Save: the service validates the WHOLE record against the
-    stored row merged with these values, so a required field can never be
+    stored row merged with these values, so the legal name can never be
     blanked and the PAN-or-TAN rule can never be broken from here.
     """
     return c.card(
@@ -354,13 +354,17 @@ def _client_details_card() -> rx.Component:
                 width="100%",
             ),
             rx.grid(
-                _field("Primary contact email *", ClientState.d_email, ClientState.set_d_email),
-                _field("Primary contact phone *", ClientState.d_phone, ClientState.set_d_phone),
+                _field("Primary contact email", ClientState.d_email, ClientState.set_d_email),
+                _field("Primary contact phone", ClientState.d_phone, ClientState.set_d_phone),
                 columns="2",
                 spacing="4",
                 width="100%",
             ),
-            _field("Primary contact address * (include the state)", ClientState.d_address, ClientState.set_d_address),
+            _field(
+                "Primary contact address (include the state)",
+                ClientState.d_address,
+                ClientState.set_d_address,
+            ),
             rx.cond(
                 ClientState.details_missing != "",
                 c.inline_reason(ClientState.details_missing),

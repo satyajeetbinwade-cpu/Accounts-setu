@@ -4,8 +4,9 @@ Pins the revision's acceptance criteria at the service/data layer:
 
 * one GST registration = one client — a single `gstin` column, no
   `gstin_branches` table, no branch dimension anywhere in the returned rows;
-* at least one of PAN or TAN required before save;
-* the primary contact block (email/phone/address) required before save;
+* at least one of PAN or TAN required before save, with a legal name the only
+  other required field — the primary contact block (email/phone/address) is
+  OPTIONAL;
 * PAN/TAN/GSTIN edits still need Manager+ AND a captured reason;
 * a GSTIN can't be cleared or changed while open reconciliation work
   references the client;
@@ -87,16 +88,33 @@ def test_create_accepts_tan_only(db_path):
 
 
 @pytest.mark.parametrize(
-    "field,label",
-    [
-        ("primary_contact_email", "Primary contact email"),
-        ("primary_contact_phone", "Primary contact phone"),
-        ("primary_contact_address", "Primary contact address"),
-    ],
+    "field",
+    ["primary_contact_email", "primary_contact_phone", "primary_contact_address"],
 )
-def test_create_requires_the_primary_contact_block(db_path, field, label):
-    with pytest.raises(clients.ClientError, match=label):
-        clients.create_client(**{**_valid(), field: ""}, db_path=db_path)
+def test_create_leaves_the_primary_contact_block_optional(db_path, field):
+    """Each contact field may be blank — a client is onboarded before its
+    contact details are known."""
+    cid = clients.create_client(**{**_valid(), field: ""}, db_path=db_path)
+    assert clients.get_client(cid, db_path=db_path)[field] is None
+
+
+def test_create_accepts_no_contact_block_at_all(db_path):
+    cid = clients.create_client(
+        **{
+            **_valid(),
+            "primary_contact_email": "",
+            "primary_contact_phone": "   ",
+            "primary_contact_address": "",
+        },
+        db_path=db_path,
+    )
+    row = clients.get_client(cid, db_path=db_path)
+    assert (row["primary_contact_email"], row["primary_contact_phone"], row["primary_contact_address"]) == (
+        None,
+        None,
+        None,
+    )
+    assert row["legal_name"] == "Meridian Fabrics"
 
 
 def test_create_stores_exactly_one_gstin(db_path):
@@ -137,10 +155,24 @@ def test_identity_edit_succeeds_with_a_reason_and_records_history(db_path):
     assert entries[0]["reason"] == "TAN missing at onboarding"
 
 
-def test_required_contact_field_cannot_be_blanked(db_path):
+def test_contact_fields_can_be_cleared(db_path):
+    """The contact block is optional, so clearing it is allowed; only the
+    legal name is protected from being blanked."""
+    cid = clients.create_client(**_valid(), db_path=db_path)
+    for field in ("primary_contact_email", "primary_contact_phone", "primary_contact_address"):
+        clients.update_client_field(cid, field, "", actor="admin", db_path=db_path)
+    row = clients.get_client(cid, db_path=db_path)
+    assert (row["primary_contact_email"], row["primary_contact_phone"], row["primary_contact_address"]) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_legal_name_cannot_be_blanked(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     with pytest.raises(clients.ClientError, match="can't be blank"):
-        clients.update_client_field(cid, "primary_contact_email", "", actor="admin", db_path=db_path)
+        clients.update_client_field(cid, "legal_name", "  ", actor="admin", db_path=db_path)
 
 
 def test_cannot_clear_the_only_identity(db_path):
@@ -149,19 +181,36 @@ def test_cannot_clear_the_only_identity(db_path):
         clients.update_client_field(cid, "pan", "", actor="admin", db_path=db_path)
 
 
-def test_details_save_validates_the_whole_record(db_path):
-    """A legacy record with no contact block can't be saved as-is — the
-    service reports it rather than silently persisting a broken client."""
+def test_details_save_accepts_a_blank_contact_block(db_path):
+    """A record with no contact details can still be saved — the block is
+    optional, so it must never block an unrelated edit."""
     cid = clients.create_client(**_valid(), db_path=db_path)
-    with pytest.raises(clients.ClientError, match="Primary contact"):
+    clients.update_client_details(
+        cid,
+        actor="admin",
+        legal_name="Meridian Fabrics",
+        assigned_team="Team A",
+        primary_contact_email="",
+        primary_contact_phone="",
+        primary_contact_address="",
+        db_path=db_path,
+    )
+    row = clients.get_client(cid, db_path=db_path)
+    assert row["assigned_team"] == "Team A"
+    assert row["primary_contact_email"] is None
+
+
+def test_details_save_still_refuses_to_blank_the_legal_name(db_path):
+    cid = clients.create_client(**_valid(), db_path=db_path)
+    with pytest.raises(clients.ClientError, match="Legal name"):
         clients.update_client_details(
             cid,
             actor="admin",
-            legal_name="Meridian Fabrics",
-            assigned_team="Team A",
-            primary_contact_email="",
-            primary_contact_phone="",
-            primary_contact_address="",
+            legal_name="   ",
+            assigned_team=None,
+            primary_contact_email=None,
+            primary_contact_phone=None,
+            primary_contact_address=None,
             db_path=db_path,
         )
 

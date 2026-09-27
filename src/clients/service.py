@@ -5,12 +5,12 @@ src.clients.db directly. Mirrors src/auth/service.py's shape.
 Covers: DB init, EndClient/Contact/ChartOfAccounts/HistoricalSnapshot
 CRUD, the business rules from the F2 build prompt as revised on
 27-Sep-2026 (a flat EndClient \u2014 one GST registration = one client, no
-branch sub-entity; legal name + primary contact block required; at least
-one of PAN/TAN required; PAN/TAN/GSTIN edits gated to Manager+ with a
-captured reason; a GSTIN can't be cleared or changed while open
-reconciliation work references it; soft-delete-only client deactivation),
-and the F1 retrofit that provisions a shared End-Client login from this
-module's data.
+branch sub-entity; legal name required and at least one of PAN/TAN
+required, with the primary contact block OPTIONAL; PAN/TAN/GSTIN edits
+gated to Manager+ with a captured reason; a GSTIN can't be cleared or
+changed while open reconciliation work references it; soft-delete-only
+client deactivation), and the F1 retrofit that provisions a shared
+End-Client login from this module's data.
 """
 
 from __future__ import annotations
@@ -75,11 +75,10 @@ def get_client(client_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 # (column, label) for the fields that must be non-empty on a saved record.
+# The primary contact block (email/phone/address) is deliberately OPTIONAL —
+# it is collected when the client has it, but never blocks a save.
 REQUIRED_TEXT_FIELDS: tuple[tuple[str, str], ...] = (
     ("legal_name", "Legal name"),
-    ("primary_contact_email", "Primary contact email"),
-    ("primary_contact_phone", "Primary contact phone"),
-    ("primary_contact_address", "Primary contact address"),
 )
 
 # Fields that require Manager+ AND a captured reason ("sensitive" in F4's
@@ -104,8 +103,12 @@ def _clean(value: Any) -> Optional[str]:
 
 
 def validate_client_record(record: dict[str, Any]) -> None:
-    """F2's save rules for a whole client record. Raises ClientError with a
-    plain-language message naming exactly what to fix."""
+    """The save rules for a whole client record. Raises ClientError with a
+    plain-language message naming exactly what to fix.
+
+    Only two rules: a legal name, and at least one of PAN or TAN. The primary
+    contact block is optional.
+    """
     missing = [label for key, label in REQUIRED_TEXT_FIELDS if not _clean(record.get(key))]
     if missing:
         raise ClientError("Required field(s) missing: " + ", ".join(missing) + ".")
@@ -116,11 +119,11 @@ def validate_client_record(record: dict[str, Any]) -> None:
 def _validate_single_field_save(before: dict[str, Any], field: str, new_value: Optional[str]) -> None:
     """The lighter check for a per-field save.
 
-    A single-field save must never BLANK a required field, and must never
-    leave the record with neither PAN nor TAN. It is deliberately NOT asked to
-    complete an otherwise-incomplete legacy record \u2014 that is the Details
-    form's job, and demanding it here would deadlock a record whose PAN, TAN,
-    contact block and email were all empty before this revision.
+    A single-field save must never BLANK the legal name, and must never leave
+    the record with neither PAN nor TAN. It is deliberately NOT asked to
+    complete an otherwise-incomplete record — that is the Details form's job,
+    and demanding it here would make an identity edit impossible on a client
+    whose PAN and TAN were both empty.
     """
     if not new_value:
         for key, label in REQUIRED_TEXT_FIELDS:
@@ -222,9 +225,10 @@ def update_client_details(
 ) -> None:
     """Save the Details form's unrestricted fields in ONE action.
 
-    The whole record is validated (required contact block + at least one of
-    PAN/TAN) against the stored row MERGED with the proposed values, so this
-    form can never leave a client in a state it can no longer be saved from.
+    The whole record is re-validated (legal name + at least one of PAN/TAN)
+    against the stored row MERGED with the proposed values, so this form can
+    never leave a client in a state it can no longer be saved from. The
+    primary contact block is optional and may be blank.
     """
     proposed: dict[str, Any] = {}
     conn = _connect(db_path)
