@@ -205,9 +205,13 @@ class ClientState(AuthState):
     def load(self):
         if (deny := self._gate("clients.profile.view")):
             return rx.redirect(deny)
+        # Arriving at /clients always lands on the Roster. Opening a client is
+        # a state-only transition (no route change — the profile renders on the
+        # same route), so a lingering selection made the nav / quick-access
+        # "Clients" link a dead end: it re-opened the last profile and the only
+        # way back was the profile's own (barely visible) back link.
+        self.selected_client_id = 0
         self._load_roster()
-        if self.selected_client_id:
-            self._load_profile()
 
     def _load_roster(self) -> None:
         rows = clients.list_clients(include_inactive=self.show_inactive)
@@ -351,6 +355,19 @@ class ClientState(AuthState):
     def toggle_new_client_form(self):
         self.show_new_client_form = not self.show_new_client_form
         self.nc_error = ""
+
+    @rx.event
+    def new_client(self):
+        """Leave the profile, return to the Roster and open the create form.
+
+        Same shape as ``toggle_new_client_form`` but also CLOSES the profile —
+        the profile's "+ New client" action must land the user on the roster
+        WITH the form open, in one click.
+        """
+        self.selected_client_id = 0
+        self.show_new_client_form = True
+        self.nc_error = ""
+        self._load_roster()
 
     def set_nc_legal_name(self, v: str):
         self.nc_legal_name = v

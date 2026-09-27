@@ -15,9 +15,9 @@ Components (per the UI Foundation spec section 3):
   3.8  activity_panel          — recent-activity list (hairline rows)
 
 Plus the shared primitives the components and screens are built from:
-``card``, ``page_header``, ``section_title``, ``pill``, ``info_banner``,
-``warning_banner``, ``accent_pill``, ``freshness_chip``, ``tds_stepper``,
-``stat``, ``empty_state``.
+``card``, ``page_header``, ``back_button``, ``section_title``, ``pill``,
+``info_banner``, ``warning_banner``, ``accent_pill``, ``freshness_chip``,
+``tds_stepper``, ``stat``, ``empty_state``.
 
 NOTHING here hard-codes a hex outside the token module.
 """
@@ -56,6 +56,33 @@ def page_header(title: str, subtitle: str | None = None) -> rx.Component:
         align="start",
         width="100%",
     )
+
+
+def back_button(label: str, on_click, **props) -> rx.Component:
+    """The standard, clearly visible "back to the list" action.
+
+    A detail screen's back affordance is the ONLY escape hatch when its list
+    screen is a different view of the same route (e.g. the client Roster vs a
+    client profile on ``/clients``). The bare ``variant="ghost" size="1"``
+    button it replaces rendered as near-invisible text on the page background,
+    so users could not find the way out. This shape is bordered secondary text
+    with a real hover state and is legible on any surface.
+    """
+    props.setdefault("variant", "soft")
+    props.setdefault("background", "transparent")
+    props.setdefault("color", t.Color.TEXT_SECONDARY.value)
+    props.setdefault("border", f"1px solid {t.Color.BORDER.value}")
+    props.setdefault("border_radius", "9px")
+    props.setdefault("size", "2")
+    props.setdefault(
+        "_hover",
+        {
+            "background": t.Color.NEUTRAL_BG.value,
+            "color": t.Color.TEXT_PRIMARY.value,
+            "border_color": t.Color.TEXT_MUTED.value,
+        },
+    )
+    return rx.button(label, on_click=on_click, **props)
 
 
 def section_title(title: str, subtitle: str | None = None) -> rx.Component:

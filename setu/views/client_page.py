@@ -871,15 +871,29 @@ def _client_settings() -> rx.Component:
 # ---------------------------------------------------------------------------
 
 
+def _profile_actions() -> rx.Component:
+    """The profile's escape hatches: back to the Roster, and straight into
+    creating a new client. Both must be plainly visible — the profile and the
+    roster share one route, so these are the only way off the profile."""
+    return rx.hstack(
+        c.back_button("← Back to Client Roster", ClientState.back_to_roster),
+        rx.spacer(),
+        rx.button(
+            "+ New client",
+            on_click=ClientState.new_client,
+            disabled=~ClientState.can_manage,
+            background=t.Color.ACCENT.value,
+            color="#FFFFFF",
+        ),
+        width="100%",
+        align="center",
+        spacing="3",
+    )
+
+
 def _profile() -> rx.Component:
     return rx.vstack(
-        rx.button(
-            "← Back to Client Roster",
-            variant="ghost",
-            color_scheme="gray",
-            size="1",
-            on_click=ClientState.back_to_roster,
-        ),
+        _profile_actions(),
         rx.cond(ClientState.flash != "", c.info_banner(ClientState.flash), rx.fragment()),
         _profile_header(),
         _health_strip(),
