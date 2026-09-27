@@ -4,9 +4,8 @@ Pins the revision's acceptance criteria at the service/data layer:
 
 * one GST registration = one client — a single `gstin` column, no
   `gstin_branches` table, no branch dimension anywhere in the returned rows;
-* at least one of PAN or TAN required before save, with a legal name the only
-  other required field — the primary contact block (email/phone/address) is
-  OPTIONAL;
+* the legal name is the ONLY required field — PAN, TAN, GSTIN and the primary
+  contact block (email/phone/address) are all OPTIONAL;
 * PAN/TAN/GSTIN edits still need Manager+ AND a captured reason;
 * a GSTIN can't be cleared or changed while open reconciliation work
   references the client;
@@ -74,9 +73,14 @@ def test_create_requires_legal_name(db_path):
         clients.create_client(**{**_valid(), "legal_name": "   "}, db_path=db_path)
 
 
-def test_create_requires_pan_or_tan(db_path):
-    with pytest.raises(clients.ClientError, match="At least one of PAN or TAN"):
-        clients.create_client(**{**_valid(), "pan": ""}, db_path=db_path)
+def test_pan_and_tan_are_optional(db_path):
+    """Neither identity number is compulsory — a client can be onboarded with
+    only a legal name and have PAN/TAN added later."""
+    cid = clients.create_client(**{**_valid(), "pan": "", "tan": ""}, db_path=db_path)
+    row = clients.get_client(cid, db_path=db_path)
+    assert row["pan"] is None
+    assert row["tan"] is None
+    assert row["legal_name"] == "Meridian Fabrics"
 
 
 def test_create_accepts_tan_only(db_path):
@@ -175,10 +179,14 @@ def test_legal_name_cannot_be_blanked(db_path):
         clients.update_client_field(cid, "legal_name", "  ", actor="admin", db_path=db_path)
 
 
-def test_cannot_clear_the_only_identity(db_path):
-    cid = clients.create_client(**{**_valid(), "tan": ""}, db_path=db_path)
-    with pytest.raises(clients.ClientError, match="At least one of PAN or TAN"):
-        clients.update_client_field(cid, "pan", "", actor="admin", db_path=db_path)
+def test_identity_fields_can_be_cleared(db_path):
+    """PAN/TAN are optional, so clearing one is allowed (it still needs a
+    reason and Manager+, but no longer an empty-identity guard)."""
+    cid = clients.create_client(**_valid(), db_path=db_path)
+    clients.update_client_field(cid, "pan", "", actor="admin", reason="PAN not issued", db_path=db_path)
+    row = clients.get_client(cid, db_path=db_path)
+    assert row["pan"] is None
+    assert row["tan"] is None
 
 
 def test_details_save_accepts_a_blank_contact_block(db_path):

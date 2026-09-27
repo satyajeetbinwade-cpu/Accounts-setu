@@ -337,7 +337,7 @@ def _client_details_card() -> rx.Component:
 
     One form, one Save: the service validates the WHOLE record against the
     stored row merged with these values, so the legal name can never be
-    blanked and the PAN-or-TAN rule can never be broken from here.
+    blanked from here.
     """
     return c.card(
         rx.vstack(
