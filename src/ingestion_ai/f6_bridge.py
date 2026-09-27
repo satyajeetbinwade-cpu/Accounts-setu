@@ -368,21 +368,27 @@ def _to_float(v: Any) -> Optional[float]:
         return None
 
 
-def _find_summary_row(raw: pd.DataFrame, heading_needle: str) -> Optional[tuple[int, int]]:
-    """Locate (header_row, data_row) in a GSTN summary sheet.
+def _summary_header(raw: pd.DataFrame) -> tuple[Optional[int], Optional[int]]:
+    """Locate (header_row, heading_col) in a GSTN summary sheet.
 
     The header row is the one naming both a Heading column and the tax
-    columns; the data row is the first row below it whose Heading cell
-    contains `heading_needle` and none of the amendment/debit/ECO variants.
+    columns.
     """
-    header_row = None
-    heading_col = None
     for i in range(min(20, len(raw))):
         cells = [str(v).strip().lower() for v in raw.iloc[i]]
         if any("heading" in c for c in cells) and any("integrated tax" in c for c in cells):
-            header_row = i
             heading_col = next(n for n, c in enumerate(cells) if "heading" in c)
-            break
+            return i, heading_col
+    return None, None
+
+
+def _find_summary_row(raw: pd.DataFrame, heading_needle: str) -> Optional[tuple[int, int]]:
+    """Locate (header_row, data_row) in a GSTN summary sheet.
+
+    The data row is the first row below the header whose Heading cell
+    contains `heading_needle` and none of the amendment/debit/ECO variants.
+    """
+    header_row, heading_col = _summary_header(raw)
     if header_row is None or heading_col is None:
         return None
     for i in range(header_row + 1, len(raw)):
@@ -390,6 +396,41 @@ def _find_summary_row(raw: pd.DataFrame, heading_needle: str) -> Optional[tuple[
         if heading_needle not in heading:
             continue
         if any(x in heading for x in ("amendment", "debit", "eco", "isd", "import")):
+            continue
+        return header_row, i
+    return None
+
+
+def _find_reverse_charge_summary_row(raw: pd.DataFrame) -> Optional[tuple[int, int]]:
+    """Locate (header_row, data_row) for the reverse-charge section's B2B row.
+
+    A GSTR-2B ITC summary states forward-charge ITC (the "B2B - Invoices (IMS)"
+    row under "All other ITC — Supplies from registered persons other than
+    reverse charge") separately from reverse-charge inward supplies, which sit
+    under their own heading "Inward Supplies liable for reverse charge" with a
+    "B2B - Invoices" detail row below it.
+
+    Returns None when the layout carries no such section, so the caller simply
+    skips the reverse-charge comparison rather than misfiring on it.
+    """
+    header_row, heading_col = _summary_header(raw)
+    if header_row is None or heading_col is None:
+        return None
+    in_reverse_charge_section = False
+    for i in range(header_row + 1, len(raw)):
+        heading = str(raw.iat[i, heading_col]).strip().lower()
+        # Match the reverse-charge SECTION heading specifically ("Inward
+        # Supplies liable for reverse charge") — NOT the forward-charge
+        # heading, which also mentions reverse charge ("...other than reverse
+        # charge").
+        if "liable for reverse charge" in heading:
+            in_reverse_charge_section = True
+            continue
+        if not in_reverse_charge_section:
+            continue
+        if "b2b - invoices" not in heading:
+            continue
+        if any(x in heading for x in ("amendment", "debit", "credit", "eco", "isd", "import")):
             continue
         return header_row, i
     return None
@@ -430,14 +471,41 @@ def portal_control_totals(
     if not b2b_rows:
         return []
 
+    # The "B2B - Invoices (IMS)" summary row sits under "All other ITC —
+    # Supplies from registered persons OTHER THAN reverse charge": it states the
+    # FORWARD-charge B2B ITC only. The B2B sheet, however, also carries
+    # reverse-charge invoices — their ITC is stated under a separate summary
+    # section ("Inward Supplies liable for reverse charge"). Summing the whole
+    # sheet against the forward-charge row therefore over-counts by exactly the
+    # reverse-charge tax and hard-stops a perfectly good file. Split the rows on
+    # the reverse-charge flag and check each subset against its own summary row.
+    def _reverse_charge(r: dict[str, Any]) -> bool:
+        return bool(r.get("reverse_charge"))
+
+    forward_rows = [r for r in b2b_rows if not _reverse_charge(r)]
+    reverse_rows = [r for r in b2b_rows if _reverse_charge(r)]
+
+    def _append_totals(
+        header_cells: list[str], data_row: int, subset: list[dict[str, Any]], label_suffix: str,
+    ) -> None:
+        for field, needle in _SUMMARY_TAX_HEADS:
+            col = next((n for n, c in enumerate(header_cells) if needle in c), None)
+            if col is None:
+                continue
+            stated = _to_float(raw.iat[data_row, col])
+            if stated is None:
+                continue
+            parsed = round(sum(float(r.get(field) or 0) for r in subset), 2)
+            totals.append((parsed, stated, f"GSTR-2B ITC summary — B2B {label_suffix}{field.upper()}"))
+
     totals: list[tuple[float, Optional[float], str]] = []
-    for field, needle in _SUMMARY_TAX_HEADS:
-        col = next((n for n, c in enumerate(header_cells) if needle in c), None)
-        if col is None:
-            continue
-        stated = _to_float(raw.iat[data_row, col])
-        if stated is None:
-            continue
-        parsed = round(sum(float(r.get(field) or 0) for r in b2b_rows), 2)
-        totals.append((parsed, stated, f"GSTR-2B ITC summary — B2B {field.upper()}"))
+    _append_totals(header_cells, data_row, forward_rows, "")
+
+    # Reverse-charge B2B invoices are stated under their own section heading.
+    # Skipped when the layout carries no such section (never a false stop).
+    reverse_located = _find_reverse_charge_summary_row(raw) if reverse_rows else None
+    if reverse_located is not None:
+        rc_header_row, rc_data_row = reverse_located
+        rc_header_cells = [str(v).strip().lower() for v in raw.iloc[rc_header_row]]
+        _append_totals(rc_header_cells, rc_data_row, reverse_rows, "reverse charge ")
     return totals
