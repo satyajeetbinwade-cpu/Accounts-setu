@@ -131,7 +131,12 @@ def test_duplicate_books_is_one_match_plus_one_residual(model):
 def test_credit_notes_are_reported_in_the_dedicated_section(data_root, db_path):
     """Set 2's two credit notes (SF/CN/118, RTM/CN/29) have no portal-side
     counterpart in the invoice pool: they must stay out of the invoice table
-    AND be reported by the Credit Notes card — never one without the other."""
+    AND be reported by the Credit Notes card — never one without the other.
+
+    Set 2 supplies NO books-side note register, so the note pass cannot run and
+    the card is the portal itemisation (see the companion test below). The
+    invariant this test guards is unchanged either way: a note is never an
+    invoice."""
     from src import runner
     from src.reconciliation import report_export as ex
 
@@ -146,6 +151,35 @@ def test_credit_notes_are_reported_in_the_dedicated_section(data_root, db_path):
     assert sorted(str(n["reference"]) for n in data["credit_notes"]) == [
         "RTM/CN/29", "SF/CN/118",
     ]
+
+
+def test_without_a_note_register_the_note_pass_does_not_run(data_root, db_path):
+    """The honest degradation, deliberately pinned.
+
+    With no books note register there is nothing to reconcile a portal note
+    AGAINST, so running the pass would report every note as a false "Not in
+    Books". The run instead DECLARES that matching could not run, and the
+    report says the figures are unavailable rather than zero."""
+    from src import queries, runner
+    from src.reconciliation import report_export as ex
+
+    rid = runner.execute_run(
+        CLIENT, PERIOD, "GST", None, load_config(),
+        db_path=db_path, selected_files=SELECTED, actor="test",
+    )
+    assert len(queries.get_note_results(rid, db_path=db_path)) == 0
+
+    codes = {n["code"] for n in queries.get_run(rid, db_path=db_path)["run_notes"]}
+    assert "credit_notes_not_reconciled" in codes
+    assert "note_reconciliation" not in codes
+
+    data = ex.build_export_data(rid, db_path=db_path)
+    assert data["kpi"]["note_itc_available"] is False
+    assert data["kpi"]["note_source"] == "portal-only"
+    # A note's own status is not fabricated: it says the pass did not run.
+    assert all(
+        "did not run" in n["match_reason"] for n in data["credit_notes"]
+    )
 
 
 def test_credit_notes_absent_from_invoice_pool(model):

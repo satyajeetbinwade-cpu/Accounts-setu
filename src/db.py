@@ -57,6 +57,34 @@ CREATE INDEX IF NOT EXISTS idx_match_results_run_id
 CREATE INDEX IF NOT EXISTS idx_match_results_fingerprint
     ON match_results (fingerprint);
 
+-- Note-to-note reconciliation results. A SEPARATE table from match_results BY
+-- DESIGN: notes are their own document class with their own ITC figure, so
+-- "a note can never move an invoice count" is structural — no filter over the
+-- invoice table is the thing that protects it. Deliberately NOT carrying
+-- `reviewed`/`fingerprint`: notes have their own surface and no carry-forward
+-- this build (see the note design doc).
+CREATE TABLE IF NOT EXISTS note_match_results (
+    note_result_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id           INTEGER NOT NULL REFERENCES runs(run_id),
+    classification   TEXT    NOT NULL,
+    confidence_score REAL    NOT NULL,
+    confidence_band  TEXT    NOT NULL,
+    note_reference   TEXT,    -- the shared normalised join key
+    note_reference_raw TEXT,  -- the cited string, as evidence (books side)
+    note_kind        TEXT,    -- 'Credit Note' | 'Debit Note'
+    note_date        TEXT,    -- the note's OWN date, not the booking date
+    note_tax         REAL,    -- tax on the note — the note-level ITC input
+    note_value       REAL,
+    note_side        TEXT,    -- 'both' | 'books' | 'portal'
+    difference_type  TEXT,
+    books_record     TEXT,    -- JSON text
+    portal_record    TEXT,    -- JSON text
+    match_reason     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_note_match_results_run_id
+    ON note_match_results (run_id);
+
 -- Review status, kept OUTSIDE match_results so it survives re-runs.
 -- Also stores the classification/difference_type/band that were in effect
 -- at review time, so a later run whose verdict changed for the same
@@ -217,6 +245,56 @@ def insert_run(
         ),
     )
     return cur.lastrowid
+
+
+def insert_note_results(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
+    """Bulk-insert note-to-note results into their OWN table.
+
+    Kept separate from `insert_match_results` so a note can never be written
+    into the invoice table by a caller that forgot to filter one out.
+    `books_record` / `portal_record` are already JSON strings (both are
+    produced by `gst_matcher._row_json`).
+
+    Does not commit — the caller controls the run's transaction.
+    """
+    if not rows:
+        return
+
+    def _as_json_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return value if isinstance(value, str) else json.dumps(value)
+
+    conn.executemany(
+        """
+        INSERT INTO note_match_results
+            (run_id, classification, confidence_score, confidence_band,
+             note_reference, note_reference_raw, note_kind, note_date, note_tax,
+             note_value, note_side, difference_type, books_record, portal_record,
+             match_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                r.get("run_id"),
+                r.get("classification"),
+                r.get("confidence_score"),
+                r.get("confidence_band"),
+                r.get("note_reference"),
+                r.get("note_reference_raw"),
+                r.get("note_kind"),
+                str(r.get("note_date")) if r.get("note_date") is not None else None,
+                r.get("note_tax"),
+                r.get("note_value"),
+                r.get("note_side"),
+                r.get("difference_type"),
+                _as_json_text(r.get("books_record")),
+                _as_json_text(r.get("portal_record")),
+                r.get("match_reason"),
+            )
+            for r in rows
+        ],
+    )
 
 
 def insert_match_results(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:

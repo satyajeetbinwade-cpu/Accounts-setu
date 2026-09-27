@@ -569,9 +569,19 @@ def parse_books_register(
     return result
 
 
-def _to_frame(rows: list[dict[str, Any]], source_type: str, filename: str, matrix: RateBucketMatrix) -> pd.DataFrame:
+def _to_frame(
+    rows: list[dict[str, Any]], source_type: str, filename: str, matrix: RateBucketMatrix,
+    *, extra_fields: Optional[list[str]] = None,
+    identity_fields: tuple[str, ...] = ("gstin", "invoice_number"),
+) -> pd.DataFrame:
     """Canonical frame. Money stays Decimal-quantised; a genuinely absent
-    field stays NULL — never 0 (§3 rule 2)."""
+    field stays NULL — never 0 (§3 rule 2).
+
+    `extra_fields` carries non-GST columns a sibling layout needs on the frame
+    (the note register's note-identity columns). `identity_fields` is the
+    "drop a row with no usable identity" test — a note is identified by its
+    GSTIN plus its NOTE REFERENCE, not by an invoice number.
+    """
     import json as _json
     from decimal import Decimal, InvalidOperation
 
@@ -579,10 +589,13 @@ def _to_frame(rows: list[dict[str, Any]], source_type: str, filename: str, matri
 
     structural = {"source_type", "source_file", "original_row", "total_tax"}
     fields = [f for f in GST_CANONICAL_FIELDS if f not in structural]
+    extra = [f for f in (extra_fields or []) if f not in fields]
     records: list[dict[str, Any]] = []
     for row in rows:
         rec: dict[str, Any] = {}
         for f in fields:
+            rec[f] = row.get(f)
+        for f in extra:
             rec[f] = row.get(f)
         rec["source_type"] = source_type
         rec["source_file"] = filename
@@ -625,12 +638,16 @@ def _to_frame(rows: list[dict[str, Any]], source_type: str, filename: str, matri
     if all(c in df.columns for c in ("igst", "cgst", "sgst", "cess")):
         df["total_tax"] = df.apply(total_tax, axis=1)
 
-    identity = [c for c in ("gstin", "invoice_number") if c in df.columns]
+    identity = [c for c in identity_fields if c in df.columns]
     if identity:
         keep = df[identity].apply(
             lambda r: any(str(v).strip() not in ("", "nan", "None") for v in r), axis=1
         )
         df = df.loc[keep]
 
-    order = [f for f in fields if f in df.columns] + ["total_tax", "source_type", "source_file", "original_row"]
+    order = (
+        [f for f in fields if f in df.columns]
+        + [f for f in extra if f in df.columns]
+        + ["total_tax", "source_type", "source_file", "original_row"]
+    )
     return df[[c for c in order if c in df.columns]].reset_index(drop=True)

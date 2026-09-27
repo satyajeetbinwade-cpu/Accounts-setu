@@ -81,12 +81,17 @@ def _note_number_column(raw: pd.DataFrame, header_row: int) -> Optional[int]:
 
 
 def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
-    """A note declaring how many portal notes (credit AND debit) were not
-    reconciled.
+    """A declaration that the portal's notes could NOT be matched — because no
+    books-side note register was supplied, so the note pass has nothing to
+    reconcile them against.
 
-    Both kinds are carried on the B2B-CDNR sheet and both are a separate
-    document class from invoices — neither is reconciled against the books, so
-    both belong in this declaration (Test Set 3 S3-F1 DN/City/07 included)."""
+    Deliberately worded as "matching could not run", NOT "notes were not
+    reconciled": the notes are a first-class document class now, and the
+    omission is the missing register, not the note itself. Both kinds are
+    counted, since both are excluded from the invoice pipeline (Test Set 3
+    S3-F1 DN/City/07 included).
+
+    Returns None when the file carries no notes at all."""
     total = 0
     debit_total = 0
     for sheet in _CREDIT_NOTE_SHEETS:
@@ -108,12 +113,12 @@ def credit_note_note(path: Path) -> Optional[dict[str, Any]]:
     return {
         "code": "credit_notes_not_reconciled",
         "kind": "unreconciled_source",
-        "title": f"{total} {label} in the portal file were not reconciled",
+        "title": f"{total} {label} in the portal file were not matched",
         "detail": (
-            f"The portal file carries {total} {label} (B2B-CDNR). No books-side "
-            "credit/debit-note register was uploaded, and note matching is not part "
-            "of this reconciliation, so they were kept out of the invoice table "
-            "entirely rather than silently dropped."
+            f"The portal file carries {total} {label} (B2B-CDNR), but no books-side "
+            "note register was supplied for this run, so note matching could not be "
+            "attempted. They were kept out of the invoice table entirely rather than "
+            "dropped silently. Upload the note register to reconcile them."
         ),
         "count": total,
     }

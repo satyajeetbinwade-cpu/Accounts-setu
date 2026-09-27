@@ -141,6 +141,160 @@ gst:
     - 18.0    # UNVERIFIED — confirm against current GST law before accuracy testing
     - 28.0    # UNVERIFIED — confirm against current GST law before accuracy testing
 
+  # -------------------------------------------------------------------------
+  # Notes — books-side Credit/Debit Note Register vs the portal's B2B-CDNR
+  # -------------------------------------------------------------------------
+  # A note is a SEPARATE document class from an invoice: it is reconciled by
+  # its own pass into its own result set, and is never merged into the invoice
+  # pool — so a note can never move invoice counts, Period ITC or Eligible
+  # ITC. See src/matching/note_reference.py for the two rules this block
+  # drives and why they are configurable rather than hardcoded.
+  notes:
+    enabled: true
+
+    # --- Where the note reference comes from, in priority order -----------
+    # The reference register leaves its dedicated `Voucher Ref. No.` column
+    # BLANK on every observed row (it holds the client's own booking ref), so
+    # narration is the operative source; a populated dedicated column is
+    # honoured first when a future export provides one.
+    reference_sources: [dedicated_column, narration]
+
+    # --- Column identification (used by the parser, not by classification) --
+    columns:
+      reference_aliases: ["voucher ref. no.", "voucher ref no", "note no", "note number", "credit note no"]
+      # "Particulars" holds the SUPPLIER NAME in the reference file, NOT the
+      # narration — it belongs with the party aliases, not here. The citation
+      # free text lives in "Narration".
+      narration_aliases: ["narration", "remarks", "description"]
+      party_aliases: ["particulars", "buyer", "supplier name", "party name", "name & address of dealer"]
+      gstin_aliases: ["gstin/uin", "gstin", "gstin of supplier", "supplier gstin", "party gstin"]
+      voucher_type_aliases: ["voucher type"]
+      voucher_number_aliases: ["voucher no.", "voucher no", "voucher number"]
+      # Never map these to `note_reference`. `Voucher No.` holds the CLIENT's
+      # own booking number ("8/2025-26") — mapping it would turn a booking
+      # reference into a join key, which is the worst possible failure for
+      # this feature because it fails SILENTLY (every note simply unmatched).
+      never_reference_aliases:
+        - "voucher no."
+        - "voucher no"
+        - "voucher number"
+        - "date"
+        - "gstin/uin"
+        - "pan no."
+        - "sales tax no."
+      # The note's OWN date sits a period behind the booking, so the booking
+      # `Date` must not be used for the date-window fallback.
+      note_date_aliases: ["voucher ref. date", "note date", "credit note date"]
+      booking_date_aliases: ["date", "voucher date"]
+
+    # A row CITING a supplier credit note IS a credit note, whatever its
+    # voucher-type label says. This client's register reads "Debit Note" on
+    # every row while every narration cites a credit note — in Tally that is
+    # how a RECEIVED credit note is recorded, so the label is audit evidence
+    # only and must never drive the verdict.
+    citation_patterns:
+      - '(?i)\bcredit\s*note\b'
+      - '(?i)\bc\.?\s?n\.?\s*(?:no|number|#|:)'
+
+    # Extraction runs on the text AFTER the first citation (never on the whole
+    # string), and the token must contain a digit — so a stray word ("DATED")
+    # cannot be harvested as a reference. Must survive, from THIS ONE FILE:
+    #   "CREDIT NOTE NO.  CD-12/04-2025"   double space, "NO."
+    #   "CREDIT NOTE NO. SRI-312/25-26"    FY-style suffix
+    #   "CREDIT NOTE NO. 50"               bare number
+    #   "Credit Note No CD-197/04-2025"    different case, no period
+    #   "CREDIT NOTE NO. CN/193/25-26"     the reference itself contains "CN/"
+    reference_extract_pattern: '(?i)(?:no\.?|number|#|:)?\s*[.:\-]?\s*((?=[\w./\-]*\d)[A-Za-z0-9][\w./\-]*)'
+
+    # Legacy marker/sign signals — used ONLY when no citation exists, so the
+    # existing genuine-debit-note treatment is preserved exactly.
+    cn_marker_patterns:
+      - '(?i)^CN\s*[-/]'
+    negative_value_is_credit_note: true
+
+    # --- Reference normalisation (BOTH sides, ONE function) ---------------
+    normalise:
+      uppercase: true
+      strip_trailing: '[-./\s]+$'
+      # Period tokens are stripped ONLY at the END of a reference. The invoice
+      # patterns are UNANCHORED and would match the interior "12/04" of
+      # "CD-12/04-2025", collapsing distinct supplier notes onto one key.
+      trailing_period_patterns:
+        - '(?<=\w)[-/\s]?[0-9]{2}-[0-9]{2}$'
+        - '(?<=\w)[-/\s]?[0-9]{4}-[0-9]{2}$'
+      strip_separators: '[-/.\s]'
+      strip_leading_zeros_in_numeric_runs: true
+      keep_raw_as: note_reference_raw
+    # A collapsed key merges two different notes, so key collisions are
+    # REPORTED (mirroring gst_matcher.invoice_key_collisions), never silent.
+    report_key_collisions: true
+
+    # --- Matching ---------------------------------------------------------
+    match:
+      require_kind_agreement: true     # CN<->CN / DN<->DN; a mismatch is a Document Type Mismatch
+      compare_absolute_values: true    # both sides are sign-normalised ITC-negative
+      # A note's OWN date lags the booking date by a period, so the note may
+      # live in the ADJACENT period's GSTR-2B rather than this run's file.
+      adjacent_period: true
+      date_field_books: voucher_ref_date   # the note's own date, NOT the booking date
+      # CONFIRMED (D.3): the portal's note date IS the supplier's OWN note date
+      # (the B2B-CDNR "Credit note/Debit note details :: Note date" field) —
+      # not the recipient's booking date and not the filing date. The books
+      # register's `Voucher Ref. Date` is the same party's date, so the window
+      # below compares like with like and 5 days is the right width.
+      date_field_portal: note_date
+      date_window_days: 5
+      # A reference is NOT proof on its own: the shared normaliser strips a
+      # trailing FY/period token, so a supplier who REUSES a base number in a
+      # later year ("SRI-312/25-26" then "SRI-312/26-27") produces ONE key for
+      # two different notes and nothing else in the pass would notice. An
+      # exact-reference pair more than this many days apart is therefore a
+      # DIFFERENT document: it is rejected here and reported as a near-miss on
+      # the exception, rather than silently matched.
+      # Deliberately generous — it rejects a different YEAR, not a late booking.
+      reference_date_guard_days: 180
+      # Applied when ONE side has no GSTIN. The pair then rests on the note
+      # reference plus the amount agreeing, so its confidence drops to the
+      # variant tier rather than reading as a full exact match.
+      # NOTE: when NEITHER side has a GSTIN the pair is not admitted at all —
+      # with no supplier anchor a short reference does not identify a document
+      # (see src/matching/note_matcher.py::_gstin_pair_ok).
+      confidence_baselines:
+        exact: 98                # GSTIN + normalised note reference
+        reference_variant: 90    # matched after tail-period / separator / leading-zero
+        gstin_date_value: 80     # fallback tier
+        cross_period_penalty: -12
+        ambiguity_penalty: -8
+        invalid_gstin_penalty: -5
+        missing_gstin_penalty: -8
+
+    # --- Value-block shape (rate-bucketed note register) ------------------
+    # Unlike the Purchase Register, these rate buckets carry TAX ONLY (no
+    # "Txbl." counterpart — the header has no kind token) and the taxable base
+    # is the item-category columns. Verified against four real rows:
+    #   2.5% of 2654.64 = 66.37 (bucket value)  -> buckets are TAX
+    #   6.0% of 2185.38 = 131.12 (bucket value)
+    value_block:
+      invoice_value_column_aliases: ["gross total", "gross amount", "total"]
+      # "Short & Excess" is a paise-level residual whose DIRECTION varies row
+      # to row (one row short, the next over) — it maps to the EXISTING
+      # `rounding_adjustment` canonical field, never a second rounding concept.
+      rounding_column_aliases: ["short & excess", "short and excess", "round off", "other amt."]
+      taxable_value: sum_of_item_category_columns
+      item_category_rule: between(invoice_value_column, first_rate_bucket_column)
+      rate_buckets:
+        header_shape: '<prefix>? <HEAD> [<kind>]? @ <rate>%'
+        default_kind: tax
+        mirror_check: 'CGST@r == SGST@r'
+        explanation_check: 'each bucket tax is explained by one item-category taxable at that rate'
+
+    # --- Field tiers ------------------------------------------------------
+    # `igst` is OPTIONAL: an intra-state register carries no IGST column at
+    # all, and requiring it would flag every row of a perfectly good file.
+    required_fields: [gstin, note_reference, note_date, taxable_value, invoice_value]
+    optional_fields: [igst, cess, party_name]
+    derived_fields: [total_tax, cgst, sgst]
+
 
 tds:
   recon_type: TDS

@@ -92,6 +92,10 @@ _ZERO_DEFAULT_FIELDS = {"rounding_adjustment"}
 _GST_SOURCES = {"tally", "tally_purchase_register", "gstr2b", "ims"}
 _TDS_SOURCES = {"form26as", "tds"}
 _OTHER_SOURCES = {"bank", "vendor_ledger", "opening_balances", "loan_sheet", "salary"}
+# Books-side Credit/Debit NOTE register — a SEPARATE document class from the
+# Purchase Register. Shares the GST canonical frame but has its own required
+# set (see `required_fields_for`).
+_NOTE_SOURCES = {"credit_notes"}
 
 # Fields the matcher genuinely cannot work without. Anything here that ends
 # up unmapped puts the result in `unmapped_required_fields` and blocks the
@@ -507,6 +511,11 @@ def _schema_family(source_type: str, recon_type: Optional[str] = None) -> str:
         if recon_type in ("GST", "TDS"):
             return recon_type.lower()
         return "tally"
+    if source_type in _NOTE_SOURCES:
+        # A books-side NOTE register reuses the GST canonical frame (its own
+        # deterministic parser adds the note-identity columns on top), but it
+        # has its OWN required set — see required_fields_for().
+        return "gst"
     if source_type in _GST_SOURCES:
         return "gst"
     if source_type in _TDS_SOURCES:
@@ -539,6 +548,13 @@ def required_fields_for(source_type: str, recon_type: Optional[str] = None) -> l
     when `recon_type` is unknown nothing is treated as required at upload
     time — the Run screen, which knows the recon type, applies the gate.
     """
+    if source_type in _NOTE_SOURCES:
+        # NOT the GST set: a note register has no `invoice_number`, and an
+        # intra-state register has no `igst` column at all. Demanding either
+        # would flag every row of a perfectly good file.
+        from src.f6.note_register import NOTE_REQUIRED_FIELDS
+
+        return list(NOTE_REQUIRED_FIELDS)
     family = _schema_family(source_type, recon_type)
     if family == "tally":
         return []
@@ -1454,6 +1470,145 @@ _BOOKS_SOURCE_TYPES = {"tally", "tally_purchase_register"}
 # GST set (which omits them — see RC3/D13).
 from src.f6.books_register import BOOKS_REQUIRED_FIELDS as REQUIRED_BOOKS_FIELDS  # noqa: E402
 
+# Books-side NOTE register slot. A separate document class from the Purchase
+# Register, so it has its own deterministic parser and its own required set —
+# the generic GST set would demand an `invoice_number` a note register does
+# not have, and would require `igst`, which an intra-state register omits.
+_NOTE_SOURCE_TYPES = {"credit_notes"}
+
+# Source types whose DETERMINISTIC parse must always be re-run rather than
+# replayed from a stored generic mapping. A note register qualifies because its
+# note IDENTITY (reference, kind) is computed AFTER the parse: re-applying a
+# canonical-field mapping reproduces the amounts but silently loses the note
+# columns, leaving every note unmatched with no error anywhere.
+_DETERMINISTIC_ONLY = {"credit_notes"}
+
+# The note-identity columns the parser COMPUTES rather than maps. Reported as
+# mapped, with the reason saying where each came from, so the review screen
+# never shows a resolved note identity as "not present".
+_NOTE_IDENTITY_REASONS = {
+    "note_reference": "Extracted from the register's narration and normalised to the shared join key.",
+    "note_reference_raw": "The verbatim cited reference — kept as evidence.",
+    "note_kind": "Classified from the citation, not from the voucher-type label.",
+    "note_reference_signal": "Why this row is (or is not) treated as a credit note.",
+    "voucher_type_raw": "The register's own voucher label — audit evidence only, never the verdict.",
+    "note_citation_count": "How many supplier notes this row cites.",
+    "note_date": "The register's Voucher Ref. Date — the note's OWN date, not the booking date.",
+}
+
+
+def _note_register_result(
+    path: Any, source_type: str, filename: str, client: str, period: Optional[str],
+    *, recon_type: Optional[str], signature: str, client_id: Optional[int],
+    actor: str, db_path=None,
+) -> Optional[IngestionResult]:
+    """Try the deterministic NOTE-register path for a books note register.
+
+    Returns None when the file is not a note register, so the caller falls
+    through to the generic fingerprint-and-learn path — that is what routes an
+    UNRECOGNISED layout to the AI-proposal + human-confirmation flow instead
+    of force-fitting it.
+    """
+    try:
+        from src.f6.note_register import NOTE_FIELDS, NOTE_REQUIRED_FIELDS, parse_note_register
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        parsed = parse_note_register(str(path), source_type, filename)
+    except Exception:  # noqa: BLE001
+        return None
+    if parsed is None:
+        return None
+
+    required = list(NOTE_REQUIRED_FIELDS)
+    outcome = parsed.run_validation(required_fields=required)
+    validation = outcome.to_json()
+    hard_stopped = outcome.hard_stopped
+
+    mapped_rules = {rule["canonical_field"]: rule for rule in parsed.rules}
+    structural = {"source_type", "source_file", "original_row", "total_tax"}
+    fields = [f for f in GST_CANONICAL_FIELDS if f not in structural] + list(NOTE_FIELDS)
+
+    mappings: list[FieldMapping] = []
+    for field in fields:
+        rule = mapped_rules.get(field)
+        if rule is not None:
+            columns = rule.get("source_columns") or []
+            detail = (
+                f"Summed from {len(columns)} column(s): " + ", ".join(columns) + "."
+                if rule["kind"] == "aggregate" else
+                (f"Mapped from {columns[0]!r}." if columns else "Mapped.")
+            )
+            mappings.append(FieldMapping(
+                canonical_field=field, source_column=" + ".join(columns) if columns else None,
+                confidence=None, reason=detail, required=field in required,
+                aggregate_columns=list(columns) if rule["kind"] == "aggregate" and columns else None,
+            ))
+            continue
+        if field in _NOTE_IDENTITY_REASONS:
+            mappings.append(FieldMapping(
+                canonical_field=field, source_column=field, confidence=None,
+                reason=_NOTE_IDENTITY_REASONS[field], required=field in required,
+            ))
+            continue
+        if field == "total_tax":
+            reason = "Derived from the tax heads — not mapped from a column."
+        elif field == "igst":
+            reason = "Not present in this file — an intra-state register carries no IGST column."
+        else:
+            reason = "Not present in this file."
+        mappings.append(FieldMapping(
+            canonical_field=field, source_column=None, confidence=None,
+            reason=reason, required=field in required,
+        ))
+
+    unmapped_required = [
+        f for f in required if not any(m.canonical_field == f and m.mapped for m in mappings)
+    ]
+
+    warnings = list(parsed.warnings)
+    for result in outcome.results:
+        if result.result == "row_flag":
+            warnings.append(result.detail)
+    for result in outcome.results:
+        if result.result == "hard_stop":
+            warnings.append(f"BLOCKED — {result.detail}")
+
+    # NOT `build_caveats()`: that maps unmapped canonical fields to "a check
+    # could not run", and an absent `igst` on an intra-state register is
+    # expected, not a limitation. Notes carry their own explanation instead.
+    status = STATUS_BLOCKED if hard_stopped else (
+        STATUS_PARTIAL if (unmapped_required or parsed.identity_warnings) else STATUS_OK
+    )
+
+    result = IngestionResult(
+        source_type=source_type, filename=filename, client=client, period=period,
+        status=status, canonical_df=parsed.frame, field_mappings=mappings,
+        unmapped_required_fields=unmapped_required,
+        row_count_in=parsed.row_count_read, row_count_out=parsed.row_count_parsed,
+        warnings=warnings, headers=[], header_row=parsed.metadata.header_row,
+        sheet_name=None, sheet_ambiguous=False, classification=None,
+        model_used=None, llm_cached=False, header_signature=signature,
+        notes=[
+            "Parsed with the deterministic NOTE-register engine — no model call was needed.",
+            "Notes are a SEPARATE document class: they are reconciled by their own pass "
+            "and never enter the invoice pool.",
+            "Taxable value is the sum of the item-category columns "
+            + (", ".join(parsed.item_category_columns) if parsed.item_category_columns else "(none detected)")
+            + ".",
+            "The note date is the register's Voucher Ref. Date, not the booking date — a "
+            "note is typically issued a period before it is booked.",
+        ],
+        validation=validation,
+        metadata=parsed.metadata.to_dict(),
+        rate_bucket_matrix=parsed.matrix.to_report() if parsed.matrix else [],
+        column_dispositions=parsed.column_dispositions,
+        ingestion_path="deterministic",
+        hard_stopped=hard_stopped,
+    )
+    return result
+
 
 def _books_register_result(
     path: Any, source_type: str, filename: str, client: str, period: Optional[str],
@@ -1693,6 +1848,22 @@ def normalize_source_file(
                 result.caveats = result.build_caveats(recon_type)
                 _persist_result(result, client_id=client_id, actor=actor, db_path=db_path)
                 return result
+
+        # --- Deterministic NOTE-register fast path ---
+        # A books-side Credit/Debit Note Register is a SEPARATE document class
+        # (own result table, own report section, own ITC figure), so it gets
+        # its own deterministic parser. It runs BEFORE the books branch: the
+        # two slots are disjoint, but the note sheet lives BESIDE the Purchase
+        # Register sheet in one workbook, so a mis-detection would be silent.
+        if source_type in _NOTE_SOURCE_TYPES:
+            note_result = _note_register_result(
+                path, source_type, filename, client, period,
+                recon_type=recon_type, signature=signature,
+                client_id=client_id, actor=actor, db_path=db_path,
+            )
+            if note_result is not None:
+                _persist_result(note_result, client_id=client_id, actor=actor, db_path=db_path)
+                return note_result
 
         # --- Deterministic books-register fast path (rate-bucketed) ---
         # A books-side Purchase Register splits each tax head across rate
@@ -2122,6 +2293,7 @@ def _canonical_frame_for(
         stored is not None
         and stored.get("status") in (STATUS_OK, STATUS_PARTIAL, STATUS_BLOCKED)
         and not f6_bridge.supports(source_type)
+        and source_type not in _DETERMINISTIC_ONLY
     )
     if replay_stored:
         # A stored result written by an OLDER build may carry a mapping the
@@ -2286,6 +2458,107 @@ def _renormalize_from_stored(
     return result
 
 
+def _prev_period(period: Optional[str]) -> Optional[str]:
+    """``YYYY-MM`` -> the previous month, or None when unparseable."""
+    import re as _re
+
+    match = _re.match(r"^(\d{4})-(\d{2})$", str(period or ""))
+    if not match:
+        return None
+    year, month = int(match.group(1)), int(match.group(2))
+    if month == 1:
+        return f"{year - 1:04d}-12"
+    return f"{year:04d}-{month - 1:02d}"
+
+
+def _note_file(client: str, period: Optional[str], source_type: str, filename: Optional[str]) -> Optional[Path]:
+    """The on-disk path of a note-bearing source file, or None.
+
+    Deliberately does NOT go through `source_data_path()`, which CREATES the
+    directory: probing for a previous period that has no files must not leave
+    an empty folder behind (it would show up as a period on every picker).
+    """
+    from src.data_paths import DATA_ROOT
+
+    if not period or not filename:
+        return None
+    path = DATA_ROOT / client / str(period) / source_type / str(filename)
+    return path if path.exists() else None
+
+
+def load_note_frames(
+    client: str, period: Optional[str], *, selected_files: Optional[dict[str, str]] = None,
+    client_id: Optional[int] = None, actor: str = "system", db_path=None,
+) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame], list[str]]:
+    """``(books_notes, portal_notes, adjacent_portal_notes, warnings)``.
+
+    `books_notes` is None when no note register was supplied — and the caller
+    MUST NOT run the note pass in that case. With no register every portal note
+    would report "Not in Books" when the truth is simply that nothing was
+    uploaded to compare against; the honest output is the run-note declaration
+    instead.
+
+    `portal_notes` is the union of the portal files supplied for the period
+    (GSTR-2B and IMS both carry a note sheet). `adjacent_portal_notes` is the
+    PREVIOUS period's, because a note's own date lags the booking by a period.
+    """
+    sel = dict(selected_files or {})
+    warnings: list[str] = []
+
+    books_notes: Optional[pd.DataFrame] = None
+    register = _note_file(client, period, "credit_notes", sel.get("credit_notes"))
+    if register is not None:
+        try:
+            frame, _caveats = _canonical_frame_for(
+                client, period, "credit_notes", sel["credit_notes"], recon_type="GST",
+                client_id=client_id, actor=actor, db_path=db_path,
+            )
+            books_notes = frame
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(
+                f"The books note register could not be read ({exc}), so note matching "
+                "was not attempted."
+            )
+
+    portal_notes: Optional[pd.DataFrame] = None
+    for source_type in ("gstr2b", "ims"):
+        path = _note_file(client, period, source_type, sel.get(source_type))
+        if path is None:
+            continue
+        try:
+            from src.ingestion_ai import f6_bridge
+
+            frame = f6_bridge.parse_portal_notes(path, source_type, path.name)
+        except Exception:  # noqa: BLE001
+            frame = None
+        if frame is None or not len(frame):
+            continue
+        portal_notes = frame if portal_notes is None else pd.concat(
+            [portal_notes, frame], ignore_index=True
+        )
+
+    adjacent_notes: Optional[pd.DataFrame] = None
+    previous = _prev_period(period)
+    if previous:
+        for source_type in ("gstr2b", "ims"):
+            path = _note_file(client, previous, source_type, sel.get(source_type))
+            if path is None:
+                continue
+            try:
+                from src.ingestion_ai import f6_bridge
+
+                frame = f6_bridge.parse_portal_notes(path, source_type, path.name)
+            except Exception:  # noqa: BLE001
+                frame = None
+            if frame is None or not len(frame):
+                continue
+            adjacent_notes = frame if adjacent_notes is None else pd.concat(
+                [adjacent_notes, frame], ignore_index=True
+            )
+
+    return books_notes, portal_notes, adjacent_notes, warnings
+
+
 def load_canonical_pair(
     client: str,
     period: str,
@@ -2386,6 +2659,7 @@ def load_canonical_pair(
     # reconcile (credit notes, IMS coverage) — never silently omitted. Every
     # supplied portal source is scanned, not just the one picked for matching,
     # so an IMS export alongside a GSTR-2B still contributes its coverage.
+    note_register_supplied = bool(sel.get("credit_notes"))
     try:
         from src.ingestion_ai.portal_coverage import portal_run_notes
 
@@ -2395,7 +2669,13 @@ def load_canonical_pair(
                 continue
             p = source_data_path(client, period, st) / fn
             if p.exists():
-                run_notes.extend(portal_run_notes(p, st))
+                for note in portal_run_notes(p, st):
+                    # When a note register IS supplied the notes are actually
+                    # reconciled by the note pass, so "were not matched" would be
+                    # a FALSE declaration. The runner records the real counts.
+                    if note.get("code") == "credit_notes_not_reconciled" and note_register_supplied:
+                        continue
+                    run_notes.append(note)
     except Exception:  # noqa: BLE001
         pass
 

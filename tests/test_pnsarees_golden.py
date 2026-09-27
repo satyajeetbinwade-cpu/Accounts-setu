@@ -258,12 +258,18 @@ def test_every_result_has_plain_language_reason(results):
 # --- Run notes (D7) ---------------------------------------------------------
 
 def test_run_notes_declare_credit_notes_and_ims(pair):
+    """With no books note register the declaration must say MATCHING could not
+    run — not that the notes were unreconciled by design, which is no longer
+    true now that notes have their own pass."""
     _books, _portal, _sf, _cav, notes = pair
     codes = {n["code"] for n in notes}
     assert "credit_notes_not_reconciled" in codes
     credit = next(n for n in notes if n["code"] == "credit_notes_not_reconciled")
     assert credit["count"] == 12
     assert "12 credit note" in credit["title"]
+    assert "were not matched" in credit["title"]
+    assert "no books-side note register was supplied" in credit["detail"]
+    assert "note matching could not be attempted" in credit["detail"]
 
 
 # --- Negative tests (D2) ----------------------------------------------------

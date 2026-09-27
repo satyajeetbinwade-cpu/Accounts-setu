@@ -53,6 +53,9 @@ SOURCE_TYPE_LABELS = {
 # source-type adds but doesn't list here still appears (appended, A–Z).
 SOURCE_TYPE_ORDER = [
     "tally",
+    # Books-side note register — a separate document class from the Purchase
+    # Register, so it sits beside it rather than with the portal sources.
+    "credit_notes",
     "gstr2b",
     "ims",
     "form26as",

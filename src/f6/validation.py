@@ -323,6 +323,7 @@ def run_all_checks(
     skip_re_upload_guard: bool = False,
     mirror_pairs: Optional[list[tuple[str, str]]] = None,
     rate_buckets: Optional[list[dict[str, Any]]] = None,
+    duplicate_key_fields: tuple[str, ...] = ("gstin", "invoice_number", "invoice_date"),
 ) -> ValidationOutcome:
     """Run every §8 guardrail and collect results. Hard-stop checks are
     still run in full (not short-circuited) so a Path B reviewer sees every
@@ -345,7 +346,7 @@ def run_all_checks(
         outcome.results.append(check_mirror_columns(rows, pairs=mirror_pairs))
     if rate_buckets:
         outcome.results.append(check_implied_rate(rows, buckets=rate_buckets))
-    outcome.results.append(check_duplicate_detection(rows))
+    outcome.results.append(check_duplicate_detection(rows, key_fields=duplicate_key_fields))
 
     if not skip_re_upload_guard and file_hash is not None:
         outcome.results.append(check_re_upload_guard(file_hash, prior_runs or []))

@@ -63,6 +63,30 @@ _BUCKET_RE = re.compile(
     r"@\s*(?P<rate>\d+(?:\.\d+)?)\s*%$"
 )
 
+# A SECOND header shape, found in a books-side NOTE register: an optional
+# leading word and NO kind token at all —
+#
+#     Unclaimed CGST @ 2.5%      Unclaimed SGST @ 6%
+#
+# The kind is not stated, so it is DETERMINED BY ARITHMETIC rather than
+# guessed: on a real four-row specimen ``2.5% x 2654.64 = 66.37`` and
+# ``6% x 2185.38 = 131.12`` both equal the bucket value, i.e. these columns
+# carry TAX. The taxable base lives in separate item-category columns (see
+# `src/f6/note_register.py`), which is the INVERSE of the Purchase Register
+# layout where every rate has a `Txbl.` counterpart.
+#
+# Tried only AFTER the strict shape fails for a given header, so a file whose
+# buckets already match the strict shape can never change meaning.
+_BUCKET_RE_LOOSE = re.compile(
+    r"^(?P<prefix>[a-z][a-z ]*?)?"
+    r"(?P<head>igst|cgst|sgst|utgst|cess)\s*"
+    r"(?:(?P<kind>txbl\.?|taxable|tax)\s*(?:amt\.?|amount)?\s*)?"
+    r"@\s*(?P<rate>\d+(?:\.\d+)?)\s*%$"
+)
+
+# Applied when a loose match states no kind (the note-register shape).
+LOOSE_DEFAULT_KIND = "tax"
+
 
 @dataclass
 class RateBucket:
@@ -72,6 +96,9 @@ class RateBucket:
     kind: str          # 'taxable' | 'tax'
     rate: float
     column: str        # the flattened source column label
+    # Any leading word the loose shape matched (e.g. "Unclaimed"). Recorded so
+    # the column-disposition report can state it instead of dropping it.
+    prefix: str = ""
 
 
 @dataclass
@@ -204,6 +231,51 @@ class RateBucketMatrix:
             out.append({"rate": b.rate, "taxable": mate.column, "tax": b.column})
         return out
 
+    # -- tax-only layouts (the note register) ------------------------------
+
+    def has_taxable_buckets(self) -> bool:
+        """Whether any bucket carries a taxable base. False for a TAX-ONLY
+        layout, where the taxable base comes from item-category columns and
+        §5.4's implied-rate check cannot be derived from the matrix."""
+        return any(b.kind == "taxable" for b in self.buckets)
+
+    def tax_mirror_pairs(self) -> list[tuple[str, str]]:
+        """(CGST tax column, SGST/UTGST tax column) at the SAME rate.
+
+        The TAX analogue of `mirror_pairs()`: an intra-state supply splits
+        CGST and SGST equally, so the two tax columns must agree. This is the
+        mirror assertion that still applies to a tax-only layout, where the
+        taxable-only `mirror_pairs()` returns nothing.
+        """
+        pairs: list[tuple[str, str]] = []
+        for head in ("SGST", "UTGST"):
+            for b in self.buckets:
+                if b.head != head or b.kind != "tax":
+                    continue
+                mate = next(
+                    (x for x in self.buckets
+                     if x.head == "CGST" and x.kind == "tax" and x.rate == b.rate),
+                    None,
+                )
+                if mate is not None:
+                    pairs.append((mate.column, b.column))
+        return pairs
+
+    def explanation_inputs(self) -> list[dict[str, Any]]:
+        """Per-bucket inputs for the note register's EXPLANATION check: the
+        rate and the TAX column, for heads that have no taxable mate.
+
+        Deliberately NOT `rate_bucket_inputs()` — that requires a Tax/Txbl
+        pair at the same rate, which a tax-only layout does not have, so it
+        would silently skip every bucket and check nothing.
+        """
+        out: list[dict[str, Any]] = []
+        for b in self.buckets:
+            if b.kind != "tax" or b.head != "CGST":
+                continue  # CGST is the mirror's source of truth; SGST duplicates it
+            out.append({"rate": b.rate, "tax_column": b.column, "head": b.head})
+        return out
+
     def to_report(self) -> list[dict[str, Any]]:
         """The head × rate matrix as rows, for the UI's Tax-columns card."""
         rows: list[dict[str, Any]] = []
@@ -239,14 +311,32 @@ def detect_rate_buckets(headers: list[str]) -> RateBucketMatrix:
         label = re.sub(r"\s+", " ", str(raw)).strip()
         if not label:
             continue
-        m = _BUCKET_RE.match(label.lower())
+        lower = label.lower()
+
+        m = _BUCKET_RE.match(lower)
+        if m:
+            kind_raw = (m.group("kind") or "").rstrip(".")
+            kind = "taxable" if kind_raw in ("txbl", "taxable") else "tax"
+            matrix.buckets.append(
+                RateBucket(head=m.group("head").upper(), kind=kind,
+                           rate=float(m.group("rate")), column=label)
+            )
+            continue
+
+        # Fall back to the loose shape ONLY for headers the strict shape could
+        # not match, so an already-recognised bucket can never change meaning.
+        m = _BUCKET_RE_LOOSE.match(lower)
         if not m:
             continue
-        head = m.group("head").upper()
-        kind_raw = m.group("kind").rstrip(".")
-        kind = "taxable" if kind_raw in ("txbl", "taxable") else "tax"
+        kind_raw = (m.group("kind") or "").rstrip(".")
+        if kind_raw:
+            kind = "taxable" if kind_raw in ("txbl", "taxable") else "tax"
+        else:
+            kind = LOOSE_DEFAULT_KIND
         matrix.buckets.append(
-            RateBucket(head=head, kind=kind, rate=float(m.group("rate")), column=label)
+            RateBucket(head=m.group("head").upper(), kind=kind,
+                       rate=float(m.group("rate")), column=label,
+                       prefix=(m.group("prefix") or "").strip())
         )
     return matrix
 

@@ -160,8 +160,85 @@ def _credit_notes_for_run(run: dict[str, Any]) -> list[dict[str, Any]]:
             "total_tax": round(igst + cgst + sgst + cess, 2),
             "note_value": round(note_value, 2),
             "itc_availability": review.clean(r.iloc[22]) if len(r) > 22 else "",
+            # A legacy row has no matched status: the note pass did not run for
+            # this run, so saying anything else would be a fabrication.
+            "classification": "Not reconciled (no note register supplied)",
+            "difference_type": "",
+            "confidence": "",
+            "match_reason": (
+                "Itemised from the portal file for reference — the note matching "
+                "pass did not run for this run."
+            ),
         })
     return notes
+
+
+_NOTE_CLASS_ORDER = ("Matched", "Amount Difference", "Not in Books", "Not in Portal")
+
+# Display label for a note that no pass has classified (a legacy run).
+_NOTE_NOT_RECONCILED = "Not reconciled (no note register supplied)"
+
+
+def _note_row_from_match(record: dict[str, Any]) -> dict[str, Any]:
+    """One `note_match_results` row in the shape the report renders.
+
+    Mirrors `_credit_notes_for_run()`'s keys exactly, so the HTML and the
+    workbook need no special case — only four extra columns, which is what
+    makes this a replacement rather than a second card.
+    """
+    portal = record.get("portal_record") or {}
+    books = record.get("books_record") or {}
+    source = portal or books
+
+    def money(value: Any) -> float:
+        return round(float(value or 0), 2)
+
+    return {
+        "reference": str(record.get("note_reference_raw") or record.get("note_reference") or ""),
+        "party": review.clean(source.get("party_name")) or "Unknown supplier",
+        "gstin": review.clean(source.get("gstin")) or "",
+        "note_type": str(record.get("note_kind") or ""),
+        "date": review.format_date(str(record.get("note_date") or "")),
+        "place_of_supply": review.clean(source.get("place_of_supply")) or "",
+        "reverse_charge": review.clean(source.get("reverse_charge")) or "",
+        "taxable_value": money(source.get("taxable_value")),
+        "igst": money(source.get("igst")),
+        "cgst": money(source.get("cgst")),
+        "sgst": money(source.get("sgst")),
+        "cess": money(source.get("cess")),
+        "total_tax": money(record.get("note_tax")),
+        "note_value": money(record.get("note_value")),
+        "itc_availability": review.clean(source.get("itc_eligibility")) or "",
+        "classification": str(record.get("classification") or ""),
+        "difference_type": str(record.get("difference_type") or ""),
+        "confidence": str(record.get("confidence_band") or ""),
+        "match_reason": str(record.get("match_reason") or ""),
+    }
+
+
+def _notes_for_run(
+    run: dict[str, Any], *, db_path=None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(note rows, whether they came from the NOTE MATCHING PASS)``.
+
+    A run reconciled after the note pass exists carries real note results, so
+    the card becomes a MATCHED-STATUS table read from them (the note pass, not
+    a re-read of the portal file). A run from before that has none — an older
+    run, or one where no books register was supplied — and keeps the portal
+    itemisation as a documented legacy fallback rather than silently losing
+    its notes.
+    """
+    run_id = run.get("run_id")
+    if run_id is not None:
+        try:
+            from src import queries
+
+            frame = queries.get_note_results(int(run_id), db_path=db_path)
+            if len(frame):
+                return [_note_row_from_match(r) for r in frame.to_dict("records")], True
+        except Exception:  # noqa: BLE001
+            pass
+    return _credit_notes_for_run(run), False
 
 
 def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
@@ -202,7 +279,7 @@ def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
             "match_reason": item["match_reason"],
         })
 
-    credit_notes = _credit_notes_for_run(run)
+    credit_notes, notes_from_pass = _notes_for_run(run, db_path=db_path)
 
     quality = review.data_quality_notes(
         model["items"],
@@ -214,6 +291,17 @@ def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
 
     itc = model.get("itc") or {}
     credit_note_tax = round(sum(n["total_tax"] for n in credit_notes), 2)
+    # Note-level ITC impact, deliberately SEPARATE from Period/Eligible ITC: a
+    # note adjusts ITC and must never be netted into the invoice figures. With
+    # no note results there is nothing to state, so the figures are reported as
+    # UNAVAILABLE rather than as zero — zero would read as "no note risk".
+    note_counts = {
+        name: sum(1 for n in credit_notes if n.get("classification") == name)
+        for name in _NOTE_CLASS_ORDER
+    }
+    note_itc_at_risk = round(sum(
+        n["total_tax"] for n in credit_notes if n.get("classification") != "Matched"
+    ), 2) if notes_from_pass else 0.0
 
     return {
         "run_id": run_id,
@@ -250,6 +338,15 @@ def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
             "credit_note_tax": credit_note_tax,
             "credit_note_tax_display": review.format_money(credit_note_tax),
             "credit_note_value": round(sum(n["note_value"] for n in credit_notes), 2),
+            # --- Note-level ITC impact (its own figure, never merged) -------
+            "note_itc_available": notes_from_pass,
+            "note_itc_gross": credit_note_tax if notes_from_pass else 0.0,
+            "note_itc_gross_display": review.format_money(credit_note_tax if notes_from_pass else 0.0),
+            "note_itc_at_risk": note_itc_at_risk,
+            "note_itc_at_risk_display": review.format_money(note_itc_at_risk),
+            "note_matched_count": note_counts["Matched"],
+            "note_counts": note_counts,
+            "note_source": "matched" if notes_from_pass else ("portal-only" if credit_notes else "none"),
         },
         "classification_slices": [
             s for s in model["classification_slices"] if int(s.get("count") or 0) > 0
@@ -458,15 +555,35 @@ def _invoice_rows_html(invoices: list[dict[str, Any]]) -> str:
 
 def _credit_note_rows_html(notes: list[dict[str, Any]]) -> str:
     if not notes:
-        return '<tr><td colspan="8" class="muted">No credit notes were declared for this run.</td></tr>'
+        return '<tr><td colspan="9" class="muted">No credit notes were declared for this run.</td></tr>'
     return "".join(
         f'<tr><td>{_html.escape(n["party"])}</td><td>{_html.escape(n["gstin"])}</td>'
         f'<td>{_html.escape(n["reference"])}</td><td>{_html.escape(n["note_type"])}</td>'
         f'<td>{_html.escape(n["date"])}</td>'
         f'<td class="num">{review.format_money(n["taxable_value"])}</td>'
         f'<td class="num">{review.format_money(n["total_tax"])}</td>'
-        f'<td class="num">{review.format_money(n["note_value"])}</td></tr>'
+        f'<td class="num">{review.format_money(n["note_value"])}</td>'
+        f'<td>{_html.escape(str(n.get("classification") or ""))}</td></tr>'
         for n in notes
+    )
+
+
+def _note_card_subtitle(kpi: dict[str, Any]) -> str:
+    """The credit-notes card's one-line scope statement.
+
+    Says which of the two things the reader is looking at: a matched-status
+    table produced by the note pass, or the legacy portal itemisation from a run
+    where no books register was supplied (and therefore no matching could run).
+    """
+    if kpi.get("note_itc_available"):
+        return (
+            "Reconciled as their own document class — matched note-to-note, never "
+            "merged into the invoice table."
+        )
+    return (
+        "Held separately from the invoice reconciliation and represented for "
+        "completeness only — no books-side note register was supplied, so note "
+        "matching did not run."
     )
 
 
@@ -539,7 +656,8 @@ def render_html(data: dict[str, Any]) -> str:
       {_kpi_card("Invoices", str(k["invoice_count"]), f'{k["matched_count"]} matched')}
       {_kpi_card("Exceptions", str(k["exception_count"]), f'{k["reviewed_count"]} reviewed')}
       {_kpi_card("Credit notes", str(k["credit_note_count"]), "excluded from invoice counts")}
-      {_kpi_card("Credit note tax", k["credit_note_tax_display"], "not reconciled this run")}
+      {_kpi_card("Credit note tax", k["credit_note_tax_display"],
+                 "note-level ITC, separate from Period ITC" if k.get("note_itc_available") else "not reconciled this run")}
     </div>
     <p class="muted">Gross invoice value on the exception items was
       {_html.escape(k["gross_value_display"])} — shown here for context only; it is
@@ -579,13 +697,12 @@ def render_html(data: dict[str, Any]) -> str:
 
   <div class="card">
     <h2>Credit notes ({len(data["credit_notes"])})</h2>
-    <p class="sub">Held separately from the invoice reconciliation and represented
-      for completeness only.</p>
+    <p class="sub">{_note_card_subtitle(k)}</p>
     <table>
       <thead><tr>
         <th>Supplier</th><th>GSTIN</th><th>Note no.</th><th>Type</th><th>Date</th>
         <th class="num">Taxable value</th><th class="num">Total tax</th>
-        <th class="num">Note value</th>
+        <th class="num">Note value</th><th>Classification</th>
       </tr></thead>
       <tbody>{_credit_note_rows_html(data["credit_notes"])}</tbody>
     </table>
@@ -644,6 +761,9 @@ _CREDIT_NOTE_HEADERS = [
     "Supplier", "GSTIN", "Note no.", "Note type", "Note date",
     "Taxable value", "IGST", "CGST", "SGST", "Cess", "Total tax",
     "Note value", "ITC availability", "Reverse charge",
+    # Appended AFTER column K deliberately: the Overview's `=SUM(K2:K..)`
+    # total-tax reference and the verification scripts that read it stay valid.
+    "Classification", "Difference type", "Confidence", "Match reason",
 ]
 
 
@@ -773,12 +893,27 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
         ("Not in portal", f"=COUNTIF({m_cls},\"Not in Portal\")", "0", ""),
         ("Amount difference", f"=COUNTIF({m_cls},\"Amount Difference\")", "0", ""),
         ("Credit notes", f"=COUNTA({cn_count})", "0", "tracked separately from invoices"),
-        ("Credit note tax", f"=SUM({cn_tax})", _MONEY_FMT, "not reconciled this run"),
+        ("Credit note tax", f"=SUM({cn_tax})", _MONEY_FMT,
+         "note-level ITC, separate from Period ITC" if k.get("note_itc_available")
+         else "not reconciled this run"),
         # §4 — column K (Invoice value), NOT column J (Total tax). The label is
         # "gross invoice value", so it must sum the invoice-value column; the
         # cell previously summed tax and shipped a note admitting it.
         ("Gross invoice value on exceptions (context only)", f"=SUMIF({m_cls},\"<>Matched\",{m_val})",
          _MONEY_FMT, ""),
+        # --- Note-level ITC impact, its own block, appended BELOW the invoice
+        # key figures so not one existing cell reference moves. A note adjusts
+        # ITC and is never netted into Period or Eligible ITC.
+        ("Note ITC (gross) — matched separately",
+         f"=SUM({cn_tax})" if k.get("note_itc_available") else None,
+         _MONEY_FMT if k.get("note_itc_available") else None,
+         "every note's tax on either side" if k.get("note_itc_available")
+         else "Notes were not reconciled in this run — no figure to state"),
+        ("Note ITC at risk (notes that did not match)",
+         k["note_itc_at_risk"] if k.get("note_itc_available") else None,
+         _MONEY_FMT if k.get("note_itc_available") else None,
+         "notes not matched to a counterpart" if k.get("note_itc_available")
+         else "Notes were not reconciled in this run — no figure to state"),
     ]
     itc_row = None
     period_row = None
@@ -923,6 +1058,8 @@ def write_xlsx(data: dict[str, Any], output_path: Path) -> Path:
             n["party"], n["gstin"], n["reference"], n["note_type"], n["date"],
             n["taxable_value"], n["igst"], n["cgst"], n["sgst"], n["cess"],
             n["total_tax"], n["note_value"], n["itc_availability"], n["reverse_charge"],
+            n.get("classification", ""), n.get("difference_type", ""),
+            n.get("confidence", ""), n.get("match_reason", ""),
         ]
         for col, value in enumerate(values, start=1):
             cell = wsc.cell(row=idx, column=col, value=value)

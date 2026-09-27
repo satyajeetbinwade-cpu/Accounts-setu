@@ -93,6 +93,61 @@ def _validate_tds(block: dict[str, Any]) -> None:
         _fail_missing("tds.section_table (must contain at least one section)")
 
 
+REQUIRED_GST_NOTES_KEYS = [
+    "citation_patterns",
+    "reference_extract_pattern",
+    "normalise",
+    "match",
+    "value_block",
+]
+REQUIRED_GST_NOTES_BASELINE_KEYS = ["exact", "reference_variant", "gstin_date_value"]
+
+
+def _validate_gst_notes(block: dict[str, Any]) -> None:
+    """The `gst.notes` block is OPTIONAL — but a present, enabled one must be
+    complete.
+
+    A half-configured block would fall back to the module's own defaults,
+    which is a silent behaviour change: the whole point of the citation rule
+    is that it is inspectable in config. So fail loudly instead.
+    """
+    notes = block.get("notes")
+    if notes is None:
+        return
+    if not isinstance(notes, dict):
+        _fail_missing("gst.notes (must be a mapping)")
+    if not notes.get("enabled"):
+        return  # deliberately disabled — nothing to validate
+
+    for key in REQUIRED_GST_NOTES_KEYS:
+        if key not in notes:
+            _fail_missing(f"gst.notes.{key}")
+
+    if not isinstance(notes["citation_patterns"], list) or not notes["citation_patterns"]:
+        _fail_missing("gst.notes.citation_patterns (must be a non-empty list)")
+
+    normalise = notes["normalise"]
+    if not isinstance(normalise, dict):
+        _fail_missing("gst.notes.normalise")
+    # The anchored period patterns are the ONE thing that must not be swapped
+    # for the invoice (unanchored) list — hence an explicit presence check.
+    if not isinstance(normalise.get("trailing_period_patterns"), list) or not normalise["trailing_period_patterns"]:
+        _fail_missing("gst.notes.normalise.trailing_period_patterns (must be a non-empty list)")
+
+    match = notes["match"]
+    if not isinstance(match, dict):
+        _fail_missing("gst.notes.match")
+    baselines = match.get("confidence_baselines")
+    if not isinstance(baselines, dict):
+        _fail_missing("gst.notes.match.confidence_baselines")
+    for key in REQUIRED_GST_NOTES_BASELINE_KEYS:
+        if key not in baselines:
+            _fail_missing(f"gst.notes.match.confidence_baselines.{key}")
+
+    if not isinstance(notes["value_block"], dict) or not notes["value_block"]:
+        _fail_missing("gst.notes.value_block (must be a non-empty mapping)")
+
+
 def _validate_gst(block: dict[str, Any]) -> None:
     _validate_common("gst", block, REQUIRED_GST_KEYS)
     bl = block["confidence_baselines"]
@@ -105,6 +160,7 @@ def _validate_gst(block: dict[str, Any]) -> None:
         _fail_missing("gst.valid_rate_slabs (must be a non-empty list)")
     if not isinstance(block["invoice_number_fy_patterns"], list) or not block["invoice_number_fy_patterns"]:
         _fail_missing("gst.invoice_number_fy_patterns (must be a non-empty list)")
+    _validate_gst_notes(block)
 
 
 def _validate_other(block: dict[str, Any]) -> None:

@@ -61,7 +61,8 @@ def _run_gst(
     *,
     client_id: int | None = None,
     actor: str = "system",
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    db_path=None,
+) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     if USE_CANONICAL_INGESTION:
         books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
             client, period, "GST", selected_files, client_id=client_id, actor=actor
@@ -94,7 +95,90 @@ def _run_gst(
             })
     except Exception:  # noqa: BLE001
         pass
-    return results, source_files, caveats, run_notes
+
+    note_results = _run_note_pass(
+        client, period, gst_config, selected_files, run_notes,
+        client_id=client_id, actor=actor, db_path=db_path,
+    )
+    return results, source_files, caveats, run_notes, note_results
+
+
+def _run_note_pass(
+    client: str,
+    period: str,
+    gst_config: dict,
+    selected_files: dict[str, str] | None,
+    run_notes: list[dict[str, Any]],
+    *,
+    client_id: int | None,
+    actor: str,
+    db_path=None,
+) -> list[dict[str, Any]]:
+    """Reconcile notes, SEPARATELY from invoices, and declare what happened.
+
+    Notes are their own document class: this pass produces its own result set
+    in its own table and never contributes a row to the invoice results, so it
+    cannot move an invoice count, Period ITC or Eligible ITC.
+
+    The pass runs ONLY when a books note register was supplied. Without one,
+    every portal note would report "Not in Books" when the truth is simply
+    that nothing was uploaded to compare against — so the run-note declaration
+    (added by `load_canonical_pair`) stands instead, scoped to say matching
+    could not run.
+
+    Best-effort by design: a note-pass failure must never take a run down.
+    """
+    try:
+        from src.ingestion_ai.normalizer import load_note_frames
+        from src.matching.note_matcher import match_notes, summarise_notes
+
+        books_notes, portal_notes, adjacent_notes, warnings = load_note_frames(
+            client, period, selected_files=selected_files,
+            client_id=client_id, actor=actor, db_path=db_path,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    for warning in warnings:
+        run_notes.append({
+            "code": "note_register_unreadable",
+            "kind": "data_quality",
+            "title": "The books note register could not be read",
+            "detail": warning,
+            "count": 0,
+        })
+
+    if books_notes is None:
+        return []  # no register ⇒ no note pass; the declaration stands
+
+    try:
+        note_results = match_notes(
+            books_notes, portal_notes, gst_config, adjacent_portal_notes=adjacent_notes,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+
+    if not note_results:
+        return []
+
+    summary = summarise_notes(note_results)
+    counts = summary["counts"]
+    run_notes.append({
+        "code": "note_reconciliation",
+        "kind": "reconciled",
+        "title": (
+            f"{summary['total']} note(s) were reconciled separately from the invoices: "
+            f"{counts['Matched']} matched, {counts['Amount Difference']} amount difference, "
+            f"{counts['Not in Books']} not in books, {counts['Not in Portal']} not in portal"
+        ),
+        "detail": (
+            "Notes are a separate document class and never enter the invoice table. "
+            f"Note-level ITC: {summary['note_tax_gross']:.2f} in total, of which "
+            f"{summary['note_tax_at_risk']:.2f} is on notes that did not match."
+        ),
+        "count": summary["total"],
+    })
+    return note_results
 
 
 def _run_tds(
@@ -224,20 +308,22 @@ def execute_run(
     try:
         try:
             if recon_type == "GST":
-                results, used_files, caveats, run_notes = _run_gst(
+                results, used_files, caveats, run_notes, note_results = _run_gst(
                     client, period, config["gst"], selected_files,
-                    client_id=client_id, actor=actor,
+                    client_id=client_id, actor=actor, db_path=db_path,
                 )
             elif recon_type == "TDS":
                 results, used_files, caveats, run_notes = _run_tds(
                     client, period, config["tds"], selected_files,
                     client_id=client_id, actor=actor,
                 )
+                note_results = []
             else:
                 results, used_files, caveats, run_notes = _run_other(
                     client, period, config["other"], selected_files,
                     client_id=client_id, actor=actor,
                 )
+                note_results = []
         except IngestionBlockedError as exc:
             # A file that couldn't be normalized into a canonical frame.
             # This is an expected, explainable outcome — NOT a crash — so
@@ -280,6 +366,12 @@ def execute_run(
             r["run_id"] = run_id
 
         db.insert_match_results(conn, results)
+
+        # Notes go in their OWN table — never a row in `match_results`, so no
+        # invoice count, Period ITC or Eligible ITC figure can ever include one.
+        for note in note_results:
+            note["run_id"] = run_id
+        db.insert_note_results(conn, note_results)
 
         conn.commit()
     except Exception:

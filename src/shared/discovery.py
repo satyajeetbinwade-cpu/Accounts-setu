@@ -32,12 +32,20 @@ RECON_SOURCE_TYPES = {
 # Books-side source types (always required for a run).
 BOOKS_SOURCE_TYPES = ["tally"]
 
+# Books-side NOTE register. A separate document class from the Purchase
+# Register, reconciled by its own pass — deliberately NOT in RECON_SOURCE_TYPES
+# above, so it can never be picked as the books or portal side of an INVOICE run.
+NOTE_SOURCE_TYPES = ["credit_notes"]
+
 RECON_TYPES = ["GST", "TDS", "OTHER"]
 
 # Plain-language labels for each source type, shown in the Run tab's file
 # picker instead of the raw folder name.
 SOURCE_TYPE_LABELS = {
     "tally": "Books / Purchase Register",
+    # The register's own voucher-type column reads "Debit Note" while the rows
+    # are credit notes RECEIVED, so the label names both and says "received".
+    "credit_notes": "Credit / Debit Note Register (received)",
     "gstr2b": "GSTR-2B",
     "ims": "IMS",
     "form26as": "Form 26AS",
@@ -56,6 +64,10 @@ SOURCE_TYPE_HINTS = {
     "tally": "Your internal books — purchases/sales as recorded in your accounting "
              "system. A Tally export is one format; an ERP export or a prepared "
              "register is equally fine.",
+    "credit_notes": "The books-side register of credit notes you RECEIVED from "
+                    "suppliers (Tally may label the voucher type 'Debit Note'). "
+                    "Optional — a run without it still reconciles invoices, and "
+                    "says so in the report.",
     "gstr2b": "The GSTR-2B download from the GST portal.",
     "ims": "The Invoice Management System action export from the GST portal.",
     "form26as": "The Form 26AS download from TRACES.",

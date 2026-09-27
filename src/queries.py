@@ -435,6 +435,36 @@ def get_results(
     return df.reset_index(drop=True)
 
 
+def get_note_results(run_id: int, *, db_path=None) -> pd.DataFrame:
+    """The note-to-note results for a run, from their OWN table.
+
+    Read separately from `get_results` on purpose: the invoice surface (counts,
+    Period ITC, eligible credit, the exception queue) must never be able to
+    include a note, however its filters are written.
+    """
+    conn = db.get_connection(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM note_match_results WHERE run_id = ? ORDER BY note_result_id",
+            [run_id],
+        ).fetchall()
+        if not rows:
+            return pd.DataFrame(
+                columns=["classification", "confidence_band", "note_reference",
+                         "note_kind", "note_date", "note_tax", "note_value", "note_side"]
+            )
+        df = pd.DataFrame([dict(r) for r in rows])
+        for column in ("books_record", "portal_record"):
+            if column in df.columns:
+                df[column] = df[column].apply(
+                    lambda value: json.loads(value) if isinstance(value, str) and value else None
+                )
+        return df
+    finally:
+        conn.close()
+
+
 def get_run_summary(run_id: int, *, db_path=None) -> dict[str, Any]:
     """Counts by classification, by band, by difference_type, plus total
     rupee value per classification bucket."""

@@ -176,12 +176,26 @@ def _apply_aggregate(
     even though it appears under both the CGST and SGST prefix in the
     listed source_columns (the config lists CGST-side columns only, by
     design, so no special-casing is needed here beyond a plain sum — the
-    caller is responsible for listing exactly one side's columns)."""
+    caller is responsible for listing exactly one side's columns).
+
+    A BLANK bucket contributes 0, never NaN. Rate buckets are sparse by
+    design — a row populates only the rate(s) that apply to it — and
+    ``float("nan")`` succeeds, so a blank cell used to poison the whole sum
+    into NaN, which then quantised to a NULL. That silently dropped
+    `taxable_value`/`cgst`/`sgst` on exactly the rows a client did not
+    restate, and it is the layout the note register and any 12%/28% slab
+    produce routinely.
+    """
     total = 0.0
     for col in source_columns:
         val = _get_column(row.to_dict(), [], col)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text in ("", "nan", "None"):
+            continue
         try:
-            total += float(str(val).strip() or 0)
+            total += float(text)
         except (TypeError, ValueError):
             continue
     return total

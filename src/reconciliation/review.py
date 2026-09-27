@@ -940,6 +940,17 @@ def data_quality_notes(
             "No action is required for this reconciliation; review Pending / No Action "
             "items directly in the IMS portal if needed.",
         ),
+        "note_reconciliation": (
+            "Notes are reconciled as their own document class, so they never enter the "
+            "invoice table and cannot move an invoice count or the Period ITC figure.",
+            "No action is required; review the Credit notes section for each note's own "
+            "matched status, and the Note ITC figures for the ITC they represent.",
+        ),
+        "note_register_unreadable": (
+            "Without the books note register no note matching could be attempted, so the "
+            "portal's notes are declared rather than reconciled.",
+            "Re-upload the note register (or fix the file) and re-run to reconcile notes.",
+        ),
     }
     for n in (run_notes or []):
         code = n.get("code") or ""

@@ -200,7 +200,10 @@ def test_notes_are_excluded_from_the_invoice_pool(model):
     """The debit note (S3-F1 DN/City/07) is a NOTE, not an invoice. It must not
     appear anywhere in the invoice table — neither as a false MATCHED row (which
     inflated Eligible/Period ITC by its own ₹360 tax) nor as an orphan exception.
-    Credit notes are excluded the same way."""
+    Credit notes are excluded the same way.
+
+    This is the invariable half of the note design: whichever surface a note
+    lands on, it is NEVER an invoice row."""
     refs = {str(i["reference"]) for i in model["items"]}
     assert not any(r.upper().startswith("DN") for r in refs), refs
     assert not any(r.upper().startswith("CN") for r in refs), refs
@@ -210,6 +213,22 @@ def test_notes_are_excluded_from_the_invoice_pool(model):
     # designed Not in Books rows (SG/302 and OFH/15), not three.
     nib = [i for i in model["items"] if i["classification"] == "Not in Books"]
     assert sorted(str(i["reference"]) for i in nib) == ["OFH/15", "SG/302"]
+
+
+def test_without_a_note_register_the_note_pass_does_not_run(data_root, db_path):
+    """Set 3 supplies no books note register, so the portal's DN/City/07 is
+    DECLARED as unmatched rather than reconciled — and crucially it is not
+    written into the note results as a false \"Not in Books\" either."""
+    from src import queries, runner
+
+    rid = runner.execute_run(
+        CLIENT, PERIOD, "GST", None, load_config(),
+        db_path=db_path, selected_files=SELECTED, actor="test",
+    )
+    assert len(queries.get_note_results(rid, db_path=db_path)) == 0
+    codes = {n["code"] for n in queries.get_run(rid, db_path=db_path)["run_notes"]}
+    assert "credit_notes_not_reconciled" in codes
+    assert "note_reconciliation" not in codes
 
 
 # --- Per-row 'likely cause' (Run 6 QA Finding 2) ---------------------------

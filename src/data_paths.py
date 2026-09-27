@@ -11,6 +11,11 @@ VALID_SOURCE_TYPES = {
     "tally", "gstr2b", "ims", "form26as", "tds",
     # 2C "Other" sources (Module 2).
     "bank", "vendor_ledger", "opening_balances", "loan_sheet", "salary",
+    # Books-side Credit/Debit NOTE register — a SEPARATE document class from
+    # the Purchase Register, reconciled by its own pass. Deliberately NOT a
+    # member of discovery.RECON_SOURCE_TYPES: it must never be picked as the
+    # books or portal side of an INVOICE run.
+    "credit_notes",
 }
 
 

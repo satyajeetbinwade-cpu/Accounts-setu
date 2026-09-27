@@ -49,6 +49,16 @@ _EXTRA_FIELDS = ["itc_eligibility", "reverse_charge", "gstr1_period", "ims_actio
 
 _STRUCTURAL = {"source_type", "source_file", "original_row", "total_tax"}
 
+# Document-type values that mean a NOTE. A GSTR-2B carries its credit and debit
+# notes on the B2B-CDNR sheet, so these are a SEPARATE document class from
+# invoices: excluded from the invoice pool (both sides) and reconciled by the
+# note pass instead. ONE definition, shared by the invoice path's exclusion and
+# by `parse_portal_notes()`, so the two can never disagree.
+_NOTE_TYPES = {
+    "credit note", "credit notes", "cdn", "cr note", "c note",
+    "debit note", "debit notes", "dn", "dr note", "d note",
+}
+
 
 def supports(source_type: str) -> bool:
     """Whether this bridge has a deterministic parser for the source type."""
@@ -64,6 +74,109 @@ def _load_config(source_type: str) -> Optional[dict[str, Any]]:
         return getattr(mod, factory)()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _portal_frame(
+    rows: list[dict[str, Any]], frame_fields: list[str], source_type: str, filename: str,
+) -> tuple[pd.DataFrame, list[str]]:
+    """Build + coerce the canonical portal frame from parsed rows.
+
+    THE NOTE ROWS ARE STILL IN THE RESULT — the caller decides which document
+    class it wants. `parse_portal_export()` splits them out and drops them from
+    the invoice frame; `parse_portal_notes()` returns them. Sharing this one
+    construction is what guarantees the two consumers agree, by construction,
+    on what a note is.
+    """
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        rec: dict[str, Any] = {}
+        for f in frame_fields:
+            rec[f] = row.get(f)
+        rec["source_type"] = source_type
+        rec["source_file"] = filename
+        # Which sheet the row came from — the portal control-total check is
+        # scoped to the B2B sheet, so the provenance must survive to here.
+        rec["_source_sheet"] = row.get("_source_sheet")
+        rec["original_row"] = json.dumps(
+            {str(k): (None if v is None else str(v)) for k, v in row.items()}
+        )
+        records.append(rec)
+
+    df = pd.DataFrame(records)
+
+    # Coerce numerics/dates the same way the generic path does, so the
+    # engine sees an identical frame shape regardless of which path ran.
+    from src.ingestion import (
+        GST_DATE_FIELDS,
+        GST_NUMERIC_FIELDS,
+        GST_UPPER_FIELDS,
+        _coerce_numeric,
+        _normalize_dates_flexible,
+    )
+
+    for f in GST_UPPER_FIELDS:
+        if f in df.columns:
+            df[f] = df[f].astype(str).str.upper().str.strip().replace({"NAN": "", "NONE": ""})
+    for f in GST_DATE_FIELDS:
+        if f in df.columns and df[f].notna().any():
+            df[f] = _normalize_dates_flexible(df[f], field=f, context=f"{source_type}/{filename}")
+    for f in GST_NUMERIC_FIELDS:
+        if f in df.columns:
+            coerced, _affected = _coerce_numeric(df[f])
+            df[f] = coerced
+    if "rounding_adjustment" in df.columns:
+        df["rounding_adjustment"] = df["rounding_adjustment"].fillna(0.0)
+    df["total_tax"] = df["cgst"] + df["sgst"] + df["igst"] + df["cess"]
+    return df, []
+
+
+def parse_portal_notes(
+    path: Path, source_type: str, filename: str,
+) -> Optional[pd.DataFrame]:
+    """The portal's CREDIT/DEBIT NOTE rows as a canonical frame.
+
+    The SAME deterministic parse the invoice path runs, returning the document
+    class the invoice path deliberately excludes — so a note can never be
+    re-derived differently from how it was excluded, and the report and the
+    matching pass read one definition of "a note".
+
+    Returns None when the bridge doesn't cover the source type, the file
+    yields no rows, or it carries no notes at all.
+
+    Unlike the invoice path, rows are NOT dropped for lacking a note number:
+    a note with no reference is still a real document (and is reported as such
+    by the note pass), whereas an invoice with no identity cannot be matched
+    at all.
+    """
+    if not supports(source_type):
+        return None
+
+    config = _load_config(source_type)
+    if config is None:
+        return None
+
+    try:
+        from src.f6.parser import parse_file
+
+        is_excel = Path(str(path)).suffix.lower() in (".xlsx", ".xls")
+        parsed = parse_file(str(path), config, is_excel=is_excel)
+    except Exception:  # noqa: BLE001
+        return None
+
+    rows = parsed.all_rows
+    if not rows:
+        return None
+
+    canonical_fields = [f for f in GST_CANONICAL_FIELDS if f not in _STRUCTURAL]
+    frame_fields = canonical_fields + [f for f in _EXTRA_FIELDS if f not in canonical_fields]
+    df, _warnings = _portal_frame(rows, frame_fields, source_type, filename)
+
+    if "document_type" not in df.columns:
+        return None
+    mask = df["document_type"].astype(str).str.strip().str.lower().isin(_NOTE_TYPES)
+    if not bool(mask.any()):
+        return None
+    return df.loc[mask].reset_index(drop=True)
 
 
 def parse_portal_export(
@@ -120,46 +233,8 @@ def parse_portal_export(
     canonical_fields = [f for f in GST_CANONICAL_FIELDS if f not in _STRUCTURAL]
     frame_fields = canonical_fields + [f for f in _EXTRA_FIELDS if f not in canonical_fields]
 
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        rec: dict[str, Any] = {}
-        for f in frame_fields:
-            rec[f] = row.get(f)
-        rec["source_type"] = source_type
-        rec["source_file"] = filename
-        # Which sheet the row came from — the portal control-total check is
-        # scoped to the B2B sheet, so the provenance must survive to here.
-        rec["_source_sheet"] = row.get("_source_sheet")
-        rec["original_row"] = json.dumps(
-            {str(k): (None if v is None else str(v)) for k, v in row.items()}
-        )
-        records.append(rec)
-
-    df = pd.DataFrame(records)
-
-    # Coerce numerics/dates the same way the generic path does, so the
-    # engine sees an identical frame shape regardless of which path ran.
-    from src.ingestion import (
-        GST_DATE_FIELDS,
-        GST_NUMERIC_FIELDS,
-        GST_UPPER_FIELDS,
-        _coerce_numeric,
-        _normalize_dates_flexible,
-    )
-
-    for f in GST_UPPER_FIELDS:
-        if f in df.columns:
-            df[f] = df[f].astype(str).str.upper().str.strip().replace({"NAN": "", "NONE": ""})
-    for f in GST_DATE_FIELDS:
-        if f in df.columns and df[f].notna().any():
-            df[f] = _normalize_dates_flexible(df[f], field=f, context=f"{source_type}/{filename}")
-    for f in GST_NUMERIC_FIELDS:
-        if f in df.columns:
-            coerced, _affected = _coerce_numeric(df[f])
-            df[f] = coerced
-    if "rounding_adjustment" in df.columns:
-        df["rounding_adjustment"] = df["rounding_adjustment"].fillna(0.0)
-    df["total_tax"] = df["cgst"] + df["sgst"] + df["igst"] + df["cess"]
+    df, frame_warnings = _portal_frame(rows, frame_fields, source_type, filename)
+    warnings.extend(frame_warnings)
 
     # Drop rows with no usable identity (mirrors apply_mapping's rule).
     identity_cols = [c for c in ("gstin", "invoice_number") if c in df.columns]
@@ -179,12 +254,7 @@ def parse_portal_export(
     # as false exceptions (no counterpart) or as a false MATCHED row that
     # inflates ITC (Test Set 3 S3-F1 DN/City/07).
     if "document_type" in df.columns:
-        note_mask = df["document_type"].astype(str).str.strip().str.lower().isin(
-            {
-                "credit note", "credit notes", "cdn", "cr note", "c note",
-                "debit note", "debit notes", "dn", "dr note", "d note",
-            }
-        )
+        note_mask = df["document_type"].astype(str).str.strip().str.lower().isin(_NOTE_TYPES)
         note_count = int(note_mask.sum())
         if note_count:
             warnings.append(
