@@ -313,6 +313,13 @@ class ReconcileState(AuthState):
     blockers: list[str] = []
 
     @rx.var
+    def can_manage_clients(self) -> bool:
+        """Whether this user may create a client at all. Gates the
+        "Add New Client" link beside the Client picker, so we never offer a
+        shortcut that lands on a disabled form."""
+        return "clients.profile.manage" in self._permission_codes()
+
+    @rx.var
     def period_options(self) -> list[ContextOption]:
         """Periods with human labels — the unfiled sentinel reads as
         "Unfiled (not reconcilable)" rather than a bare "-"."""
@@ -655,6 +662,19 @@ class ReconcileState(AuthState):
         self.ctx_client = v
         self.rail_return = False
         self._load_context()
+
+    @rx.event
+    def add_new_client(self):
+        """Leave the flow and open the Client Roster with the create form ready.
+
+        Client creation lives in exactly ONE place (F2's roster + its
+        ``create_client`` handler), so this links there rather than forking a
+        second copy of the form. ``ClientState.new_client`` is chained so the
+        user lands on the form itself, not just the roster.
+        """
+        from setu.state.client_state import ClientState
+
+        return [ClientState.new_client, rx.redirect("/clients")]
 
     @rx.event
     def set_ctx_period(self, v: str):

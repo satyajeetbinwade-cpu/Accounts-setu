@@ -97,7 +97,25 @@ def _context_stage() -> rx.Component:
                     ReconcileState.clients.length() > 0,
                     rx.hstack(
                         rx.vstack(
-                            rx.text("Client", style=t.TEXT["label"]),
+                            rx.hstack(
+                                rx.text("Client", style=t.TEXT["label"]),
+                                rx.cond(
+                                    ReconcileState.can_manage_clients,
+                                    rx.text(
+                                        "Add New Client",
+                                        on_click=ReconcileState.add_new_client,
+                                        color=t.Color.ACCENT.value,
+                                        font_size="12px",
+                                        font_weight="600",
+                                        text_decoration="underline",
+                                        cursor="pointer",
+                                        _hover={"opacity": "0.75"},
+                                    ),
+                                    rx.fragment(),
+                                ),
+                                spacing="2",
+                                align="center",
+                            ),
                             rx.select(
                                 ReconcileState.clients,
                                 value=ReconcileState.ctx_client,
