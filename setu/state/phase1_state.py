@@ -367,7 +367,15 @@ class Phase1State(AuthState):
 
     @rx.var
     def portal_ready(self) -> bool:
-        return any((not s.is_books) and s.selected for s in self.slots)
+        # A note register is books-SIDE and OPTIONAL, so it must never stand in
+        # for a portal source. This screen does not offer the note slot today;
+        # the guard is here so offering it later cannot silently weaken the
+        # gate into "books + notes is enough to reconcile".
+        notes = set(discovery.NOTE_SOURCE_TYPES)
+        return any(
+            (not s.is_books) and (s.source_type not in notes) and s.selected
+            for s in self.slots
+        )
 
     @rx.var
     def run_blockers(self) -> list[str]:

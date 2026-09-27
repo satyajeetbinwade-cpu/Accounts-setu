@@ -135,7 +135,7 @@ def test_the_note_pass_runs_when_a_register_is_supplied(note_register, db):
     from src.runner import _run_note_pass
 
     run_notes: list[dict] = []
-    results = _run_note_pass(
+    results, register = _run_note_pass(
         CLIENT, PERIOD, load_config()["gst"], note_register, run_notes,
         client_id=None, actor="test", db_path=str(db),
     )
@@ -144,6 +144,9 @@ def test_the_note_pass_runs_when_a_register_is_supplied(note_register, db):
     assert {r["classification"] for r in results} == {"Not in Portal"}
     assert {r["note_kind"] for r in results} == {"Credit Note"}
     assert {r["note_reference"] for r in results} == {"CD12042025", "SRI312"}
+    # The register that was READ is named back, so the run can list it among
+    # its source files and re-opening the run can restore the selection.
+    assert register == note_register["credit_notes"] == "Credit Note.xlsx"
 
     declared = [n for n in run_notes if n["code"] == "note_reconciliation"]
     assert len(declared) == 1
@@ -157,11 +160,12 @@ def test_the_note_pass_is_skipped_when_no_register_was_supplied(db):
     from src.runner import _run_note_pass
 
     run_notes: list[dict] = []
-    results = _run_note_pass(
+    results, register = _run_note_pass(
         CLIENT, PERIOD, load_config()["gst"], {}, run_notes,
         client_id=None, actor="test", db_path=str(db),
     )
     assert results == []
+    assert register == "", "no register was read, so none is named as a source"
     assert run_notes == []
 
 
@@ -170,11 +174,13 @@ def test_a_missing_register_file_degrades_to_no_pass(db, tmp_path):
     from src.runner import _run_note_pass
 
     run_notes: list[dict] = []
-    results = _run_note_pass(
+    results, register = _run_note_pass(
         CLIENT, PERIOD, load_config()["gst"], {"credit_notes": "nope.xlsx"}, run_notes,
         client_id=None, actor="test", db_path=str(db),
     )
     assert results == []
+    # A file that was never read must NOT be listed as a source of the run.
+    assert register == ""
 
 
 def test_probing_for_a_previous_period_does_not_create_a_folder(note_register, db, tmp_path):

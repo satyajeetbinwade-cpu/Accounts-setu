@@ -103,6 +103,8 @@ class SlotRow:
     message: str
     caveats: list[str]
     resolved: bool
+    is_note: bool = False       # the optional books-side note register
+    is_optional: bool = False   # never blocks a run
 
 
 @dataclass
@@ -753,7 +755,7 @@ class ReconcileState(AuthState):
         names = set(run.get("source_file_names") or [])
         if not names:
             return
-        for source_type in discovery.RECON_SOURCE_TYPES.get(self.ctx_recon_type, []):
+        for source_type in discovery.slot_types_for(self.ctx_recon_type):
             for filename in _list_files(self.ctx_client, self.ctx_period, source_type):
                 if filename in names:
                     self.selections[source_type] = filename
@@ -767,8 +769,9 @@ class ReconcileState(AuthState):
             self.slots = []
             return
         books_types = set(discovery.BOOKS_SOURCE_TYPES)
+        note_types = set(discovery.note_slot_types(self.ctx_recon_type))
         out: list[SlotRow] = []
-        for source_type in discovery.RECON_SOURCE_TYPES[self.ctx_recon_type]:
+        for source_type in discovery.slot_types_for(self.ctx_recon_type):
             filename = self.selections.get(source_type, "")
             info = self._slot_info(source_type, filename)
             out.append(
@@ -777,6 +780,8 @@ class ReconcileState(AuthState):
                     label=discovery.source_type_label(source_type),
                     hint=discovery.source_type_hint(source_type),
                     is_books=source_type in books_types,
+                    is_note=source_type in note_types,
+                    is_optional=source_type in note_types,
                     files=_list_files(self.ctx_client, self.ctx_period, source_type),
                     selected=filename,
                     code=info["code"],
@@ -812,7 +817,19 @@ class ReconcileState(AuthState):
         status = stored.get("status")
         rows = int(stored.get("row_count_out") or 0)
         mapping = stored.get("mapping") or []
-        unmapped = [m for m in mapping if not m.get("source_column")]
+        # A canonical field with NO source column is NOT automatically a review
+        # item — the same principle applied to confidence just below. `igst` on
+        # an intra-state file, or `cess` when nothing is cess-liable, is simply
+        # absent, and the user cannot "fix" it. The genuine gap signal is
+        # `unmapped_required`, which has its own dedicated chip (and returns
+        # early above). Counting absent OPTIONAL fields here produced an
+        # unfixable "⚠ 4 field(s) need review" on a perfectly good note register
+        # (invoice_number, document_type, igst and cess — none of which a
+        # books-side note register carries).
+        unmapped = [
+            m for m in mapping
+            if not m.get("source_column") and m.get("required")
+        ]
         try:
             threshold = ingestion_ai.get_preselect_threshold()
         except Exception:  # noqa: BLE001
@@ -861,6 +878,9 @@ class ReconcileState(AuthState):
         }
 
     def _compute_readiness(self) -> None:
+        # The note register is NOT part of readiness — it is optional, so a
+        # missing or unreadable one must never block a run. `books + portals`
+        # below both derive from RECON_SOURCE_TYPES, which excludes it.
         books = discovery.BOOKS_SOURCE_TYPES
         portals = discovery.portal_source_types(self.ctx_recon_type)
         by_type = {s.source_type: s for s in self.slots}

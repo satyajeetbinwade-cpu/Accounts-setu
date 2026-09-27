@@ -39,6 +39,28 @@ NOTE_SOURCE_TYPES = ["credit_notes"]
 
 RECON_TYPES = ["GST", "TDS", "OTHER"]
 
+
+def note_slot_types(recon_type: str) -> list[str]:
+    """Books-side NOTE registers that may be supplied for a recon type.
+
+    GST only: the note pass matches the register against the portal's
+    B2B-CDNR note sheet. These are OPTIONAL inputs — a run without one still
+    reconciles invoices and states in the report that note matching could not
+    be attempted.
+    """
+    return list(NOTE_SOURCE_TYPES) if recon_type == "GST" else []
+
+
+def slot_types_for(recon_type: str) -> list[str]:
+    """Every slot Stage 2 offers, in display order: the REQUIRED invoice sides
+    first (books, then the portal sources), then the optional note register.
+
+    Anything that must be selected for a run to be possible comes before
+    anything that is merely nice to have. NOTE slots are here but NOT in
+    RECON_SOURCE_TYPES, so they can never be chosen as an invoice side.
+    """
+    return list(RECON_SOURCE_TYPES.get(recon_type, [])) + note_slot_types(recon_type)
+
 # Plain-language labels for each source type, shown in the Run tab's file
 # picker instead of the raw folder name.
 SOURCE_TYPE_LABELS = {

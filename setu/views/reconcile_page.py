@@ -291,7 +291,15 @@ def _slot_card(s) -> rx.Component:
         rx.vstack(
             rx.hstack(
                 rx.text(s.label, style=t.TEXT["card_title"]),
-                rx.cond(s.is_books, c.pill("Books side", variant="accent"), c.pill("Portal side", variant="placeholder")),
+                rx.cond(
+                    s.is_note,
+                    c.pill("Books side · optional", variant="accent"),
+                    rx.cond(
+                        s.is_books,
+                        c.pill("Books side", variant="accent"),
+                        c.pill("Portal side", variant="placeholder"),
+                    ),
+                ),
                 rx.spacer(),
                 rx.match(
                     s.chip_variant,
@@ -330,8 +338,10 @@ def _slot_card(s) -> rx.Component:
                 ),
                 rx.fragment(),
             ),
+            # A note register is parsed DETERMINISTICALLY (never by the model),
+            # so a model re-run is not offered for it.
             rx.cond(
-                s.selected != "",
+                (s.selected != "") & (~s.is_note),
                 rx.hstack(
                     rx.button(
                         rx.icon("refresh-cw", size=14),

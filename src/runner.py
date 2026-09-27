@@ -96,10 +96,15 @@ def _run_gst(
     except Exception:  # noqa: BLE001
         pass
 
-    note_results = _run_note_pass(
+    note_results, note_register = _run_note_pass(
         client, period, gst_config, selected_files, run_notes,
         client_id=client_id, actor=actor, db_path=db_path,
     )
+    # The register IS a source file of this run when it was actually read —
+    # listing it keeps the report honest about its inputs, and lets re-opening
+    # the run restore the note slot's selection.
+    if note_register and note_register not in source_files:
+        source_files = [*source_files, note_register]
     return results, source_files, caveats, run_notes, note_results
 
 
@@ -113,7 +118,7 @@ def _run_note_pass(
     client_id: int | None,
     actor: str,
     db_path=None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Reconcile notes, SEPARATELY from invoices, and declare what happened.
 
     Notes are their own document class: this pass produces its own result set
@@ -127,7 +132,13 @@ def _run_note_pass(
     could not run.
 
     Best-effort by design: a note-pass failure must never take a run down.
+
+    Returns ``(note_results, register)`` — `register` is the filename of the
+    books note register that was actually READ, or "" when none was supplied.
+    The caller lists it among the run's source files.
     """
+    register = str((selected_files or {}).get("credit_notes") or "")
+
     try:
         from src.ingestion_ai.normalizer import load_note_frames
         from src.matching.note_matcher import match_notes, summarise_notes
@@ -137,7 +148,7 @@ def _run_note_pass(
             client_id=client_id, actor=actor, db_path=db_path,
         )
     except Exception:  # noqa: BLE001
-        return []
+        return [], register
 
     for warning in warnings:
         run_notes.append({
@@ -149,17 +160,17 @@ def _run_note_pass(
         })
 
     if books_notes is None:
-        return []  # no register ⇒ no note pass; the declaration stands
+        return [], ""  # no register ⇒ no note pass; the declaration stands
 
     try:
         note_results = match_notes(
             books_notes, portal_notes, gst_config, adjacent_portal_notes=adjacent_notes,
         )
     except Exception:  # noqa: BLE001
-        return []
+        return [], register  # the register WAS read; the pass itself failed
 
     if not note_results:
-        return []
+        return [], register
 
     summary = summarise_notes(note_results)
     counts = summary["counts"]
@@ -178,7 +189,7 @@ def _run_note_pass(
         ),
         "count": summary["total"],
     })
-    return note_results
+    return note_results, register
 
 
 def _run_tds(
