@@ -38,7 +38,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import yaml
 
@@ -55,8 +55,26 @@ KEY_CREDENTIAL_ID = "ingestion_ai.llm.credential_id"
 # Fallbacks used only when config/ai_config.yaml itself is unreadable.
 _FALLBACK_MODEL = "anthropic/claude-opus-4.1"
 _FALLBACK_TIMEOUT = 120
-_FALLBACK_MAX_TOKENS = 2000
+# The ingestion prompts ask for ONE JSON entry per canonical field, each with a
+# reason string, and the books slot maps the GST+TDS UNION (21 fields) for a
+# file that may only use a handful of them. At 2000 the reply was cut off
+# mid-object (`parse_error|unbalanced JSON object`), which raised out of
+# `normalize_source_file` BEFORE anything was persisted — so the upload sat on
+# disk for ever and the slot read "not ingested yet". Sized for the widest
+# prompt this layer sends, with headroom for a reasoning model's thinking
+# tokens (which are spent from the same budget as the visible answer).
+_FALLBACK_MAX_TOKENS = 8192
 _FALLBACK_TEMPERATURE = 0.0
+
+# A reply that never closes its object was CUT OFF at the token ceiling rather
+# than malformed — the model was reached and the JSON was valid up to the cut,
+# it simply never ended. That is recoverable by asking again with a bigger
+# budget, so the marker is a named constant: the retry decision string-matches
+# it, and the two must stay in step.
+TRUNCATED_REPLY_MARKER = "unbalanced JSON object"
+# Floor for the one-shot truncation retry (a configured budget is doubled, but
+# never retried below this).
+_RETRY_MAX_TOKENS_FLOOR = 8192
 
 
 class LLMError(RuntimeError):
@@ -345,6 +363,7 @@ def _gateway_call(
     *,
     images: Optional[list[tuple[str, bytes]]] = None,
     model_override: Optional[str] = None,
+    max_tokens: Optional[int] = None,
     db_path=None,
 ) -> tuple[str, int, str]:
     """Call a touchpoint through the AI gateway.
@@ -362,7 +381,10 @@ def _gateway_call(
         text, meta = gateway.call_touchpoint_text(
             touchpoint_key, system_prompt, user_prompt,
             images=images,
-            max_tokens=_setting_int(KEY_MAX_TOKENS, _FALLBACK_MAX_TOKENS),
+            max_tokens=(
+                max_tokens if max_tokens is not None
+                else _setting_int(KEY_MAX_TOKENS, _FALLBACK_MAX_TOKENS)
+            ),
             temperature=_setting_float(KEY_TEMPERATURE, _FALLBACK_TEMPERATURE),
             actor="system:ingestion",
             timeout=_setting_int(KEY_TIMEOUT, _FALLBACK_TIMEOUT),
@@ -377,12 +399,17 @@ def _gateway_call(
 def call_llm(
     system_prompt: str, user_prompt: str, *, db_path=None,
     model_override: Optional[str] = None, touchpoint_key: str = "ingestion_mapping",
+    max_tokens: Optional[int] = None,
 ) -> tuple[str, int, str]:
     """Call the configured model with a plain-text prompt. Returns
-    (raw_text, latency_ms, model_id)."""
+    (raw_text, latency_ms, model_id).
+
+    ``max_tokens`` overrides the configured output-token ceiling for THIS call
+    only (used by the truncation retry); None keeps the configured value.
+    """
     return _gateway_call(
         touchpoint_key, system_prompt, user_prompt,
-        model_override=model_override, db_path=db_path,
+        model_override=model_override, max_tokens=max_tokens, db_path=db_path,
     )
 
 
@@ -394,6 +421,7 @@ def call_llm_vision(
     db_path=None,
     model_override: Optional[str] = None,
     touchpoint_key: str = "ingestion_mapping",
+    max_tokens: Optional[int] = None,
 ) -> tuple[str, int, str]:
     """Call a VISION-capable model with one or more images attached.
 
@@ -407,7 +435,7 @@ def call_llm_vision(
         raise LLMError("config_error|call_llm_vision requires at least one image.")
     return _gateway_call(
         touchpoint_key, system_prompt, user_prompt, images=images,
-        model_override=model_override, db_path=db_path,
+        model_override=model_override, max_tokens=max_tokens, db_path=db_path,
     )
 
 
@@ -421,12 +449,19 @@ def call_llm_vision_json(
     touchpoint_key: str = "ingestion_mapping",
 ) -> tuple[dict[str, Any], int, str, str]:
     """Vision call + JSON parse. Returns (parsed, latency_ms, model_id, raw)."""
-    content, latency_ms, model_id = call_llm_vision(
-        system_prompt, user_prompt, images, db_path=db_path,
-        model_override=model_override, touchpoint_key=touchpoint_key,
-    )
-    parsed = parse_json_response(content)
-    return parsed, latency_ms, model_id, content
+    last: dict[str, Any] = {}
+
+    def attempt(budget: Optional[int]) -> str:
+        content, latency_ms, model_id = call_llm_vision(
+            system_prompt, user_prompt, images, db_path=db_path,
+            model_override=model_override, touchpoint_key=touchpoint_key,
+            max_tokens=budget,
+        )
+        last.update(latency_ms=latency_ms, model=model_id)
+        return content
+
+    parsed, content = _json_with_truncation_retry(attempt)
+    return parsed, int(last.get("latency_ms") or 0), str(last.get("model") or ""), content
 
 
 def extract_json_object(text: str) -> str:
@@ -469,7 +504,44 @@ def extract_json_object(text: str) -> str:
             depth -= 1
             if depth == 0:
                 return s[start : i + 1]
-    raise LLMError("parse_error|unbalanced JSON object in response")
+    raise LLMError(
+        f"parse_error|{TRUNCATED_REPLY_MARKER} in response — the model's reply was "
+        "cut off before it finished (it hit the output-token limit)"
+    )
+
+
+def _looks_truncated(exc: LLMError) -> bool:
+    """True when a parse failure was caused by a reply that was CUT OFF."""
+    return TRUNCATED_REPLY_MARKER in str(exc)
+
+
+def _json_with_truncation_retry(
+    call: Callable[[Optional[int]], str],
+) -> tuple[dict[str, Any], str]:
+    """Parse a reply from ``call(None)``, re-asking ONCE with a larger output
+    budget when that reply was truncated.
+
+    A truncated reply is not a bad answer — it is an answer that never ended,
+    so the only correct recovery is to give the model room to finish. It is
+    bounded to a single extra call so a genuinely broken model cannot loop,
+    and any other parse failure propagates untouched (a malformed reply is a
+    real error, not a budget problem). Without this, a wide file could silently
+    fail ingestion for ever: the exception escapes `normalize_source_file`
+    before anything is persisted, so the upload sits on disk with the slot
+    reading "not ingested yet" and no stored result to explain why.
+    """
+    raw = call(None)
+    try:
+        return parse_json_response(raw), raw
+    except LLMError as exc:
+        if not _looks_truncated(exc):
+            raise
+    budget = max(
+        _setting_int(KEY_MAX_TOKENS, _FALLBACK_MAX_TOKENS) * 2,
+        _RETRY_MAX_TOKENS_FLOOR,
+    )
+    raw = call(budget)
+    return parse_json_response(raw), raw
 
 
 def parse_json_response(raw_text: str) -> dict[str, Any]:
@@ -508,9 +580,16 @@ def call_llm_json(
     Returns (parsed_object, latency_ms, model_id, raw_text). Raises
     LLMError on transport, envelope, or JSON-parse failure.
     """
-    raw, latency_ms, model_id = call_llm(
-        system_prompt, user_prompt, db_path=db_path,
-        model_override=model_override, touchpoint_key=touchpoint_key,
-    )
-    parsed = parse_json_response(raw)
-    return parsed, latency_ms, model_id, raw
+    last: dict[str, Any] = {}
+
+    def attempt(budget: Optional[int]) -> str:
+        raw, latency_ms, model_id = call_llm(
+            system_prompt, user_prompt, db_path=db_path,
+            model_override=model_override, touchpoint_key=touchpoint_key,
+            max_tokens=budget,
+        )
+        last.update(latency_ms=latency_ms, model=model_id)
+        return raw
+
+    parsed, raw = _json_with_truncation_retry(attempt)
+    return parsed, int(last.get("latency_ms") or 0), str(last.get("model") or ""), raw
