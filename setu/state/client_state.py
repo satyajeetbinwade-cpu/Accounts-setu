@@ -1,8 +1,15 @@
-"""F2 state — Client Profile & Master Data.
+"""F2 state — Client Profile & Master Data (flat model).
 
-Roster + profile screen (branches/GSTIN, contacts, chart of accounts,
-historical snapshot). Every handler calls ``src.clients.service``; no client
-business logic is written here.
+Roster + profile screen (Details / Contacts / Chart of Accounts /
+Historical Snapshot / Documents). Every handler calls
+``src.clients.service``; no client business logic is written here.
+
+The 27-Sep-2026 revision removed the GSTINBranch sub-entity: one GST
+registration = one EndClient row. So there is no branch switcher, no
+per-branch status and no "Branch details" tab — the former branch fields
+(GSTIN, address, state) are columns on the client itself and are edited in
+the single "Details" tab. ``NewClientState`` (below) drives the standalone
+``/clients/new`` screen.
 """
 
 from __future__ import annotations
@@ -17,8 +24,6 @@ from src.f5 import service as f5
 from setu.state.auth_state import AuthState
 from setu.state.history import HistoryEntry, load_history
 
-BRANCH_STATUSES = ["Not Started", "In Progress", "Under Review", "Filed", "Blocked"]
-
 _SYNC_TO_LIVE = {
     "succeeded": ("connected", "Connected"),
     "not_attempted": ("needs_reauth", "Not attempted"),
@@ -26,27 +31,19 @@ _SYNC_TO_LIVE = {
 }
 _SOURCE_LABELS = {"tally": "Tally", "gst_portal": "GST Portal", "traces": "TRACES", "bank": "Bank"}
 
+# The five client-level tabs. "Details" replaces the old branch/settings split.
+PROFILE_TABS = ["Details", "Contacts", "Chart of Accounts", "Historical Snapshot", "Documents"]
+DEFAULT_PROFILE_TAB = "Details"
+
 
 @dataclass
 class ClientRow:
     client_id: int
     legal_name: str
     pan: str
-    primary_gstin: str
-    assigned_team: str
-    branch_count: int
-    is_active: bool
-
-
-@dataclass
-class BranchRow:
-    branch_id: int
+    tan: str
     gstin: str
-    branch_name: str
-    address: str
-    state: str
-    status: str
-    is_primary: bool
+    assigned_team: str
     is_active: bool
 
 
@@ -84,6 +81,11 @@ class SyncChip:
     label: str
 
 
+def _text(row: dict, key: str) -> str:
+    """A DB value as display text (NULL → "")."""
+    return str(row.get(key) or "")
+
+
 class ClientState(AuthState):
     """Client roster + profile screen state."""
 
@@ -91,28 +93,24 @@ class ClientState(AuthState):
     roster: list[ClientRow] = []
     roster_search: str = ""
     show_inactive: bool = False
-    show_new_client_form: bool = False
-
-    # new-client form
-    nc_legal_name: str = ""
-    nc_pan: str = ""
-    nc_team: str = ""
-    nc_gstin: str = ""
-    nc_state: str = ""
-    nc_error: str = ""
     flash: str = ""
 
     # ---- selected profile ----------------------------------------------
     selected_client_id: int = 0
-    profile_tab: str = "Branch details"
+    profile_tab: str = DEFAULT_PROFILE_TAB
     client_name: str = ""
     client_pan: str = ""
+    client_tan: str = ""
+    client_gstin: str = ""
     client_team: str = ""
+    client_email: str = ""
+    client_phone: str = ""
+    client_address: str = ""
     client_active: bool = True
-    client_primary_gstin: str = ""
+    # Non-empty when the Reconciliation Engine holds open work for this client,
+    # so its GSTIN must not be cleared or changed.
+    gstin_gate_reason: str = ""
 
-    branches: list[BranchRow] = []
-    selected_branch_id: int = 0
     sync_chips: list[SyncChip] = []
 
     contacts: list[ContactRow] = []
@@ -121,19 +119,20 @@ class ClientState(AuthState):
     snapshot_years: list[str] = []
     snapshot_year: str = ""
 
-    # branch edit buffers
-    b_name: str = ""
-    b_address: str = ""
-    b_state: str = ""
-    b_status: str = "Not Started"
-    b_gstin: str = ""
-    b_gstin_reason: str = ""
+    # Details tab — edit buffers for the unrestricted fields (one Save).
+    d_name: str = ""
+    d_team: str = ""
+    d_email: str = ""
+    d_phone: str = ""
+    d_address: str = ""
 
-    # add-branch form
-    ab_gstin: str = ""
-    ab_name: str = ""
-    ab_state: str = ""
-    ab_address: str = ""
+    # Details tab — identity fields, each with its own reason capture.
+    d_pan: str = ""
+    d_pan_reason: str = ""
+    d_tan: str = ""
+    d_tan_reason: str = ""
+    d_gstin: str = ""
+    d_gstin_reason: str = ""
 
     # add-contact form
     ac_name: str = ""
@@ -155,63 +154,132 @@ class ClientState(AuthState):
     snap_amount: str = ""
     snap_notes: str = ""
 
-    # client settings
-    cs_name: str = ""
-    cs_team: str = ""
-    cs_pan: str = ""
-    cs_pan_reason: str = ""
-
     # F4 — per-record edit history (the reusable View History component).
     client_history: list[HistoryEntry] = []
-    branch_history: list[HistoryEntry] = []
 
     # ------------------------------------------------------------------
     # Derived
     # ------------------------------------------------------------------
-    @rx.var
-    def can_manage(self) -> bool:
+    def _codes(self) -> set[str]:
+        user = auth.current_user(self.session_token or None)
+        return auth.effective_permissions(user) if user else set()
+
+    def _can_manage(self) -> bool:
         return "clients.profile.manage" in self._codes()
 
-    @rx.var
-    def can_edit_gstin_pan(self) -> bool:
+    def _can_edit_identity(self) -> bool:
         return "clients.gstin_pan.edit" in self._codes()
 
     @rx.var
-    def gstin_dirty(self) -> bool:
-        return self.b_gstin != self._current_branch_gstin()
+    def can_manage(self) -> bool:
+        return self._can_manage()
+
+    @rx.var
+    def can_edit_gstin_pan(self) -> bool:
+        return self._can_edit_identity()
+
+    @rx.var
+    def identity_blocked_reason(self) -> str:
+        """Non-empty when PAN/TAN/GSTIN can't be saved at all (role-gated)."""
+        if not self._can_edit_identity():
+            return "Requires Manager or above to change PAN, TAN or GSTIN."
+        return ""
+
+    @rx.var
+    def gstin_blocked_reason(self) -> str:
+        """Non-empty when the GSTIN specifically can't be cleared/changed."""
+        return self.gstin_gate_reason
+
+    @rx.var
+    def details_missing(self) -> str:
+        """The SERVICE's own validation message for the current Details
+        buffers, or "".
+
+        Surfacing the service's message (instead of a second copy of the rules
+        in the UI) is what keeps the inline hint and the save gate from ever
+        drifting apart.
+        """
+        try:
+            clients.validate_client_record(
+                {
+                    "legal_name": self.d_name,
+                    "pan": self.d_pan,
+                    "tan": self.d_tan,
+                    "primary_contact_email": self.d_email,
+                    "primary_contact_phone": self.d_phone,
+                    "primary_contact_address": self.d_address,
+                }
+            )
+        except clients.ClientError as exc:
+            return str(exc)
+        return ""
+
+    @rx.var
+    def details_ready(self) -> bool:
+        return self.details_missing == ""
 
     @rx.var
     def pan_dirty(self) -> bool:
-        return self.cs_pan != self.client_pan
+        return self.d_pan != self.client_pan
+
+    @rx.var
+    def tan_dirty(self) -> bool:
+        return self.d_tan != self.client_tan
+
+    @rx.var
+    def gstin_dirty(self) -> bool:
+        return self.d_gstin != self.client_gstin
 
     @rx.var
     def coa_warning(self) -> str:
         return clients.coa_edit_warning()
 
-    def _codes(self) -> set[str]:
-        user = auth.current_user(self.session_token or None)
-        return auth.effective_permissions(user) if user else set()
-
-    def _current_branch_gstin(self) -> str:
-        for b in self.branches:
-            if b.branch_id == self.selected_branch_id:
-                return b.gstin
-        return ""
+    @rx.var
+    def identity_line(self) -> str:
+        """The header's one-line identity summary. GSTIN is deliberately NOT
+        here: it is a former branch-level field and must be visible exactly
+        once, inside the Details tab."""
+        pan = self.client_pan or "—"
+        team = self.client_team or "—"
+        return f"PAN: {pan} · Assigned team: {team}"
 
     # ------------------------------------------------------------------
     # Load
     # ------------------------------------------------------------------
     @rx.event
-    def load(self):
+    def load(self, params: dict | None = None):
         if (deny := self._gate("clients.profile.view")):
             return rx.redirect(deny)
-        # Arriving at /clients always lands on the Roster. Opening a client is
-        # a state-only transition (no route change — the profile renders on the
-        # same route), so a lingering selection made the nav / quick-access
-        # "Clients" link a dead end: it re-opened the last profile and the only
-        # way back was the profile's own (barely visible) back link.
+        requested = self._requested_client_id(params)
+        if requested:
+            # A deep link / post-create redirect (/clients?client=N) opens that
+            # client's profile directly.
+            self.selected_client_id = requested
+            self.profile_tab = DEFAULT_PROFILE_TAB
+            self._load_profile()
+            return
+        # Arriving at /clients WITHOUT a client always lands on the Roster.
+        # Opening a client is a state-only transition (no route change — the
+        # profile renders on the same route), so a lingering selection made the
+        # nav / quick-access "Clients" link a dead end.
         self.selected_client_id = 0
         self._load_roster()
+
+    def _requested_client_id(self, params: dict | None) -> int:
+        """The ``?client=N`` param, from the caller's dict when supplied, else
+        from this state's own router (the reliable source when the event is
+        dispatched without arguments)."""
+        url_params = params if isinstance(params, dict) and params else None
+        if url_params is None:
+            try:
+                url_params = dict(self.router.page.params or {})
+            except Exception:  # noqa: BLE001
+                url_params = {}
+        try:
+            value = int(str((url_params or {}).get("client") or ""))
+        except (TypeError, ValueError):
+            return 0
+        return value if value > 0 else 0
 
     def _load_roster(self) -> None:
         rows = clients.list_clients(include_inactive=self.show_inactive)
@@ -220,18 +288,19 @@ class ClientState(AuthState):
             rows = [
                 c
                 for c in rows
-                if s in (c["legal_name"] or "").lower()
-                or s in (c["pan"] or "").lower()
-                or s in (c.get("primary_gstin") or "").lower()
+                if s in _text(c, "legal_name").lower()
+                or s in _text(c, "pan").lower()
+                or s in _text(c, "tan").lower()
+                or s in _text(c, "gstin").lower()
             ]
         self.roster = [
             ClientRow(
                 client_id=c["client_id"],
                 legal_name=c["legal_name"],
-                pan=c.get("pan") or "",
-                primary_gstin=c.get("primary_gstin") or "",
-                assigned_team=c.get("assigned_team") or "",
-                branch_count=int(c.get("branch_count") or 0),
+                pan=_text(c, "pan"),
+                tan=_text(c, "tan"),
+                gstin=_text(c, "gstin"),
+                assigned_team=_text(c, "assigned_team"),
                 is_active=bool(c["is_active"]),
             )
             for c in rows
@@ -243,30 +312,27 @@ class ClientState(AuthState):
             self.selected_client_id = 0
             return
         self.client_name = client["legal_name"]
-        self.client_pan = client.get("pan") or ""
-        self.client_team = client.get("assigned_team") or ""
+        self.client_pan = _text(client, "pan")
+        self.client_tan = _text(client, "tan")
+        self.client_gstin = _text(client, "gstin")
+        self.client_team = _text(client, "assigned_team")
+        self.client_email = _text(client, "primary_contact_email")
+        self.client_phone = _text(client, "primary_contact_phone")
+        self.client_address = _text(client, "primary_contact_address")
         self.client_active = bool(client["is_active"])
-        self.client_primary_gstin = client.get("primary_gstin") or ""
-        self.cs_name = self.client_name
-        self.cs_team = self.client_team
-        self.cs_pan = self.client_pan
 
-        self.branches = [
-            BranchRow(
-                branch_id=b["branch_id"],
-                gstin=b["gstin"],
-                branch_name=b.get("branch_name") or "",
-                address=b.get("address") or "",
-                state=b.get("state") or "",
-                status=b["status"],
-                is_primary=bool(b["is_primary"]),
-                is_active=bool(b["is_active"]),
-            )
-            for b in clients.list_branches(self.selected_client_id, include_inactive=True)
-        ]
-        if self.branches and self.selected_branch_id not in {b.branch_id for b in self.branches}:
-            self.selected_branch_id = self.branches[0].branch_id
-        self._load_branch_buffers()
+        self.d_name = self.client_name
+        self.d_team = self.client_team
+        self.d_email = self.client_email
+        self.d_phone = self.client_phone
+        self.d_address = self.client_address
+        self.d_pan = self.client_pan
+        self.d_tan = self.client_tan
+        self.d_gstin = self.client_gstin
+        self.d_pan_reason = self.d_tan_reason = self.d_gstin_reason = ""
+
+        self._load_gstin_gate()
+        self._load_sync_chips()
 
         self.contacts = [
             ContactRow(
@@ -302,26 +368,20 @@ class ClientState(AuthState):
         self._load_history()
 
     def _load_history(self) -> None:
-        """F4 — load the per-record edit history for the reusable View
-        History component (client + the selected branch)."""
+        """F4 — per-record edit history for the reusable View History
+        component."""
         self.client_history = load_history("client", self.selected_client_id)
-        if self.selected_branch_id:
-            self.branch_history = load_history(
-                "branch", self.selected_branch_id, client_id=self.selected_client_id
-            )
-        else:
-            self.branch_history = []
 
-    def _load_branch_buffers(self) -> None:
-        for b in self.branches:
-            if b.branch_id == self.selected_branch_id:
-                self.b_name = b.branch_name
-                self.b_address = b.address
-                self.b_state = b.state
-                self.b_status = b.status
-                self.b_gstin = b.gstin
-                self.b_gstin_reason = ""
-                return
+    def _load_gstin_gate(self) -> None:
+        """Whether the client's GSTIN may be cleared/changed right now.
+
+        Best-effort: the gate must never break the profile render.
+        """
+        try:
+            allowed, reason = clients.can_change_gstin(self.selected_client_id)
+        except Exception:  # noqa: BLE001
+            allowed, reason = True, None
+        self.gstin_gate_reason = "" if allowed else (reason or "This GSTIN can't be changed right now.")
 
     def _load_sync_chips(self) -> None:
         try:
@@ -352,67 +412,15 @@ class ClientState(AuthState):
         self._load_roster()
 
     @rx.event
-    def toggle_new_client_form(self):
-        self.show_new_client_form = not self.show_new_client_form
-        self.nc_error = ""
-
-    @rx.event
     def new_client(self):
-        """Leave the profile, return to the Roster and open the create form.
-
-        Same shape as ``toggle_new_client_form`` but also CLOSES the profile —
-        the profile's "+ New client" action must land the user on the roster
-        WITH the form open, in one click.
-        """
-        self.selected_client_id = 0
-        self.show_new_client_form = True
-        self.nc_error = ""
-        self._load_roster()
-
-    def set_nc_legal_name(self, v: str):
-        self.nc_legal_name = v
-
-    def set_nc_pan(self, v: str):
-        self.nc_pan = v
-
-    def set_nc_team(self, v: str):
-        self.nc_team = v
-
-    def set_nc_gstin(self, v: str):
-        self.nc_gstin = v
-
-    def set_nc_state(self, v: str):
-        self.nc_state = v
-
-    @rx.event
-    def create_client(self):
-        self.nc_error = ""
-        self.flash = ""
-        if not self.nc_legal_name.strip():
-            self.nc_error = "Legal name is required."
-            return
-        try:
-            client_id = clients.create_client(
-                legal_name=self.nc_legal_name,
-                pan=self.nc_pan or None,
-                assigned_team=self.nc_team or None,
-                initial_gstin=self.nc_gstin or None,
-                initial_state=self.nc_state or None,
-                actor=self.username,
-            )
-        except clients.ClientError as exc:
-            self.nc_error = str(exc)
-            return
-        self.flash = f"Client '{self.nc_legal_name}' created."
-        self.nc_legal_name = self.nc_pan = self.nc_team = self.nc_gstin = self.nc_state = ""
-        self.show_new_client_form = False
-        self._load_roster()
-        self.open_client(client_id)
+        """Open the standalone New Client screen. Client creation lives on
+        exactly ONE screen now (/clients/new) — the roster renders no form
+        fields at all."""
+        return rx.redirect("/clients/new")
 
     @rx.event
     def open_client(self, client_id: int):
         self.selected_client_id = client_id
-        self.selected_branch_id = 0
         self.snapshot_year = ""
         self._load_profile()
         if self.profile_tab == "Documents":
@@ -421,6 +429,7 @@ class ClientState(AuthState):
     @rx.event
     def back_to_roster(self):
         self.selected_client_id = 0
+        self.profile_tab = DEFAULT_PROFILE_TAB
         self._load_roster()
 
     @rx.event
@@ -444,100 +453,91 @@ class ClientState(AuthState):
         return DocumentsState.load_for_client(self.selected_client_id)
 
     # ------------------------------------------------------------------
-    # Branch actions
+    # Details tab
     # ------------------------------------------------------------------
+    def set_d_name(self, v: str):
+        self.d_name = v
+
+    def set_d_team(self, v: str):
+        self.d_team = v
+
+    def set_d_email(self, v: str):
+        self.d_email = v
+
+    def set_d_phone(self, v: str):
+        self.d_phone = v
+
+    def set_d_address(self, v: str):
+        self.d_address = v
+
+    def set_d_pan(self, v: str):
+        self.d_pan = v
+
+    def set_d_pan_reason(self, v: str):
+        self.d_pan_reason = v
+
+    def set_d_tan(self, v: str):
+        self.d_tan = v
+
+    def set_d_tan_reason(self, v: str):
+        self.d_tan_reason = v
+
+    def set_d_gstin(self, v: str):
+        self.d_gstin = v
+
+    def set_d_gstin_reason(self, v: str):
+        self.d_gstin_reason = v
+
     @rx.event
-    def select_branch(self, branch_id: int):
-        self.selected_branch_id = branch_id
-        self._load_branch_buffers()
-        self._load_history()
-
-    def set_b_name(self, v: str):
-        self.b_name = v
-
-    def set_b_address(self, v: str):
-        self.b_address = v
-
-    def set_b_state(self, v: str):
-        self.b_state = v
-
-    def set_b_status(self, v: str):
-        self.b_status = v
-
-    def set_b_gstin(self, v: str):
-        self.b_gstin = v
-
-    def set_b_gstin_reason(self, v: str):
-        self.b_gstin_reason = v
-
-    @rx.event
-    def save_branch_details(self):
-        bid = self.selected_branch_id
-        clients.update_branch_field(bid, "branch_name", self.b_name, actor=self.username)
-        clients.update_branch_field(bid, "address", self.b_address, actor=self.username)
-        clients.update_branch_field(bid, "state", self.b_state, actor=self.username)
-        clients.update_branch_field(bid, "status", self.b_status, actor=self.username)
-        self.flash = "Branch details saved."
+    def save_details(self):
+        """Save the unrestricted Details fields in one action. The service
+        validates the WHOLE record, so the inline message and this gate agree."""
+        try:
+            clients.update_client_details(
+                self.selected_client_id,
+                actor=self.username,
+                legal_name=self.d_name,
+                assigned_team=self.d_team,
+                primary_contact_email=self.d_email,
+                primary_contact_phone=self.d_phone,
+                primary_contact_address=self.d_address,
+            )
+        except clients.ClientError as exc:
+            self.flash = str(exc)
+        else:
+            self.flash = "Details saved."
         self._load_profile()
+
+    @rx.event
+    def save_pan_change(self):
+        self._save_identity_field("pan", self.d_pan, self.d_pan_reason)
+
+    @rx.event
+    def save_tan_change(self):
+        self._save_identity_field("tan", self.d_tan, self.d_tan_reason)
 
     @rx.event
     def save_gstin_change(self):
-        if not self.b_gstin_reason.strip():
-            return
+        self._save_identity_field("gstin", self.d_gstin, self.d_gstin_reason)
+
+    def _save_identity_field(self, field: str, value: str, reason: str) -> None:
+        label = clients.SENSITIVE_FIELDS.get(field, field.upper())
         try:
-            clients.update_branch_field(
-                self.selected_branch_id, "gstin", self.b_gstin,
-                actor=self.username, reason=self.b_gstin_reason,
-            )
-            self.flash = "GSTIN updated."
-        except clients.ClientError as exc:
-            self.flash = str(exc)
-        self._load_profile()
-
-    @rx.event
-    def set_branch_active(self, branch_id: int, active: bool):
-        clients.set_branch_active(branch_id, active, actor=self.username)
-        self._load_profile()
-
-    @rx.event
-    def delete_branch(self, branch_id: int):
-        try:
-            clients.delete_branch(branch_id, actor=self.username)
-            self.flash = "Branch deleted."
-        except clients.ClientError as exc:
-            self.flash = str(exc)
-        self._load_profile()
-
-    def set_ab_gstin(self, v: str):
-        self.ab_gstin = v
-
-    def set_ab_name(self, v: str):
-        self.ab_name = v
-
-    def set_ab_state(self, v: str):
-        self.ab_state = v
-
-    def set_ab_address(self, v: str):
-        self.ab_address = v
-
-    @rx.event
-    def add_branch(self):
-        try:
-            new_id = clients.add_branch(
-                self.selected_client_id,
-                gstin=self.ab_gstin,
-                branch_name=self.ab_name or None,
-                address=self.ab_address or None,
-                state=self.ab_state or None,
-                actor=self.username,
+            clients.update_client_field(
+                self.selected_client_id, field, value,
+                actor=self.username, reason=reason,
             )
         except clients.ClientError as exc:
             self.flash = str(exc)
-            return
-        self.flash = f"Branch '{self.ab_gstin}' added — extends this profile, no re-onboarding needed."
-        self.ab_gstin = self.ab_name = self.ab_state = self.ab_address = ""
-        self.selected_branch_id = new_id
+        else:
+            self.flash = f"{label} updated."
         self._load_profile()
+
+    @rx.event
+    def set_client_active(self, active: bool):
+        clients.set_client_active(self.selected_client_id, active, actor=self.username)
+        self._load_profile()
+        self._load_roster()
 
     # ------------------------------------------------------------------
     # Contacts
@@ -609,7 +609,9 @@ class ClientState(AuthState):
     @rx.event
     def add_coa_row(self):
         try:
-            clients.add_coa_row(self.selected_client_id, self.coa_code, self.coa_name, self.coa_type, actor=self.username)
+            clients.add_coa_row(
+                self.selected_client_id, self.coa_code, self.coa_name, self.coa_type, actor=self.username
+            )
             self.flash = "Row added."
             self.coa_code = self.coa_name = self.coa_type = ""
         except clients.ClientError as exc:
@@ -673,45 +675,125 @@ class ClientState(AuthState):
         clients.delete_snapshot_row(snapshot_id, actor=self.username)
         self._load_profile()
 
-    # ------------------------------------------------------------------
-    # Client settings
-    # ------------------------------------------------------------------
-    def set_cs_name(self, v: str):
-        self.cs_name = v
 
-    def set_cs_team(self, v: str):
-        self.cs_team = v
+class NewClientState(AuthState):
+    """The standalone New Client screen (``/clients/new``).
 
-    def set_cs_pan(self, v: str):
-        self.cs_pan = v
+    Its own state so the create form has no route-back into the roster's
+    state: the roster page renders zero form fields, and this page renders
+    zero client rows.
+    """
 
-    def set_cs_pan_reason(self, v: str):
-        self.cs_pan_reason = v
+    legal_name: str = ""
+    pan: str = ""
+    tan: str = ""
+    gstin: str = ""
+    assigned_team: str = ""
+    email: str = ""
+    phone: str = ""
+    address: str = ""
+    error: str = ""
 
-    @rx.event
-    def save_client_name_team(self):
-        clients.update_client_field(self.selected_client_id, "legal_name", self.cs_name, actor=self.username)
-        clients.update_client_field(self.selected_client_id, "assigned_team", self.cs_team, actor=self.username)
-        self.flash = "Saved."
-        self._load_profile()
-        self._load_roster()
+    def _codes(self) -> set[str]:
+        user = auth.current_user(self.session_token or None)
+        return auth.effective_permissions(user) if user else set()
 
-    @rx.event
-    def save_pan_change(self):
-        if not self.cs_pan_reason.strip():
-            return
+    def _can_create(self) -> bool:
+        return "clients.profile.manage" in self._codes()
+
+    def _record(self) -> dict:
+        return {
+            "legal_name": self.legal_name,
+            "pan": self.pan,
+            "tan": self.tan,
+            "primary_contact_email": self.email,
+            "primary_contact_phone": self.phone,
+            "primary_contact_address": self.address,
+        }
+
+    @rx.var
+    def can_create(self) -> bool:
+        return self._can_create()
+
+    @rx.var
+    def validation_message(self) -> str:
+        """The SERVICE's own message for the current form — the same rules the
+        save runs, so the inline hint can never disagree with the server."""
         try:
-            clients.update_client_field(
-                self.selected_client_id, "pan", self.cs_pan,
-                actor=self.username, reason=self.cs_pan_reason,
-            )
-            self.flash = "PAN updated."
+            clients.validate_client_record(self._record())
         except clients.ClientError as exc:
-            self.flash = str(exc)
-        self._load_profile()
+            return str(exc)
+        return ""
+
+    @rx.var
+    def ready(self) -> bool:
+        return self.validation_message == ""
 
     @rx.event
-    def set_client_active(self, active: bool):
-        clients.set_client_active(self.selected_client_id, active, actor=self.username)
-        self._load_profile()
-        self._load_roster()
+    def load(self):
+        # Creating a client is a manage-level action, so the screen itself
+        # refuses (the roster's "+ New client" is disabled for the same role).
+        if (deny := self._gate("clients.profile.manage")):
+            return rx.redirect(deny)
+        self._reset()
+
+    def _reset(self) -> None:
+        self.legal_name = self.pan = self.tan = self.gstin = ""
+        self.assigned_team = self.email = self.phone = self.address = ""
+        self.error = ""
+
+    def set_legal_name(self, v: str):
+        self.legal_name = v
+
+    def set_pan(self, v: str):
+        self.pan = v
+
+    def set_tan(self, v: str):
+        self.tan = v
+
+    def set_gstin(self, v: str):
+        self.gstin = v
+
+    def set_assigned_team(self, v: str):
+        self.assigned_team = v
+
+    def set_email(self, v: str):
+        self.email = v
+
+    def set_phone(self, v: str):
+        self.phone = v
+
+    def set_address(self, v: str):
+        self.address = v
+
+    @rx.event
+    def cancel(self):
+        """Secondary action — back to the roster, nothing saved."""
+        return rx.redirect("/clients")
+
+    @rx.event
+    def submit(self):
+        """Primary action. Saves, then opens the new client's profile.
+
+        The redirect carries ``?client=N`` so the profile is reachable by URL
+        (``ClientState.load`` reads it) rather than relying on state that a
+        route change would reset.
+        """
+        self.error = ""
+        try:
+            client_id = clients.create_client(
+                legal_name=self.legal_name,
+                pan=self.pan,
+                tan=self.tan,
+                gstin=self.gstin,
+                assigned_team=self.assigned_team,
+                primary_contact_email=self.email,
+                primary_contact_phone=self.phone,
+                primary_contact_address=self.address,
+                actor=self.username,
+            )
+        except clients.ClientError as exc:
+            self.error = str(exc)
+            return
+        self._reset()
+        return rx.redirect(f"/clients?client={client_id}")

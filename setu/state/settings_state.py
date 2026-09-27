@@ -63,7 +63,6 @@ class SettingsState(AuthState):
     conn_error: str = ""
 
     # ---- onboarding defaults -------------------------------------------
-    ob_status: str = ""
     ob_team: str = ""
 
     # ---- retention ------------------------------------------------------
@@ -132,7 +131,6 @@ class SettingsState(AuthState):
         ]
 
         defaults = settings.get_onboarding_defaults()
-        self.ob_status = defaults.get("onboarding_default_status") or ""
         self.ob_team = defaults.get("onboarding_default_assigned_team") or ""
         self.retention_years = settings.get_retention_years() or ""
 
@@ -228,9 +226,6 @@ class SettingsState(AuthState):
     # ------------------------------------------------------------------
     # Onboarding defaults
     # ------------------------------------------------------------------
-    def set_ob_status(self, v: str):
-        self.ob_status = v
-
     def set_ob_team(self, v: str):
         self.ob_team = v
 
@@ -238,7 +233,6 @@ class SettingsState(AuthState):
     def save_onboarding_defaults(self):
         settings.update_onboarding_defaults(
             {
-                "onboarding_default_status": self.ob_status,
                 "onboarding_default_assigned_team": self.ob_team,
             },
             actor=self.username,

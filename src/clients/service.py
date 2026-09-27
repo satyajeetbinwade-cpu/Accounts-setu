@@ -2,12 +2,15 @@
 other module (and every UI file) should import from here, not from
 src.clients.db directly. Mirrors src/auth/service.py's shape.
 
-Covers: DB init, EndClient/GSTINBranch/Contact/ChartOfAccounts/
-HistoricalSnapshot CRUD, the business rules from the F2 build prompt
-(branch delete gated on open recon work \u2014 structural hook only until
-Module 2 exists; GSTIN/PAN edits gated to Manager+ with a captured
-reason; soft-delete-only client deactivation), and the F1 retrofit that
-provisions a shared End-Client login from this module's data.
+Covers: DB init, EndClient/Contact/ChartOfAccounts/HistoricalSnapshot
+CRUD, the business rules from the F2 build prompt as revised on
+27-Sep-2026 (a flat EndClient \u2014 one GST registration = one client, no
+branch sub-entity; legal name + primary contact block required; at least
+one of PAN/TAN required; PAN/TAN/GSTIN edits gated to Manager+ with a
+captured reason; a GSTIN can't be cleared or changed while open
+reconciliation work references it; soft-delete-only client deactivation),
+and the F1 retrofit that provisions a shared End-Client login from this
+module's data.
 """
 
 from __future__ import annotations
@@ -47,15 +50,14 @@ def _connect(db_path=None) -> sqlite3.Connection:
 
 
 def list_clients(*, include_inactive: bool = True, db_path=None) -> list[dict[str, Any]]:
+    """Every EndClient row, straight from the flat table.
+
+    There is no branch dimension to join any more \u2014 `gstin` is a column on
+    the client itself.
+    """
     conn = _connect(db_path)
     try:
-        clients = cdb.list_clients(conn, include_inactive=include_inactive)
-        for c in clients:
-            branches = cdb.list_branches(conn, c["client_id"], include_inactive=False)
-            primary = next((b for b in branches if b["is_primary"]), None)
-            c["primary_gstin"] = (primary or (branches[0] if branches else {})).get("gstin")
-            c["branch_count"] = len(branches)
-        return clients
+        return cdb.list_clients(conn, include_inactive=include_inactive)
     finally:
         conn.close()
 
@@ -68,27 +70,102 @@ def get_client(client_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Validation \u2014 one place, so create and update can never drift.
+# ---------------------------------------------------------------------------
+
+# (column, label) for the fields that must be non-empty on a saved record.
+REQUIRED_TEXT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("legal_name", "Legal name"),
+    ("primary_contact_email", "Primary contact email"),
+    ("primary_contact_phone", "Primary contact phone"),
+    ("primary_contact_address", "Primary contact address"),
+)
+
+# Fields that require Manager+ AND a captured reason ("sensitive" in F4's
+# vocabulary too). Maps the column to the label used in messages.
+SENSITIVE_FIELDS: dict[str, str] = {"pan": "PAN", "tan": "TAN", "gstin": "GSTIN"}
+
+# The Details form's unrestricted fields. The identity fields above are saved
+# individually, each behind its own reason capture.
+DETAIL_FIELDS: tuple[str, ...] = (
+    "legal_name",
+    "assigned_team",
+    "primary_contact_email",
+    "primary_contact_phone",
+    "primary_contact_address",
+)
+
+
+def _clean(value: Any) -> Optional[str]:
+    """Trim to None so "" and "   " never masquerade as a real value."""
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def validate_client_record(record: dict[str, Any]) -> None:
+    """F2's save rules for a whole client record. Raises ClientError with a
+    plain-language message naming exactly what to fix."""
+    missing = [label for key, label in REQUIRED_TEXT_FIELDS if not _clean(record.get(key))]
+    if missing:
+        raise ClientError("Required field(s) missing: " + ", ".join(missing) + ".")
+    if not _clean(record.get("pan")) and not _clean(record.get("tan")):
+        raise ClientError("At least one of PAN or TAN is required.")
+
+
+def _validate_single_field_save(before: dict[str, Any], field: str, new_value: Optional[str]) -> None:
+    """The lighter check for a per-field save.
+
+    A single-field save must never BLANK a required field, and must never
+    leave the record with neither PAN nor TAN. It is deliberately NOT asked to
+    complete an otherwise-incomplete legacy record \u2014 that is the Details
+    form's job, and demanding it here would deadlock a record whose PAN, TAN,
+    contact block and email were all empty before this revision.
+    """
+    if not new_value:
+        for key, label in REQUIRED_TEXT_FIELDS:
+            if key == field:
+                raise ClientError(f"{label} can't be blank.")
+        if field in ("pan", "tan"):
+            other = "tan" if field == "pan" else "pan"
+            if not _clean(before.get(other)):
+                raise ClientError("At least one of PAN or TAN is required.")
+
+
 def create_client(
-    *, legal_name: str, pan: Optional[str], assigned_team: Optional[str],
-    initial_gstin: Optional[str] = None, initial_state: Optional[str] = None,
-    actor: str, db_path=None,
+    *, legal_name: str, pan: Optional[str] = None, tan: Optional[str] = None,
+    gstin: Optional[str] = None, assigned_team: Optional[str] = None,
+    primary_contact_email: Optional[str] = None, primary_contact_phone: Optional[str] = None,
+    primary_contact_address: Optional[str] = None, actor: str, db_path=None,
 ) -> int:
-    """Create a client profile. If an initial GSTIN is given, it becomes
-    the primary branch \u2014 adding further branches later extends this
-    same profile, no re-onboarding flow required."""
-    if not legal_name:
-        raise ClientError("Legal name is required.")
+    """Create a client. Each GST registration is its OWN client record \u2014
+    there is no branch to attach, and no re-onboarding flow for a sibling
+    registration (it is simply another client)."""
+    record = {
+        "legal_name": legal_name,
+        "pan": pan,
+        "tan": tan,
+        "gstin": gstin,
+        "assigned_team": assigned_team,
+        "primary_contact_email": primary_contact_email,
+        "primary_contact_phone": primary_contact_phone,
+        "primary_contact_address": primary_contact_address,
+    }
+    validate_client_record(record)
     conn = _connect(db_path)
     try:
-        client_id = cdb.create_client(
-            conn, legal_name=legal_name, pan=pan, assigned_team=assigned_team, created_by=actor,
+        return cdb.create_client(
+            conn,
+            legal_name=_clean(legal_name),
+            pan=_clean(pan),
+            tan=_clean(tan),
+            gstin=_clean(gstin),
+            assigned_team=_clean(assigned_team),
+            primary_contact_email=_clean(primary_contact_email),
+            primary_contact_phone=_clean(primary_contact_phone),
+            primary_contact_address=_clean(primary_contact_address),
+            created_by=actor,
         )
-        if initial_gstin:
-            cdb.create_branch(
-                conn, client_id=client_id, gstin=initial_gstin, branch_name=None,
-                address=None, state=initial_state, is_primary=True,
-            )
-        return client_id
     finally:
         conn.close()
 
@@ -96,24 +173,73 @@ def create_client(
 def update_client_field(
     client_id: int, field: str, value: Any, *, actor: str, reason: Optional[str] = None, db_path=None,
 ) -> None:
-    """Editing legal_name/assigned_team is unrestricted. Editing `pan`
-    requires Manager+ (clients.gstin_pan.edit) and a captured reason \u2014
-    enforced here, not just in the UI."""
+    """Save ONE field on the client record.
+
+    - legal_name / assigned_team / the primary contact block: unrestricted,
+      but the field can never be blanked.
+    - pan / tan / gstin: Manager+ (clients.gstin_pan.edit) AND a captured
+      reason \u2014 enforced here, not just in the UI.
+    - gstin additionally cannot be cleared or changed while open
+      reconciliation work references the client.
+    """
+    if field not in cdb.EDITABLE_CLIENT_FIELDS:
+        raise ClientError(f"'{field}' is not an editable client field.")
+    new_value = _clean(value)
     conn = _connect(db_path)
     try:
         before = cdb.get_client(conn, client_id)
-        old_value = before.get(field) if before else None
-        if field == "pan":
+        if before is None:
+            raise ClientError(f"No such client_id {client_id}.")
+        old_value = before.get(field)
+
+        _validate_single_field_save(before, field, new_value)
+
+        if field in SENSITIVE_FIELDS:
             _require_gstin_pan_permission(actor, db_path=db_path)
-            if not reason:
-                raise ClientError("A reason is required before saving a PAN change.")
-            cdb.update_client_field(conn, client_id, field, value)
+            if not _clean(reason):
+                raise ClientError(
+                    f"A reason is required before saving a {SENSITIVE_FIELDS[field]} change."
+                )
+
+        if field == "gstin" and _clean(old_value) != new_value:
+            allowed, blocked_because = can_change_gstin(client_id, db_path=db_path)
+            if not allowed:
+                raise ClientError(blocked_because or "This GSTIN can't be changed right now.")
+
+        cdb.update_client_field(conn, client_id, field, new_value)
+        if field in SENSITIVE_FIELDS:
             cdb.log_edit(
-                conn, client_id=client_id, branch_id=None, field=field,
-                old_value=old_value, new_value=value, reason=reason, changed_by=actor,
+                conn, client_id=client_id, field=field,
+                old_value=old_value, new_value=new_value, reason=reason, changed_by=actor,
+                db_path=db_path,
             )
-        else:
-            cdb.update_client_field(conn, client_id, field, value)
+    finally:
+        conn.close()
+
+
+def update_client_details(
+    client_id: int, *, actor: str, db_path=None, **fields: Any,
+) -> None:
+    """Save the Details form's unrestricted fields in ONE action.
+
+    The whole record is validated (required contact block + at least one of
+    PAN/TAN) against the stored row MERGED with the proposed values, so this
+    form can never leave a client in a state it can no longer be saved from.
+    """
+    proposed: dict[str, Any] = {}
+    conn = _connect(db_path)
+    try:
+        before = cdb.get_client(conn, client_id)
+        if before is None:
+            raise ClientError(f"No such client_id {client_id}.")
+        proposed = dict(before)
+        for name in DETAIL_FIELDS:
+            if name in fields:
+                proposed[name] = _clean(fields[name])
+        validate_client_record(proposed)
+        for name in DETAIL_FIELDS:
+            if name in fields:
+                cdb.update_client_field(conn, client_id, name, proposed[name])
     finally:
         conn.close()
 
@@ -147,111 +273,37 @@ def _require_gstin_pan_permission(actor: str, *, db_path=None) -> None:
             "last_login_at", "role_name"]
     user = dict(zip(cols, row))
     if not auth.has_permission(user, "clients.gstin_pan.edit", db_path=db_path):
-        raise ClientError("GSTIN/PAN edits require Manager-level permission or above.")
+        raise ClientError("PAN, TAN and GSTIN edits require Manager-level permission or above.")
 
 
 # ---------------------------------------------------------------------------
-# GSTINBranch
+# GSTIN \u2014 the client-level business rule
 # ---------------------------------------------------------------------------
 
 
-def list_branches(client_id: int, *, include_inactive: bool = True, db_path=None) -> list[dict[str, Any]]:
+def client_has_open_recon_work(client_id: int, *, db_path=None) -> bool:
+    """True when open reconciliation work references this client.
+
+    Carried over from the branch model, now scoped to the client record
+    directly: a client's GSTIN can't be cleared or changed while the
+    Reconciliation Engine (Module 2) still holds OPEN exceptions for it.
+    """
     conn = _connect(db_path)
     try:
-        return cdb.list_branches(conn, client_id, include_inactive=include_inactive)
+        return cdb.has_open_recon_work(conn, client_id)
     finally:
         conn.close()
 
 
-def get_branch(branch_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
-    conn = _connect(db_path)
-    try:
-        return cdb.get_branch(conn, branch_id)
-    finally:
-        conn.close()
-
-
-def add_branch(
-    client_id: int, *, gstin: str, branch_name: Optional[str], address: Optional[str],
-    state: Optional[str], is_primary: bool = False, actor: str, db_path=None,
-) -> int:
-    """Adding a branch/GSTIN extends the existing profile \u2014 no
-    re-onboarding flow required, per F2's business rule."""
-    if not gstin:
-        raise ClientError("GSTIN is required.")
-    conn = _connect(db_path)
-    try:
-        return cdb.create_branch(
-            conn, client_id=client_id, gstin=gstin, branch_name=branch_name,
-            address=address, state=state, is_primary=is_primary,
+def can_change_gstin(client_id: int, *, db_path=None) -> tuple[bool, Optional[str]]:
+    """Returns (allowed, reason_if_blocked) \u2014 the disabled-with-inline-reason
+    counterpart of the old branch Delete gate, rendered by Foundation 3.2/3.4."""
+    if client_has_open_recon_work(client_id, db_path=db_path):
+        return False, (
+            "This GSTIN can't be cleared or changed while open reconciliation work "
+            "references this client. Resolve those exceptions first."
         )
-    finally:
-        conn.close()
-
-
-def update_branch_field(
-    branch_id: int, field: str, value: Any, *, actor: str, reason: Optional[str] = None, db_path=None,
-) -> None:
-    """Editing status/branch_name/address/state is unrestricted. Editing
-    `gstin` requires Manager+ and a captured reason (same rule as PAN)."""
-    conn = _connect(db_path)
-    try:
-        before = cdb.get_branch(conn, branch_id)
-        old_value = before.get(field) if before else None
-        if field == "gstin":
-            _require_gstin_pan_permission(actor, db_path=db_path)
-            if not reason:
-                raise ClientError("A reason is required before saving a GSTIN change.")
-            cdb.update_branch_field(conn, branch_id, field, value)
-            cdb.log_edit(
-                conn, client_id=before.get("client_id") if before else None, branch_id=branch_id,
-                field=field, old_value=old_value, new_value=value, reason=reason, changed_by=actor,
-            )
-        else:
-            cdb.update_branch_field(conn, branch_id, field, value)
-    finally:
-        conn.close()
-
-
-def set_branch_active(branch_id: int, is_active: bool, *, actor: str, db_path=None) -> None:
-    """Deactivate is always available, regardless of open reconciliation
-    work \u2014 only the hard-delete path below is gated."""
-    conn = _connect(db_path)
-    try:
-        cdb.set_branch_active(conn, branch_id, is_active)
-    finally:
-        conn.close()
-
-
-def branch_has_open_recon_work(branch_id: int, *, db_path=None) -> bool:
-    """Structural constraint hook: a branch cannot be hard-deleted while
-    open reconciliation work references it. Module 2 (the Reconciliation
-    Engine) doesn't exist yet in this build, so there is currently no way
-    for any GSTIN to have open recon work \u2014 this always returns False
-    for now, and will activate correctly (return True where applicable)
-    once Module 2 is built and can be queried here."""
-    return False
-
-
-def can_delete_branch(branch_id: int, *, db_path=None) -> tuple[bool, Optional[str]]:
-    """Returns (allowed, reason_if_blocked)."""
-    if branch_has_open_recon_work(branch_id, db_path=db_path):
-        return False, "Open reconciliation work references this GSTIN/branch."
-    # Deliberately disabled in THIS build regardless of the check above,
-    # per F2's design table: "Delete ... disabled today (Module 2 doesn't
-    # exist yet) with its inline reason visible, not hidden."
-    return False, "Delete isn't available yet \u2014 the Reconciliation Engine (Module 2) doesn't exist yet."
-
-
-def delete_branch(branch_id: int, *, actor: str, db_path=None) -> None:
-    allowed, reason = can_delete_branch(branch_id, db_path=db_path)
-    if not allowed:
-        raise ClientError(reason or "This branch can't be deleted right now.")
-    conn = _connect(db_path)
-    try:
-        cdb.delete_branch(conn, branch_id)
-    finally:
-        conn.close()
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +510,7 @@ def delete_snapshot_row(snapshot_id: int, *, actor: str, db_path=None) -> None:
 def list_edit_log(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
-        return cdb.list_edit_log(conn, client_id)
+        return cdb.list_edit_log(conn, client_id, db_path=db_path)
     finally:
         conn.close()
 
@@ -474,7 +526,7 @@ def provision_end_client_login(
     actor: str, db_path=None,
 ) -> int:
     """Create the shared End-Client login for a client, reading this
-    module's own data (contact record + primary GSTIN) instead of the F1
+    module's own data (contact record + the client's GSTIN) instead of the F1
     stub's manual entry. This is the retrofit F1's prompt called for:
     "wire F1's shared End-Client login provisioning to actually read this
     module's contact records and GSTIN data at client-creation time."

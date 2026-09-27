@@ -66,8 +66,10 @@ def _ensure_second_dataset() -> str | None:
     existing = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}
     if folder not in existing:
         clients.create_client(
-            legal_name=folder, pan="AABCM1234K", assigned_team=None,
-            initial_gstin=own_gstin, initial_state="Maharashtra", actor="admin",
+            legal_name=folder, pan="AABCM1234K", gstin=own_gstin, assigned_team=None,
+            primary_contact_email="accounts@meridianfabrics.example",
+            primary_contact_phone="+91 22 4000 0000",
+            primary_contact_address="Mumbai, Maharashtra", actor="admin",
         )
     cid = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}[folder]
 

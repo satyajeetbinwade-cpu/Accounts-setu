@@ -33,6 +33,7 @@ from setu.state import (
     InvoiceExtractState,
     Module2State,
     Module8State,
+    NewClientState,
     Phase1State,
     ReconcileState,
     ReportState,
@@ -42,6 +43,7 @@ from setu.state import (
     VaultState,
 )
 from setu.views import pages
+from setu.views.client_new_page import client_new_page
 from setu.views.login import login_page
 
 # --- Service layer bootstrap ------------------------------------------------
@@ -148,3 +150,14 @@ for _route, _renderer in pages.all_routes():
         title=f"{_route.strip('/').replace('-', ' ').title()} · Setu",
         on_load=_on_load,
     )
+
+# /clients/new is a real screen but deliberately NOT in the sidebar — it is
+# reached from the roster's / the profile's "+ New client" and from Reconcile's
+# "Add New Client" link. Registering it separately (rather than adding it to
+# AREAS, which would put it in the nav) is what keeps the sidebar honest.
+app.add_page(
+    client_new_page,
+    route="/clients/new",
+    title="New Client · Setu",
+    on_load=[AuthState.check_session, AuthState.require_auth, NewClientState.load],
+)

@@ -42,24 +42,23 @@ def resolve_client_id(folder: str, *, db_path=None) -> Optional[int]:
 
 
 def client_gstin_for(client_id: Optional[int], *, db_path=None) -> str:
-    """The SELECTED CLIENT's own GSTIN (its primary branch), or "".
+    """The SELECTED CLIENT's own GSTIN, or "".
 
-    This is client master data — deliberately NOT derived from any run's
+    This is client master data \u2014 deliberately NOT derived from any run's
     transaction rows, where the most frequent GSTIN is a supplier's (the
     counterparty on the most invoices). The report header must carry the
-    client's own registration, never a supplier's.
+    client's own registration, never a supplier's. Since the branch model was
+    removed, `gstin` is a plain column on the client row.
     """
     if not client_id:
         return ""
     try:
         from src.clients import service as clients
 
-        branches = clients.list_branches(client_id, include_inactive=False, db_path=db_path)
+        client = clients.get_client(client_id, db_path=db_path)
     except Exception:  # noqa: BLE001
         return ""
-    primary = next((b for b in branches if b.get("is_primary")), None)
-    chosen = primary or (branches[0] if branches else None)
-    return str((chosen or {}).get("gstin") or "").strip()
+    return str((client or {}).get("gstin") or "").strip()
 
 
 def _effective_number(key: str, default: float, *, client_id: Optional[int]) -> float:

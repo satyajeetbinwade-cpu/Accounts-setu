@@ -267,12 +267,6 @@ def _onboarding_defaults() -> rx.Component:
         rx.text("Applied automatically when a new End-Client is created (F2).", style=t.TEXT["label"]),
         rx.grid(
             _field(
-                "Default branch status for new clients",
-                SettingsState.ob_status,
-                SettingsState.set_ob_status,
-                disabled=~SettingsState.can_manage,
-            ),
-            _field(
                 "Default assigned team for new clients",
                 SettingsState.ob_team,
                 SettingsState.set_ob_team,

@@ -46,23 +46,48 @@ def get_client(conn: sqlite3.Connection, client_id: int) -> Optional[dict[str, A
     return _row_to_dict(conn, "SELECT * FROM end_clients WHERE client_id = ?", (client_id,))
 
 
+# Names a caller may update through update_client_field. The service layer
+# owns the rules (which need a reason, which are required); this is only a
+# guard against building an UPDATE from an unexpected column name.
+EDITABLE_CLIENT_FIELDS: tuple[str, ...] = (
+    "legal_name",
+    "pan",
+    "tan",
+    "gstin",
+    "assigned_team",
+    "primary_contact_email",
+    "primary_contact_phone",
+    "primary_contact_address",
+)
+
+
 def create_client(
-    conn: sqlite3.Connection, *, legal_name: str, pan: Optional[str], assigned_team: Optional[str],
+    conn: sqlite3.Connection, *, legal_name: str, pan: Optional[str], tan: Optional[str],
+    gstin: Optional[str], assigned_team: Optional[str], primary_contact_email: Optional[str],
+    primary_contact_phone: Optional[str], primary_contact_address: Optional[str],
     created_by: str,
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO end_clients (legal_name, pan, assigned_team, is_active, created_at, created_by)
-        VALUES (?, ?, ?, 1, ?, ?)
+        INSERT INTO end_clients (
+            legal_name, pan, tan, gstin, assigned_team,
+            primary_contact_email, primary_contact_phone, primary_contact_address,
+            is_active, created_at, created_by
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
-        (legal_name, pan, assigned_team, _now(), created_by),
+        (
+            legal_name, pan, tan, gstin, assigned_team,
+            primary_contact_email, primary_contact_phone, primary_contact_address,
+            _now(), created_by,
+        ),
     )
     conn.commit()
     return cur.lastrowid
 
 
 def update_client_field(conn: sqlite3.Connection, client_id: int, field: str, value: Any) -> None:
-    if field not in ("legal_name", "pan", "assigned_team"):
+    if field not in EDITABLE_CLIENT_FIELDS:
         raise ValueError(f"Unknown editable client field: {field}")
     conn.execute(f"UPDATE end_clients SET {field} = ? WHERE client_id = ?", (value, client_id))
     conn.commit()
@@ -74,64 +99,21 @@ def set_client_active(conn: sqlite3.Connection, client_id: int, is_active: bool)
     conn.commit()
 
 
-# ---------------------------------------------------------------------------
-# GSTINBranch
-# ---------------------------------------------------------------------------
+def has_open_recon_work(conn: sqlite3.Connection, client_id: int) -> bool:
+    """True when Module 2 holds OPEN reconciliation exceptions for this client.
 
-
-def list_branches(conn: sqlite3.Connection, client_id: int, *, include_inactive: bool = True) -> list[dict[str, Any]]:
-    sql = "SELECT * FROM gstin_branches WHERE client_id = ?"
-    if not include_inactive:
-        sql += " AND is_active = 1"
-    sql += " ORDER BY is_primary DESC, gstin"
-    return _rows_to_dicts(conn, sql, (client_id,))
-
-
-def get_branch(conn: sqlite3.Connection, branch_id: int) -> Optional[dict[str, Any]]:
-    return _row_to_dict(conn, "SELECT * FROM gstin_branches WHERE branch_id = ?", (branch_id,))
-
-
-def create_branch(
-    conn: sqlite3.Connection, *, client_id: int, gstin: str, branch_name: Optional[str],
-    address: Optional[str], state: Optional[str], is_primary: bool = False,
-) -> int:
-    """Adding a branch extends the existing profile \u2014 no re-onboarding
-    flow required, per F2's business rule."""
-    if is_primary:
-        conn.execute("UPDATE gstin_branches SET is_primary = 0 WHERE client_id = ?", (client_id,))
-    cur = conn.execute(
-        """
-        INSERT INTO gstin_branches
-            (client_id, gstin, branch_name, address, state, status, is_primary, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, 'Not Started', ?, 1, ?)
-        """,
-        (client_id, gstin, branch_name, address, state, int(is_primary), _now()),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def update_branch_field(conn: sqlite3.Connection, branch_id: int, field: str, value: Any) -> None:
-    if field not in ("gstin", "branch_name", "address", "state", "status"):
-        raise ValueError(f"Unknown editable branch field: {field}")
-    conn.execute(f"UPDATE gstin_branches SET {field} = ? WHERE branch_id = ?", (value, branch_id))
-    conn.commit()
-
-
-def set_branch_active(conn: sqlite3.Connection, branch_id: int, is_active: bool) -> None:
-    """Deactivation is always available regardless of open reconciliation
-    work \u2014 only hard delete is gated (see branch_has_open_recon_work)."""
-    conn.execute("UPDATE gstin_branches SET is_active = ? WHERE branch_id = ?", (int(is_active), branch_id))
-    conn.commit()
-
-
-def delete_branch(conn: sqlite3.Connection, branch_id: int) -> None:
-    """Hard-delete. Caller (service layer) must confirm no open
-    reconciliation work references this branch first \u2014 that check is
-    structural now (Module 2 doesn't exist yet, so it always passes) and
-    will activate correctly once Module 2 is built."""
-    conn.execute("DELETE FROM gstin_branches WHERE branch_id = ?", (branch_id,))
-    conn.commit()
+    Module 2 is a separate module whose tables may legitimately be absent
+    (a scratch/partial database), so a missing table means "nothing references
+    it" rather than an error.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM reconciliation_exceptions WHERE client_id = ? AND status = 'open' LIMIT 1",
+            (client_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -287,35 +269,31 @@ def delete_snapshot_row(conn: sqlite3.Connection, snapshot_id: int) -> None:
 
 
 def log_edit(
-    conn: sqlite3.Connection, *, client_id: Optional[int], branch_id: Optional[int], field: str,
+    conn: sqlite3.Connection, *, client_id: Optional[int], field: str,
     old_value: Optional[str], new_value: Optional[str], reason: Optional[str], changed_by: str,
+    db_path=None,
 ) -> None:
     from src.f4 import service as f4  # local import avoids a hard circular dep
 
-    # Branch edits are client-scoped too (the client_id is passed through by
-    # the caller for a branch edit); record against the specific record that
-    # was actually edited.
-    if branch_id is not None:
-        f4.record_edit(
-            record_type="branch", record_id=branch_id, client_id=client_id,
-            field=field, old_value=old_value, new_value=new_value,
-            reason=reason, actor=changed_by,
-        )
-    else:
-        f4.record_edit(
-            record_type="client", record_id=client_id, client_id=client_id,
-            field=field, old_value=old_value, new_value=new_value,
-            reason=reason, actor=changed_by,
-        )
+    # db_path is threaded through because F4 opens its OWN connection — without
+    # it, an edit against a non-default database would be recorded in the
+    # default one (and then be invisible to that database's own history view).
+    f4.record_edit(
+        record_type="client", record_id=client_id, client_id=client_id,
+        field=field, old_value=old_value, new_value=new_value,
+        reason=reason, actor=changed_by, db_path=db_path,
+    )
 
 
-def list_edit_log(conn: sqlite3.Connection, client_id: int, limit: int = 100) -> list[dict[str, Any]]:
+def list_edit_log(
+    conn: sqlite3.Connection, client_id: int, limit: int = 100, *, db_path=None,
+) -> list[dict[str, Any]]:
     """Read F2's client-scoped edits out of F4's cross-cutting log."""
     from src.f4 import service as f4  # local import avoids a hard circular dep
 
     rows = [
-        r for r in f4.history_for_client(client_id)
-        if r["record_type"] in ("client", "branch")
+        r for r in f4.history_for_client(client_id, db_path=db_path)
+        if r["record_type"] == "client"
     ][:limit]
     return [
         {

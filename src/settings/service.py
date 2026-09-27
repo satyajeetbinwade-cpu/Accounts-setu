@@ -348,7 +348,6 @@ def _handoff_to_c4(service: str, secret: str, *, actor: str) -> None:
 # ---------------------------------------------------------------------------
 
 ONBOARDING_DEFAULT_KEYS = {
-    "onboarding_default_status": "Default branch status for new clients",
     "onboarding_default_assigned_team": "Default assigned team for new clients",
 }
 

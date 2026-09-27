@@ -39,8 +39,9 @@ F4_SCHEMA = """
 CREATE TABLE IF NOT EXISTS edit_history_entries (
     entry_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     record_type   TEXT    NOT NULL,   -- e.g. 'user', 'role', 'user_role', 'role_permission',
-                                      --      'user_override', 'client', 'branch', 'rule',
-                                      --      'taxonomy', 'regulatory_rule', 'statutory_due_date'
+                                      --      'user_override', 'client', 'rule', 'taxonomy',
+                                      --      'regulatory_rule', 'statutory_due_date'
+                                      --      (no 'branch' — F2's branch model was removed)
     record_id     TEXT    NOT NULL,   -- the edited record's stable reference (username, key, id-as-text)
     client_id     INTEGER,            -- nullable; populated where the record is client-scoped, so
                                       -- a per-client History view can filter cleanly

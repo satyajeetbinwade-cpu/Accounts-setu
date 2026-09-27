@@ -136,7 +136,7 @@ def _placeholder_page(label: str, blurb: str, *, module: str) -> rx.Component:
 
 # Route → page. Keep the text honest: it names the module, not a fake feature.
 _PLACEHOLDER_PAGES = {
-    "/clients": ("Clients", "Client profiles, branches, contacts and master data.", "Module F2"),
+    "/clients": ("Clients", "One client per GST registration — profiles, contacts and master data.", "Module F2"),
     "/run": ("Run", "Manual reconciliation run.", "Module 2"),
     "/compare": ("Compare", "Side-by-side run comparison.", "Phase 1 tool"),
     "/export": ("Export", "Export a run's report.", "Phase 1 tool"),

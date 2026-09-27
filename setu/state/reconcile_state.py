@@ -665,16 +665,12 @@ class ReconcileState(AuthState):
 
     @rx.event
     def add_new_client(self):
-        """Leave the flow and open the Client Roster with the create form ready.
+        """Open the standalone New Client screen.
 
-        Client creation lives in exactly ONE place (F2's roster + its
-        ``create_client`` handler), so this links there rather than forking a
-        second copy of the form. ``ClientState.new_client`` is chained so the
-        user lands on the form itself, not just the roster.
+        Client creation lives on exactly ONE screen (/clients/new), reached
+        from here rather than duplicating the form inside the guided flow.
         """
-        from setu.state.client_state import ClientState
-
-        return [ClientState.new_client, rx.redirect("/clients")]
+        return rx.redirect("/clients/new")
 
     @rx.event
     def set_ctx_period(self, v: str):

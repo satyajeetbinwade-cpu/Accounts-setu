@@ -69,8 +69,8 @@ MANDATORY_REASON_FIELDS: frozenset[str] = frozenset(
 # falls back to MANDATORY_REASON_FIELDS membership by field name.
 FIELD_SENSITIVITY: dict[tuple[str, str], str] = {
     ("client", "pan"): "mandatory",
+    ("client", "tan"): "mandatory",
     ("client", "gstin"): "mandatory",
-    ("branch", "gstin"): "mandatory",
     # C1 rule VALUE edits (firm-wide + per-client override) are the "rule
     # thresholds" the PRD names \u2014 mandatory reason at BOTH layers.
     ("rule", "value"): "mandatory",

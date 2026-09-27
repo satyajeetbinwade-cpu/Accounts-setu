@@ -10,7 +10,7 @@ from setu.state.action_center_state import Module8State
 from setu.state.ai_models_state import AiModelsState
 from setu.state.auth_state import AuthState
 from setu.state.c5_state import C5State
-from setu.state.client_state import ClientState
+from setu.state.client_state import ClientState, NewClientState
 from setu.state.dashboard_state import DashboardState
 from setu.state.documents_state import DocumentsState
 from setu.state.f5_state import F5State
@@ -35,6 +35,7 @@ __all__ = [
     "AuthState",
     "C5State",
     "ClientState",
+    "NewClientState",
     "DashboardState",
     "DocumentsState",
     "F5State",
