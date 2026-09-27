@@ -1,0 +1,4 @@
+pan,section,deductee_name,amount_paid_credited,tax_deducted,deposit_date
+AAAPB1111X,194C,Deductor One,100000,2000,2025-03-28
+AAAPB2222Y,194J,Deductor Two,20000,2000,2025-03-30
+AAAPB2222Y,194J,Deductor Two,30000,3000,2025-03-31
