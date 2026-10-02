@@ -143,20 +143,44 @@ SEED_TAXONOMY: list[tuple[str, str, str, str, int]] = [
 # Regulatory rules table — pre-seeded dated rates (verify before relying)
 # ---------------------------------------------------------------------------
 
-SEED_REGULATORY: list[tuple[str, str | None, str, str, str, str]] = [
-    # (domain, section, name, rate_or_rule, effective_from, notes)
-    ("GST", None, "GST rate slab — 0%", "0.0%", "2024-04-01", "Nil-rated / exempt."),
-    ("GST", None, "GST rate slab — 5%", "5.0%", "2024-04-01", "Lower slab."),
-    ("GST", None, "GST rate slab — 12%", "12.0%", "2024-04-01", "Standard lower slab."),
-    ("GST", None, "GST rate slab — 18%", "18.0%", "2024-04-01", "Standard slab."),
-    ("GST", None, "GST rate slab — 28%", "28.0%", "2024-04-01", "Upper slab."),
-    ("GST", None, "ITC — blocked (personal use)", "ITC blocked", "2024-04-01", "Section 17(5) blocked credits."),
-    ("TDS", "194C", "Payments to contractors", "2.0% (1.0% individual/HUF)", "2024-04-01", "Threshold Rs 30,000 single / Rs 1,00,000 annual."),
-    ("TDS", "194J", "Professional / technical services", "10.0% professional / 2.0% technical", "2024-04-01", "Threshold Rs 30,000."),
-    ("TDS", "194I", "Rent", "10.0% land/building / 2.0% plant/machinery", "2024-04-01", "Threshold Rs 2,40,000 annual."),
-    ("TDS", "194A", "Interest other than securities", "10.0%", "2024-04-01", "Threshold Rs 40,000."),
-    ("TDS", "194H", "Commission or brokerage", "5.0%", "2024-04-01", "Threshold Rs 15,000."),
-    ("TDS", "194Q", "Purchase of goods", "0.1%", "2024-04-01", "Threshold Rs 50,00,000 annual."),
+SEED_REGULATORY: list[tuple[str, str | None, str, str, str, str | None, float, float, str]] = [
+    # (domain, section, name, rate_or_rule, effective_from, effective_to,
+    #  single_transaction_threshold, annual_aggregate_threshold, notes)
+    ("GST", None, "GST rate slab — 0%", "0.0%", "2024-04-01", None, 0, 0, "Nil-rated / exempt."),
+    ("GST", None, "GST rate slab — 5%", "5.0%", "2024-04-01", None, 0, 0, "Lower slab."),
+    ("GST", None, "GST rate slab — 12%", "12.0%", "2024-04-01", None, 0, 0, "Standard lower slab."),
+    ("GST", None, "GST rate slab — 18%", "18.0%", "2024-04-01", None, 0, 0, "Standard slab."),
+    ("GST", None, "GST rate slab — 28%", "28.0%", "2024-04-01", None, 0, 0, "Upper slab."),
+    ("GST", None, "ITC — blocked (personal use)", "ITC blocked", "2024-04-01", None, 0, 0, "Section 17(5) blocked credits."),
+    ("TDS", "194C", "Payments to contractors", "2.0% (1.0% individual/HUF)", "2024-04-01", None, 30000, 100000, "Threshold Rs 30,000 single / Rs 1,00,000 annual."),
+    ("TDS", "194J", "Professional / technical services", "10.0% professional / 2.0% technical", "2024-04-01", None, 30000, 0, "Threshold Rs 30,000."),
+    ("TDS", "194I", "Rent", "10.0% land/building / 2.0% plant/machinery", "2024-04-01", None, 0, 240000, "Threshold Rs 2,40,000 annual."),
+    ("TDS", "194A", "Interest other than securities", "10.0%", "2024-04-01", None, 0, 40000, "Threshold Rs 40,000."),
+    ("TDS", "194H", "Commission or brokerage", "5.0%", "2024-04-01", None, 0, 15000, "Threshold Rs 15,000."),
+    ("TDS", "194Q", "Purchase of goods", "0.1%", "2024-04-01", None, 0, 5000000, "Threshold Rs 50,00,000 annual."),
+    ("TDS", "192", "Salary", "0.0%", "2024-04-01", None, 0, 0, "Computed on estimated annual liability — flat rate N/A."),
+    ("TDS", "194B", "Winnings from lottery / game shows", "30.0%", "2024-04-01", None, 10000, 0, "Threshold Rs 10,000 per winning."),
+    ("TDS", "194D", "Insurance commission", "5.0%", "2024-04-01", None, 0, 15000, "Threshold Rs 15,000 annual."),
+    ("TDS", "194E", "Payments to non-resident sportsmen / entertainers", "20.0%", "2024-04-01", None, 0, 0, "No threshold — deduct on every payment."),
+]
+
+# ---------------------------------------------------------------------------
+# TDS section aliases — old-Act code <-> Income-tax Act 2025 code
+# ---------------------------------------------------------------------------
+#
+# PLACEHOLDER ONLY: we have no verified source for the Income-tax Act 2025's
+# actual section renumbering, so every new_code below is seeded identical to
+# its old_code (i.e. "assume unchanged until told otherwise") and flagged
+# UNVERIFIED. This is deliberately NOT a guess at a plausible-looking new
+# citation — that would risk being mistaken for a real regulatory fact. The
+# CA firm confirms the real mapping; only then should new_code values change.
+
+ACT_2025_EFFECTIVE_FROM = "2026-04-01"
+
+SEED_TDS_ALIASES: list[tuple[str, str]] = [
+    (section, section)
+    for _domain, section, *_rest in SEED_REGULATORY
+    if _domain == "TDS"
 ]
 
 # ---------------------------------------------------------------------------
@@ -180,6 +204,7 @@ def run_seed(conn: sqlite3.Connection) -> None:
     _seed_rules(conn)
     _seed_taxonomy(conn)
     _seed_regulatory(conn)
+    _seed_tds_aliases(conn)
     _seed_due_dates(conn)
     conn.commit()
 
@@ -220,11 +245,28 @@ def _seed_taxonomy(conn: sqlite3.Connection) -> None:
 
 
 def _seed_regulatory(conn: sqlite3.Connection) -> None:
-    for domain, section, name, rate_or_rule, effective_from, notes in SEED_REGULATORY:
+    for (domain, section, name, rate_or_rule, effective_from, effective_to,
+         single_txn_threshold, annual_threshold, notes) in SEED_REGULATORY:
         db.upsert_regulatory_rule(
             conn, domain=domain, section=section, name=name,
             rate_or_rule=rate_or_rule, effective_from=effective_from,
+            effective_to=effective_to,
+            single_transaction_threshold=single_txn_threshold,
+            annual_aggregate_threshold=annual_threshold,
             seed_as_of=SEED_AS_OF, notes=notes,
+        )
+
+
+def _seed_tds_aliases(conn: sqlite3.Connection) -> None:
+    for old_code, new_code in SEED_TDS_ALIASES:
+        db.upsert_tds_section_alias(
+            conn, old_code=old_code, new_code=new_code,
+            effective_from=ACT_2025_EFFECTIVE_FROM,
+            notes=(
+                "UNVERIFIED placeholder — assumes no renumbering under the "
+                "Income-tax Act 2025. Confirm the actual mapping with the CA "
+                "firm before relying on this for filings."
+            ),
         )
 
 

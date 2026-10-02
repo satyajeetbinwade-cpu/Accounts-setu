@@ -114,17 +114,46 @@ def _adjacent_quarters(quarter: str | None) -> list[str]:
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _get_section_entry(config: dict, section: str) -> dict:
-    """Retrieve a section table entry. Fail loudly if not in config."""
+def _normalise_section(config: dict, section: str) -> str:
+    """Map an incoming section code (old-Act or Income-tax Act 2025) to the
+    canonical key config["section_table"] stores rates under, via
+    config["section_aliases"] (built by src.rules.service.tds_section_table
+    from C1's alias table). A code matching no alias is assumed unchanged."""
+    aliases = config.get("section_aliases", {})
+    return aliases.get(section, section)
+
+
+def _get_section_entry(config: dict, section: str, as_of: str | None = None) -> dict:
+    """Retrieve the section table entry valid on ``as_of`` (an ISO date
+    string — normally the transaction's deposit_date), after normalising
+    ``section`` through the alias table. config["section_table"][canonical]
+    is a list of dated entries, oldest first (one section can carry
+    successive entries across e.g. the Income-tax Act 2025 recodification).
+    Fail loudly if the section is entirely unknown, or (when ``as_of`` is
+    given) no entry covers that date — callers catch KeyError and degrade to
+    a caveat, never a false Rate Mismatch or a silent wrong-period rate."""
+    canonical = _normalise_section(config, section)
     table = config.get("section_table", {})
-    entry = table.get(section)
-    if entry is None:
+    entries = table.get(canonical)
+    if not entries:
         raise KeyError(
-            f"Section {section!r} not found in config section_table. "
-            f"Available sections: {sorted(table.keys())}. "
-            f"Add this section to config/matching_rules.yaml before running."
+            f"Section {section!r} (canonical {canonical!r}) not found in "
+            f"config section_table. Available sections: {sorted(table.keys())}."
         )
-    return entry
+    if not as_of:
+        return entries[0]
+    for entry in entries:
+        ef, et = entry.get("effective_from"), entry.get("effective_to")
+        if ef and ef > as_of:
+            continue
+        if et and et < as_of:
+            continue
+        return entry
+    raise KeyError(
+        f"Section {section!r} (canonical {canonical!r}) has no rate entry "
+        f"covering {as_of!r}. Configured periods: "
+        f"{[(e.get('effective_from'), e.get('effective_to')) for e in entries]}."
+    )
 
 
 def _get_applicable_rate(section_entry: dict) -> float:
