@@ -4,8 +4,10 @@ Pins the revision's acceptance criteria at the service/data layer:
 
 * one GST registration = one client — a single `gstin` column, no
   `gstin_branches` table, no branch dimension anywhere in the returned rows;
-* the legal name is the ONLY required field — PAN, TAN, GSTIN and the primary
-  contact block (email/phone/address) are all OPTIONAL;
+* the legal name is required and CREATING a client additionally requires at
+  least one of PAN / TAN (both may be given) — GSTIN and the primary contact
+  block (email/phone/address) are OPTIONAL; existing records stay editable
+  without either identity number;
 * PAN/TAN/GSTIN edits still need Manager+ AND a captured reason;
 * a GSTIN can't be cleared or changed while open reconciliation work
   references the client;
@@ -73,14 +75,26 @@ def test_create_requires_legal_name(db_path):
         clients.create_client(**{**_valid(), "legal_name": "   "}, db_path=db_path)
 
 
-def test_pan_and_tan_are_optional(db_path):
-    """Neither identity number is compulsory — a client can be onboarded with
-    only a legal name and have PAN/TAN added later."""
-    cid = clients.create_client(**{**_valid(), "pan": "", "tan": ""}, db_path=db_path)
+def test_create_requires_pan_or_tan(db_path):
+    """Creating a client needs at least one identity number — a legal name
+    alone is refused, and neither row is written."""
+    with pytest.raises(clients.ClientError, match="PAN or TAN"):
+        clients.create_client(**{**_valid(), "pan": "", "tan": ""}, db_path=db_path)
+    assert [c["legal_name"] for c in clients.list_clients(db_path=db_path)] == []
+
+
+def test_create_treats_whitespace_as_blank(db_path):
+    """Whitespace never counts as an identity number."""
+    with pytest.raises(clients.ClientError, match="PAN or TAN"):
+        clients.create_client(**{**_valid(), "pan": "  ", "tan": "\t"}, db_path=db_path)
+
+
+def test_create_accepts_pan_only(db_path):
+    """Either identity alone is enough — TAN is not privileged."""
+    cid = clients.create_client(**{**_valid(), "tan": ""}, db_path=db_path)
     row = clients.get_client(cid, db_path=db_path)
-    assert row["pan"] is None
+    assert row["pan"] == "AABCM1234K"
     assert row["tan"] is None
-    assert row["legal_name"] == "Meridian Fabrics"
 
 
 def test_create_accepts_tan_only(db_path):
@@ -89,6 +103,29 @@ def test_create_accepts_tan_only(db_path):
     row = clients.get_client(cid, db_path=db_path)
     assert row["pan"] is None
     assert row["tan"] == "MUMA12345B"
+
+
+def test_create_accepts_both_identity_numbers(db_path):
+    cid = clients.create_client(
+        **{**_valid(), "pan": "AABCM1234K", "tan": "MUMA12345B"}, db_path=db_path
+    )
+    row = clients.get_client(cid, db_path=db_path)
+    assert row["pan"] == "AABCM1234K"
+    assert row["tan"] == "MUMA12345B"
+
+
+def test_a_record_without_pan_or_tan_stays_editable(db_path):
+    """The PAN-or-TAN rule is scoped to CREATION — a record that predates it
+    (or was cleared later) must still be savable via the Details form."""
+    cid = clients.create_client(**_valid(), db_path=db_path)
+    conn = recon_db.get_connection(db_path)
+    try:
+        conn.execute("UPDATE end_clients SET pan = NULL, tan = NULL WHERE client_id = ?", (cid,))
+        conn.commit()
+    finally:
+        conn.close()
+    clients.update_client_details(cid, actor="admin", assigned_team="Mumbai", db_path=db_path)
+    assert clients.get_client(cid, db_path=db_path)["assigned_team"] == "Mumbai"
 
 
 @pytest.mark.parametrize(
@@ -180,8 +217,9 @@ def test_legal_name_cannot_be_blanked(db_path):
 
 
 def test_identity_fields_can_be_cleared(db_path):
-    """PAN/TAN are optional, so clearing one is allowed (it still needs a
-    reason and Manager+, but no longer an empty-identity guard)."""
+    """A PAN/TAN can be cleared one field at a time (it still needs a reason
+    and Manager+, but no empty-identity guard). The PAN-or-TAN requirement is
+    scoped to CREATION — see test_a_record_without_pan_or_tan_stays_editable."""
     cid = clients.create_client(**_valid(), db_path=db_path)
     clients.update_client_field(cid, "pan", "", actor="admin", reason="PAN not issued", db_path=db_path)
     row = clients.get_client(cid, db_path=db_path)

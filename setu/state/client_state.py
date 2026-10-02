@@ -718,9 +718,14 @@ class NewClientState(AuthState):
     @rx.var
     def validation_message(self) -> str:
         """The SERVICE's own message for the current form — the same rules the
-        save runs, so the inline hint can never disagree with the server."""
+        save runs, so the inline hint can never disagree with the server.
+
+        Uses the CREATE validator (not the shared record one): creating a
+        client requires at least one of PAN / TAN, and the inline hint plus
+        the disabled Save must reflect exactly that.
+        """
         try:
-            clients.validate_client_record(self._record())
+            clients.validate_client_creation(self._record())
         except clients.ClientError as exc:
             return str(exc)
         return ""

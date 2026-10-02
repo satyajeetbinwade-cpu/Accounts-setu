@@ -4,10 +4,11 @@ src.clients.db directly. Mirrors src/auth/service.py's shape.
 
 Covers: DB init, EndClient/Contact/ChartOfAccounts/HistoricalSnapshot
 CRUD, the business rules from the F2 build prompt as revised on
-27-Sep-2026 (a flat EndClient \u2014 one GST registration = one client, no
-branch sub-entity; the legal name is the only required field, with PAN,
-TAN, GSTIN and the primary contact block all optional; PAN/TAN/GSTIN edits
-gated to Manager+ with a captured reason; a GSTIN can't be cleared or
+27-Sep-2026 and updated 02-Oct-2026 (a flat EndClient — one GST registration
+= one client, no branch sub-entity; the legal name is required, and CREATING
+a client additionally requires at least one of PAN / TAN — both may be
+given; GSTIN and the primary contact block stay optional; PAN/TAN/GSTIN
+edits gated to Manager+ with a captured reason; a GSTIN can't be cleared or
 changed while open reconciliation work references it; soft-delete-only
 client deactivation), and the F1 retrofit that provisions a shared
 End-Client login from this module's data.
@@ -75,9 +76,11 @@ def get_client(client_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 # (column, label) for the fields that must be non-empty on a saved record.
-# The legal name is the ONLY required field: PAN, TAN, GSTIN and the primary
-# contact block are all optional, so a client can be onboarded before those
-# details are known and completed later.
+# The legal name is the required field. PAN, TAN, GSTIN and the primary
+# contact block are individually optional on a SAVE, but creating a client
+# additionally requires at least one of PAN / TAN — see
+# `validate_client_creation()`. Keeping the two rules separate is what lets a
+# record that predates that rule stay editable.
 REQUIRED_TEXT_FIELDS: tuple[tuple[str, str], ...] = (
     ("legal_name", "Legal name"),
 )
@@ -107,13 +110,29 @@ def validate_client_record(record: dict[str, Any]) -> None:
     """The save rules for a whole client record. Raises ClientError with a
     plain-language message naming exactly what to fix.
 
-    The legal name is the only required field. PAN, TAN, GSTIN and the primary
-    contact block are optional.
+    The legal name is the only field required by these SHARED rules. PAN, TAN,
+    GSTIN and the primary contact block are optional here; creation adds the
+    PAN-or-TAN requirement on top via ``validate_client_creation()``.
     """
     missing = [label for key, label in REQUIRED_TEXT_FIELDS if not _clean(record.get(key))]
     if missing:
         noun = "field" if len(missing) == 1 else "fields"
         raise ClientError(f"Required {noun} missing: " + ", ".join(missing) + ".")
+
+
+def validate_client_creation(record: dict[str, Any]) -> None:
+    """The CREATE rules: the shared record rules PLUS the onboarding
+    requirement that at least one of PAN / TAN is supplied. Both may be given.
+
+    Deliberately separate from ``validate_client_record`` so records that
+    predate this rule (legal name only) remain editable — the requirement is
+    scoped to creation, never to every later save.
+    """
+    validate_client_record(record)
+    if not (_clean(record.get("pan")) or _clean(record.get("tan"))):
+        raise ClientError(
+            "Either PAN or TAN is compulsory — enter at least one (you can enter both)."
+        )
 
 
 def _validate_single_field_save(field: str, new_value: Optional[str]) -> None:
@@ -148,7 +167,7 @@ def create_client(
         "primary_contact_phone": primary_contact_phone,
         "primary_contact_address": primary_contact_address,
     }
-    validate_client_record(record)
+    validate_client_creation(record)
     conn = _connect(db_path)
     try:
         return cdb.create_client(
@@ -219,9 +238,12 @@ def update_client_details(
 ) -> None:
     """Save the Details form's unrestricted fields in ONE action.
 
-    The whole record is re-validated (the legal name is the only required
-    field) against the stored row MERGED with the proposed values, so this
-    form can never leave a client in a state it can no longer be saved from.
+    The whole record is re-validated against the stored row MERGED with the
+    proposed values, so this form can never leave a client in a state it can
+    no longer be saved from. Uses the SHARED record rules (legal name
+    required) and NOT the creation-only PAN-or-TAN rule — the Details form
+    doesn't carry PAN/TAN, and a legacy record without either must stay
+    savable.
     """
     proposed: dict[str, Any] = {}
     conn = _connect(db_path)
