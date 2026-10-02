@@ -16,9 +16,9 @@ Design notes (see the F2 build prompt + its 27-Sep-2026 revision):
   folds in here; `state` is no longer a separate field, it is part of the
   free-text address). The contact block is OPTIONAL: it is collected when the
   client has it, but never blocks a save.
-- Validation that needs more than one column (the legal name is the only
-  required one) lives in src/clients/service.py, not as DB constraints, so the
-  UI gets one plain-language message per rule.
+- Validation that needs more than one column (the legal name, plus the
+  PAN-or-TAN requirement on CREATION) lives in src/clients/service.py, not as
+  DB constraints, so the UI gets one plain-language message per rule.
 - ContactDirectoryEntry is internal-reference only, never linked to a
   login row (the End-Client login is a single shared credential).
 - ChartOfAccounts / HistoricalSnapshot are manual entry only this phase
