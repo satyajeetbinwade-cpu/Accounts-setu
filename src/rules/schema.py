@@ -102,9 +102,29 @@ CREATE TABLE IF NOT EXISTS regulatory_rules (
     name          TEXT    NOT NULL,
     rate_or_rule  TEXT    NOT NULL,   -- e.g. '2.0%' or 'ITC blocked'
     effective_from TEXT   NOT NULL,
+    effective_to  TEXT,               -- NULL => still in force. Lets one section
+                                       -- carry successive dated rows (e.g. across
+                                       -- the Income-tax Act 2025 recodification)
+                                       -- without the newer row clobbering the older.
+    single_transaction_threshold REAL, -- TDS only; structured (not parsed from notes)
+    annual_aggregate_threshold   REAL, -- TDS only; structured (not parsed from notes)
     seed_as_of    TEXT    NOT NULL,   -- "Seed data as of [date]"
     last_reviewed_at TEXT,            -- NULL => never reviewed (seed-unverified)
     notes         TEXT
+);
+
+-- Old-Act TDS section code <-> Income-tax Act 2025 code (in force from
+-- 2026-04-01). `new_code` is a PLACEHOLDER pending the CA firm's actual
+-- confirmation (see notes on each seeded row) -- never a guessed real
+-- citation. A section not yet in this table is treated as unchanged by the
+-- recodification (old_code is used as its own canonical key).
+CREATE TABLE IF NOT EXISTS tds_section_aliases (
+    alias_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    old_code      TEXT    NOT NULL,   -- canonical key rates are stored under
+    new_code      TEXT    NOT NULL,   -- Income-tax Act 2025 code (placeholder)
+    effective_from TEXT   NOT NULL,   -- date new_code takes over, e.g. 2026-04-01
+    notes         TEXT,
+    UNIQUE(old_code, new_code)
 );
 
 -- Statutory due dates — NEW rule category for C2's filing calendar.
@@ -142,4 +162,22 @@ CREATE TABLE IF NOT EXISTS rule_change_log (
 def init_rules_schema(conn: sqlite3.Connection) -> None:
     """Create C1 rules tables if missing. Idempotent."""
     conn.executescript(RULES_SCHEMA)
+    conn.commit()
+    _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a DB was first created.
+
+    ``CREATE TABLE IF NOT EXISTS`` won't add a column to a table that already
+    exists, so new columns need an explicit, additive migration here (same
+    pattern as src/db.py's _migrate). Safe to call on every connection.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(regulatory_rules)")}
+    if "effective_to" not in cols:
+        conn.execute("ALTER TABLE regulatory_rules ADD COLUMN effective_to TEXT")
+    if "single_transaction_threshold" not in cols:
+        conn.execute("ALTER TABLE regulatory_rules ADD COLUMN single_transaction_threshold REAL")
+    if "annual_aggregate_threshold" not in cols:
+        conn.execute("ALTER TABLE regulatory_rules ADD COLUMN annual_aggregate_threshold REAL")
     conn.commit()

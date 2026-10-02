@@ -227,29 +227,89 @@ def get_regulatory_rule(conn: sqlite3.Connection, reg_rule_id: int) -> Optional[
 def upsert_regulatory_rule(
     conn: sqlite3.Connection, *, domain: str, section: Optional[str], name: str,
     rate_or_rule: str, effective_from: str, seed_as_of: str, notes: Optional[str],
+    effective_to: Optional[str] = None,
+    single_transaction_threshold: Optional[float] = None,
+    annual_aggregate_threshold: Optional[float] = None,
 ) -> int:
-    """Insert-or-update by (domain, section, name). NOTE: section is NULL for
-    GST slabs, and SQLite UNIQUE constraints treat NULL as distinct from
-    itself — so we do an explicit lookup rather than relying on ON CONFLICT
-    (which would duplicate every NULL-section row on each seed run)."""
+    """Insert-or-update by (domain, section, name, effective_from). NOTE:
+    section is NULL for GST slabs, and SQLite UNIQUE constraints treat NULL
+    as distinct from itself — so we do an explicit lookup rather than
+    relying on ON CONFLICT (which would duplicate every NULL-section row on
+    each seed run). effective_from is part of the key (not just
+    domain/section/name) so a section can carry successive dated rows —
+    e.g. one entry pre- and one post-Income-tax-Act-2025 — without the
+    later seed run overwriting the earlier one."""
     existing = conn.execute(
-        "SELECT reg_rule_id FROM regulatory_rules WHERE domain = ? AND section IS ? AND name = ?",
-        (domain, section, name),
+        "SELECT reg_rule_id FROM regulatory_rules WHERE domain = ? AND section IS ? AND name = ? AND effective_from = ?",
+        (domain, section, name, effective_from),
     ).fetchone()
     if existing is not None:
         conn.execute(
-            "UPDATE regulatory_rules SET rate_or_rule = ?, effective_from = ?, seed_as_of = ?, notes = ? WHERE reg_rule_id = ?",
-            (rate_or_rule, effective_from, seed_as_of, notes, existing[0]),
+            """
+            UPDATE regulatory_rules
+            SET rate_or_rule = ?, seed_as_of = ?, notes = ?, effective_to = ?,
+                single_transaction_threshold = ?, annual_aggregate_threshold = ?
+            WHERE reg_rule_id = ?
+            """,
+            (rate_or_rule, seed_as_of, notes, effective_to,
+             single_transaction_threshold, annual_aggregate_threshold, existing[0]),
         )
         conn.commit()
         return existing[0]
     cur = conn.execute(
         """
         INSERT INTO regulatory_rules
-            (domain, section, name, rate_or_rule, effective_from, seed_as_of, last_reviewed_at, notes)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+            (domain, section, name, rate_or_rule, effective_from, effective_to,
+             single_transaction_threshold, annual_aggregate_threshold,
+             seed_as_of, last_reviewed_at, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         """,
-        (domain, section, name, rate_or_rule, effective_from, seed_as_of, notes),
+        (domain, section, name, rate_or_rule, effective_from, effective_to,
+         single_transaction_threshold, annual_aggregate_threshold, seed_as_of, notes),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_regulatory_rules_for_section(
+    conn: sqlite3.Connection, *, domain: str, section: str,
+) -> list[dict[str, Any]]:
+    """All dated rows for one (domain, section), oldest first — the raw
+    material a caller picks the transaction-date-applicable row from."""
+    return _rows_to_dicts(
+        conn,
+        "SELECT * FROM regulatory_rules WHERE domain = ? AND section = ? ORDER BY effective_from",
+        (domain, section),
+    )
+
+
+# ---------------------------------------------------------------------------
+# TDS section aliases (old-Act code <-> Income-tax Act 2025 code)
+# ---------------------------------------------------------------------------
+
+
+def list_tds_section_aliases(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return _rows_to_dicts(conn, "SELECT * FROM tds_section_aliases ORDER BY old_code")
+
+
+def upsert_tds_section_alias(
+    conn: sqlite3.Connection, *, old_code: str, new_code: str, effective_from: str,
+    notes: Optional[str],
+) -> int:
+    existing = conn.execute(
+        "SELECT alias_id FROM tds_section_aliases WHERE old_code = ? AND new_code = ?",
+        (old_code, new_code),
+    ).fetchone()
+    if existing is not None:
+        conn.execute(
+            "UPDATE tds_section_aliases SET effective_from = ?, notes = ? WHERE alias_id = ?",
+            (effective_from, notes, existing[0]),
+        )
+        conn.commit()
+        return existing[0]
+    cur = conn.execute(
+        "INSERT INTO tds_section_aliases (old_code, new_code, effective_from, notes) VALUES (?, ?, ?, ?)",
+        (old_code, new_code, effective_from, notes),
     )
     conn.commit()
     return cur.lastrowid

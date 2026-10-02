@@ -23,6 +23,7 @@ Business rules enforced here (per the C1 build prompt):
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -463,3 +464,158 @@ def list_change_log(*, limit: int = 200, db_path=None) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# TDS rate resolution — THE single source of truth for TDS section rates.
+#
+# Both src.runner._run_tds (building the matcher's section table for a run)
+# and src.module2.service.classify_tds_from_narration (the narration ->
+# section AI touchpoint) resolve rates through this module, never through a
+# YAML section_table or their own free-text parsing. This is SRB-3 T2.
+# ---------------------------------------------------------------------------
+
+# Matches "<number>%" optionally followed by a free-text variant label, up to
+# the next number or a closing paren — handles all three conventions seen in
+# the regulatory table: "2.0% (1.0% individual/HUF)", "10.0% professional /
+# 2.0% technical", and a bare "10.0%".
+_RATE_LABEL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*([A-Za-z][A-Za-z/&\s]*)?")
+
+
+def parse_tds_rate_variants(raw: Optional[str]) -> dict[str, float]:
+    """Parse a regulatory_rules.rate_or_rule free-text string into a
+    {variant_label: rate} dict. A percentage with no trailing label becomes
+    the "default" entry. THE single tested parser for TDS rate text —
+    replaces the old "take the first % only" regex that silently dropped
+    every named variant after the first."""
+    if not raw:
+        return {}
+    rates: dict[str, float] = {}
+    for rate_str, label_str in _RATE_LABEL_RE.findall(raw):
+        key = _normalise_rate_label(label_str) or "default"
+        # Keep the first value seen for a key — a later duplicate/parsing
+        # artefact must never silently overwrite a real earlier value.
+        rates.setdefault(key, float(rate_str))
+    return rates
+
+
+def _normalise_rate_label(label: Optional[str]) -> str:
+    if not label:
+        return ""
+    cleaned = label.strip().strip("/").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"[/&\s]+", "_", cleaned)
+    return cleaned.lower()
+
+
+def _applicable_rate(rates: dict[str, float]) -> Optional[float]:
+    """The 'default' rate if present, else the first variant listed —
+    mirrors src.matching.tds_matcher._get_applicable_rate exactly, since
+    both need the same single-number fallback rule."""
+    if "default" in rates:
+        return rates["default"]
+    if rates:
+        return next(iter(rates.values()))
+    return None
+
+
+def _canonical_tds_section(section: str, aliases: list[dict[str, Any]]) -> str:
+    """Normalise an incoming section code (old-Act or Income-tax-Act-2025)
+    to the canonical key regulatory_rules stores rates under (the old-Act
+    code). A code matching no alias is assumed unchanged and used as-is."""
+    for a in aliases:
+        if a["old_code"] == section:
+            return section
+    for a in aliases:
+        if a["new_code"] == section:
+            return a["old_code"]
+    return section
+
+
+def resolve_tds_section(
+    section: str, *, as_of: Optional[str] = None, db_path=None,
+) -> Optional[dict[str, Any]]:
+    """Resolve a TDS section code (old or new) to the regulatory_rules row
+    valid on ``as_of`` (an ISO date; defaults to today), normalising through
+    the alias table first. Returns None when the section is unknown or has
+    no row covering that date — callers turn that into a run caveat, never
+    a crash or a fabricated rate."""
+    as_of = as_of or _today()
+    conn = _connect(db_path)
+    try:
+        aliases = rdb.list_tds_section_aliases(conn)
+        canonical = _canonical_tds_section(section, aliases)
+        rows = rdb.list_regulatory_rules_for_section(conn, domain="TDS", section=canonical)
+    finally:
+        conn.close()
+    for row in rows:
+        if row["effective_from"] > as_of:
+            continue
+        if row["effective_to"] and row["effective_to"] < as_of:
+            continue
+        rates = parse_tds_rate_variants(row["rate_or_rule"])
+        return {
+            "section": canonical,
+            "requested_section": section,
+            "rates": rates,
+            "single_transaction_threshold": row.get("single_transaction_threshold") or 0.0,
+            "annual_aggregate_threshold": row.get("annual_aggregate_threshold") or 0.0,
+            "effective_from": row["effective_from"],
+            "effective_to": row["effective_to"],
+        }
+    return None
+
+
+def deterministic_tds_rate(
+    section: str, *, as_of: Optional[str] = None, db_path=None,
+) -> Optional[float]:
+    """The single representative rate for a section as of a date — used
+    where only one headline number is needed (e.g. the narration
+    classifier's response). Always deterministic against C1; never
+    decided independently by a caller."""
+    entry = resolve_tds_section(section, as_of=as_of, db_path=db_path)
+    if entry is None:
+        return None
+    return _applicable_rate(entry["rates"])
+
+
+def tds_section_table(*, as_of: Optional[str] = None, db_path=None) -> dict[str, Any]:
+    """Build the full TDS section/rate/alias structure for a single
+    matching run, from C1. This is what src.runner._run_tds passes into
+    the (pure, DB-unaware) TDS matchers as config["section_table"] /
+    config["section_aliases"] — the matcher normalises + date-picks from
+    plain data, but never talks to C1 directly.
+
+    Shape:
+      {"section_table": {canonical_section: [ {effective_from, effective_to,
+           rates, single_transaction_threshold, annual_aggregate_threshold},
+           ... ] (oldest first) }},
+       "section_aliases": {any_known_code: canonical_section}}
+    """
+    conn = _connect(db_path)
+    try:
+        aliases = rdb.list_tds_section_aliases(conn)
+        all_rows = rdb.list_regulatory_rules(conn, domain="TDS")
+    finally:
+        conn.close()
+
+    section_table: dict[str, list[dict[str, Any]]] = {}
+    for row in all_rows:
+        section = row["section"]
+        if not section:
+            continue
+        section_table.setdefault(section, []).append({
+            "effective_from": row["effective_from"],
+            "effective_to": row["effective_to"],
+            "rates": parse_tds_rate_variants(row["rate_or_rule"]),
+            "single_transaction_threshold": row.get("single_transaction_threshold") or 0.0,
+            "annual_aggregate_threshold": row.get("annual_aggregate_threshold") or 0.0,
+        })
+
+    section_aliases: dict[str, str] = {}
+    for a in aliases:
+        section_aliases[a["old_code"]] = a["old_code"]
+        section_aliases[a["new_code"]] = a["old_code"]
+
+    return {"section_table": section_table, "section_aliases": section_aliases}
