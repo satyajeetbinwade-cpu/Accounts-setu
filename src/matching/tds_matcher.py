@@ -127,11 +127,14 @@ def _get_section_entry(config: dict, section: str, as_of: str | None = None) -> 
     """Retrieve the section table entry valid on ``as_of`` (an ISO date
     string — normally the transaction's deposit_date), after normalising
     ``section`` through the alias table. config["section_table"][canonical]
-    is a list of dated entries, oldest first (one section can carry
-    successive entries across e.g. the Income-tax Act 2025 recodification).
-    Fail loudly if the section is entirely unknown, or (when ``as_of`` is
-    given) no entry covers that date — callers catch KeyError and degrade to
-    a caveat, never a false Rate Mismatch or a silent wrong-period rate."""
+    may be either a single mapping (the legacy config/matching_rules.yaml
+    shape) or a list of dated entries, oldest first (one section can carry
+    successive entries across e.g. the Income-tax Act 2025 recodification);
+    both shapes are accepted so the matcher works before and after the
+    migration. Fail loudly if the section is entirely unknown, or (when
+    ``as_of`` is given) no entry covers that date — callers catch KeyError
+    and degrade to a caveat, never a false Rate Mismatch or a silent
+    wrong-period rate."""
     canonical = _normalise_section(config, section)
     table = config.get("section_table", {})
     entries = table.get(canonical)
@@ -140,6 +143,10 @@ def _get_section_entry(config: dict, section: str, as_of: str | None = None) -> 
             f"Section {section!r} (canonical {canonical!r}) not found in "
             f"config section_table. Available sections: {sorted(table.keys())}."
         )
+    # Legacy shape: one undated mapping for the whole section — wrap it so
+    # the dated-entry logic below treats it as a single-period entry.
+    if isinstance(entries, dict):
+        entries = [entries]
     if not as_of:
         return entries[0]
     for entry in entries:
