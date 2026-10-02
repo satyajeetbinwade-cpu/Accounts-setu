@@ -260,6 +260,11 @@ def _upload_zone() -> rx.Component:
                         on_change=IngestionAiState.set_source_type,
                     ),
                     rx.text(IngestionAiState.source_type_hint, style=t.TEXT["micro"]),
+                    rx.cond(
+                        IngestionAiState.source_type_detected != "",
+                        rx.text(IngestionAiState.source_type_detected, style=t.TEXT["micro"]),
+                        rx.fragment(),
+                    ),
                     spacing="1",
                     align="start",
                 ),
@@ -2144,6 +2149,12 @@ def ingestion_ai_page() -> rx.Component:
             ),
             rx.cond(IngestionAiState.flash != "", c.info_banner(IngestionAiState.flash), rx.fragment()),
             rx.cond(IngestionAiState.error != "", c.inline_reason(IngestionAiState.error), rx.fragment()),
+            # Global loader: a mapping infer/confirm or a model re-run shows
+            # here, so no background step can look like a frozen screen.
+            c.ai_progress(
+                IngestionAiState.busy_label,
+                visible=IngestionAiState.busy_label != "",
+            ),
             rx.cond(
                 IngestionAiState.selected_upload_id != 0,
                 _mapping_review(),

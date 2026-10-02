@@ -22,6 +22,7 @@ from src.clients import service as clients
 from src.config_loader import load_config
 from src.data_paths import source_data_path
 from src.f5 import service as f5
+from src.ingestion_ai import detect as upload_detect
 from src.ingestion_ai import service as ingestion_ai
 from src.ingestion_ai import periods as period_utils
 from src.reconciliation import narrative
@@ -32,6 +33,15 @@ from src.shared import discovery
 from setu.foundation import tokens as _t
 from setu.state.auth_state import AuthState
 from setu.state.history import HistoryEntry, load_history
+from setu.state.shared_upload import (
+    PendingFile,
+    UploadProgressRow,
+    advance_stage,
+    build_pending,
+    discard_staged,
+    drop_completed,
+    read_staged_bytes,
+)
 
 STAGES: list[tuple[int, str]] = [
     (1, "Context"),
@@ -327,6 +337,18 @@ class ReconcileState(AuthState):
         "Unfiled (not reconcilable)" rather than a bare "-"."""
         return [ContextOption(value=p, label=period_utils.period_label(p)) for p in self.periods]
     upload_error: str = ""
+    # The drop-zone's own state: a staged file (chips above the Upload button)
+    # and the per-file upload lifecycle, both shared with F3/F3-B so the
+    # Reconcile upload behaves exactly like every other upload surface.
+    pending: list[PendingFile] = []
+    upload_progress: list[UploadProgressRow] = []
+    # One global "something is working" label — drives the indeterminate
+    # loader at the top of the flow, so a background step (a live model call,
+    # the matching engine, a PDF render) can never look like a frozen screen.
+    busy_label: str = ""
+    # "Detected GSTR-2B — the filename says …", set when a dropped file's slot
+    # is auto-picked. Empty when the evidence was not decisive.
+    upload_detected: str = ""
 
     # stage 2 — re-run through model (per-file, confirm-gated)
     rerun_source_type: str = ""
@@ -796,6 +818,12 @@ class ReconcileState(AuthState):
                 )
             )
         self.slots = out
+        # Keep the upload card's Slot picker in step with the slots offered
+        # here. A first visit (or a recon-type change) starts on the first
+        # slot; a live user choice is never overwritten.
+        labels = [s.label for s in out]
+        if self.upload_slot_label not in labels:
+            self.upload_slot_label = labels[0] if labels else ""
         self._compute_readiness()
 
     def _slot_info(self, source_type: str, filename: str) -> dict:
@@ -900,14 +928,21 @@ class ReconcileState(AuthState):
         self.ready = self.books_ok and self.portal_ok and not blockers
 
     @rx.event
-    def select_slot_file(self, source_type: str, filename: str):
+    async def select_slot_file(self, source_type: str, filename: str):
         self.selections[source_type] = filename
         self.rail_return = False
-        # Normalize a file that's on disk but never ingested.
+        # Normalize a file that's on disk but never ingested. A normalization
+        # can be a live model call (~15-25s), so the loader is shown for the
+        # whole of it — never a silent freeze.
         if filename and ingestion_ai.get_stored_result(
             self.ctx_client, self.ctx_period, source_type, filename
         ) is None:
-            self._normalize(source_type, filename)
+            self.busy_label = f"Reading {filename} and mapping its columns…"
+            yield
+            try:
+                await asyncio.to_thread(self._normalize, source_type, filename)
+            finally:
+                self.busy_label = ""
         self._load_slots()
 
     def _normalize(self, source_type: str, filename: str) -> None:
@@ -945,14 +980,16 @@ class ReconcileState(AuthState):
         self.rerun_busy = False
 
     @rx.event
-    def confirm_rerun(self):
+    async def confirm_rerun(self):
         if not (self.rerun_source_type and self.rerun_filename):
             self.rerun_open = False
             return
         self.rerun_busy = True
         self.error = ""
+        yield
         try:
-            out = ingestion_ai.re_run_file(
+            out = await asyncio.to_thread(
+                ingestion_ai.re_run_file,
                 self.ctx_client, self.ctx_period, self.rerun_source_type, self.rerun_filename,
                 actor=self.username,
                 client_id=_client_id_for_folder(self.ctx_client),
@@ -978,12 +1015,80 @@ class ReconcileState(AuthState):
     @rx.event
     def set_upload_slot_label(self, v: str):
         self.upload_slot_label = v
+        # A human choice supersedes the auto-detect hint.
+        self.upload_detected = ""
+
+    # ------------------------------------------------------------------
+    # Drop zone — staged files (FilePreviewChip) + per-file progress
+    # ------------------------------------------------------------------
+    @rx.event
+    async def stage_upload_files(self, files: list[rx.UploadFile]):
+        """Stage dropped files (chips above the Upload button), then auto-pick
+        the slot from the file's own name/headers. The dropdown stays as the
+        override — the guess only fills it in."""
+        self.upload_error = ""
+        if not files:
+            return
+        for f in files:
+            name = f.filename or "upload"
+            data = await f.read()
+            pf = build_pending(name, data)
+            if pf is None:
+                continue
+            if any(p.key == pf.key for p in self.pending):
+                continue
+            self.pending = self.pending + [pf]
+        self._detect_upload_slot()
+
+    def _detect_upload_slot(self) -> None:
+        """Pre-select the upload slot from the first staged file's evidence."""
+        self.upload_detected = ""
+        if not self.pending:
+            return
+        allowed = set(discovery.slot_types_for(self.ctx_recon_type))
+        pf = self.pending[0]
+        detected, reason = upload_detect.detect_source_type_from_path(
+            pf.filename, pf.stage_path, allowed=allowed
+        )
+        if detected:
+            label = discovery.source_type_label(detected)
+            self.upload_slot_label = label
+            self.upload_detected = (
+                f"Auto-detected {label} — {reason}. Change the slot if that's wrong."
+            )
 
     @rx.event
-    async def handle_upload(self, files: list[rx.UploadFile]):
+    def remove_pending(self, key: str):
+        for p in self.pending:
+            if p.key == key:
+                discard_staged(p.stage_path)
+        self.pending = [p for p in self.pending if p.key != key]
+        self._detect_upload_slot()
+
+    @rx.event
+    def clear_pending(self):
+        for p in self.pending:
+            discard_staged(p.stage_path)
+        self.pending = []
+        self.upload_detected = ""
+
+    def _pending_bytes(self, key: str) -> bytes:
+        for p in self.pending:
+            if p.key == key:
+                return read_staged_bytes(p.stage_path)
+        return b""
+
+    def _set_upload_stage(self, key: str, stage: str, *, pct: int = 0, label: str = "") -> None:
+        self.upload_progress = advance_stage(self.upload_progress, key, stage, pct=pct, label=label)
+
+    @rx.event
+    async def handle_upload(self):
+        """Upload every staged file through the SAME distinct
+        Queued → Uploading (%) → Reading & mapping → Done / Failed states
+        every other upload surface uses."""
         self.upload_error = ""
         self.error = ""
-        if not files:
+        if not self.pending:
             self.upload_error = "Choose a file to upload."
             return
         source_type = ""
@@ -1002,19 +1107,55 @@ class ReconcileState(AuthState):
                 "files filed without one cannot be reconciled."
             )
             return
-        f = files[0]
-        data = await f.read()
-        directory = source_data_path(self.ctx_client, self.ctx_period, source_type)
-        dest = directory / (f.filename or "upload")
-        try:
-            dest.write_bytes(data)
-        except Exception as exc:  # noqa: BLE001
-            self.upload_error = f"Couldn't save {f.filename}: {exc}"
-            return
-        self.selections[source_type] = dest.name
+
+        staged = list(self.pending)
+        self.upload_progress = [
+            UploadProgressRow(key=pf.key, filename=pf.filename, stage="queued", pct=0, label="Queued")
+            for pf in staged
+        ]
+        yield
+
+        uploaded: list[str] = []
+        for pf in staged:
+            self._set_upload_stage(pf.key, "uploading", pct=10)
+            yield
+            await asyncio.sleep(0.03)
+            self._set_upload_stage(pf.key, "uploading", pct=60)
+            yield
+            self._set_upload_stage(
+                pf.key, "processing", label="Reading the file and mapping its columns…"
+            )
+            yield
+            directory = source_data_path(self.ctx_client, self.ctx_period, source_type)
+            dest = directory / pf.filename
+            try:
+                dest.write_bytes(self._pending_bytes(pf.key))
+            except Exception as exc:  # noqa: BLE001
+                self._set_upload_stage(pf.key, "failed", label=f"Couldn't save the file: {exc}")
+                yield
+                continue
+            self.selections[source_type] = dest.name
+            try:
+                # Only normalize a file the engine hasn't already stored —
+                # normalization can be a live model call. Run it off the event
+                # loop so the loader keeps animating while it works.
+                if ingestion_ai.get_stored_result(
+                    self.ctx_client, self.ctx_period, source_type, dest.name
+                ) is None:
+                    await asyncio.to_thread(self._normalize, source_type, dest.name)
+                self._set_upload_stage(pf.key, "done", pct=100, label="Uploaded and mapped")
+                uploaded.append(dest.name)
+            except Exception as exc:  # noqa: BLE001
+                self._set_upload_stage(pf.key, "failed", label=f"Couldn't read the file: {exc}")
+            yield
+
         self.rail_return = False
-        self._normalize(source_type, dest.name)
-        self.flash = f"Uploaded {dest.name}."
+        if uploaded:
+            self.flash = f"Uploaded {', '.join(uploaded)}."
+        # A finished file belongs in its slot's card below, NOT above the
+        # Upload button — drop the ticked rows, keep any failures for a retry.
+        self.upload_progress = drop_completed(self.upload_progress)
+        self.clear_pending()
         self._load_slots()
 
     # ==================================================================
@@ -1025,7 +1166,7 @@ class ReconcileState(AuthState):
         self.pause_before_run = v
 
     @rx.event
-    def run_reconciliation(self):
+    async def run_reconciliation(self):
         self.error = ""
         self.flash = ""
         selected = {k: v for k, v in self.selections.items() if v}
@@ -1033,19 +1174,27 @@ class ReconcileState(AuthState):
             self.error = "No source files are selected."
             return
         client_id = _client_id_for_folder(self.ctx_client)
+        # The engine run can be long (it may make a live mapping call for an
+        # unseen file shape). Show the loader and hand the work to a worker
+        # thread so the request is not blocked.
+        self.busy_label = "Matching the books against the portal files…"
+        yield
         try:
             config = load_config()
-            run_id = execute_run(
+            run_id = await asyncio.to_thread(
+                execute_run,
                 self.ctx_client, self.ctx_period, self.ctx_recon_type, None, config,
                 selected_files=selected, client_id=client_id, actor=self.username,
             )
         except RunExecutionError as exc:
             self.error = str(exc)
             _record_sync_health(client_id, selected, succeeded=False)
+            self.busy_label = ""
             return
         except Exception as exc:  # noqa: BLE001
             self.error = str(exc)
             _record_sync_health(client_id, selected, succeeded=False)
+            self.busy_label = ""
             return
 
         _record_sync_health(client_id, selected, succeeded=True)
@@ -1061,6 +1210,7 @@ class ReconcileState(AuthState):
         self.auto_ran = True
         self.flash = f"Run {run_id} complete."
         self.stage = 4
+        self.busy_label = ""
         self._load_review()
 
     @rx.event
@@ -1842,15 +1992,21 @@ class ReconcileState(AuthState):
         self._build_read(allow_ai=False)
 
     @rx.event
-    def draft_read(self):
-        """Explicitly request the AI-drafted summary (guard-verified)."""
+    async def draft_read(self):
+        """Explicitly request the AI-drafted summary (guard-verified).
+
+        A live model call (~15-25s) — the loader is shown for the whole of it.
+        """
         if not getattr(self, "_model", None):
             return
         self.read_busy = True
+        self.busy_label = "Drafting the accountant's read with the model…"
+        yield
         try:
-            self._build_read(allow_ai=True)
+            await asyncio.to_thread(self._build_read, True)
         finally:
             self.read_busy = False
+            self.busy_label = ""
 
     # ------------------------------------------------------------------
     # Bulk review (Module 8's materiality gate, applied consistently)

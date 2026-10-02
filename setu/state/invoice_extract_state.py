@@ -17,7 +17,7 @@ from src.auth import service as auth
 from src.clients import service as clients
 from src.invoice_extract import service as ie
 from setu.state.auth_state import AuthState
-from setu.state.shared_upload import SharedUploadState
+from setu.state.shared_upload import SharedUploadState, drop_completed
 
 STATUS_LABELS = {
     "extracted": "Extracted — ready to confirm",
@@ -133,6 +133,9 @@ class InvoiceExtractState(SharedUploadState):
     upload_client_id: int = 0
     batch_name: str = ""
     upload_error: str = ""
+    # A generic "something is working" indicator, so a batch upload can never
+    # look like a frozen screen.
+    busy_label: str = ""
 
     # uploads list
     uploads: list[UploadRow] = []
@@ -625,6 +628,7 @@ class InvoiceExtractState(SharedUploadState):
             self.upload_progress = self.upload_progress + [
                 UploadProgressRow(key=pf.key, filename=pf.filename, stage="queued", pct=0, label="Queued")
             ]
+        self.busy_label = f"Extracting {len(staged)} invoice(s)…"
         yield
 
         results: list[dict] = []
@@ -638,7 +642,10 @@ class InvoiceExtractState(SharedUploadState):
             self._ie_set_stage(pf.key, "processing", label="Extracting…")
             yield
             try:
-                res = ie.upload_invoice(
+                # Extraction can read/render a PDF — off the event loop so the
+                # loader keeps animating.
+                res = await asyncio.to_thread(
+                    ie.upload_invoice,
                     client_id=self.upload_client_id,
                     filename=pf.filename,
                     file_bytes=self._pending_bytes(pf.key),
@@ -674,8 +681,12 @@ class InvoiceExtractState(SharedUploadState):
                     f" {n_dup} upload(s) matched an existing invoice number + vendor GSTIN "
                     "— a duplicate warning, not a block."
                 )
+        # A finished upload lives in the list below, NOT above the Upload
+        # button — drop the ticked rows, keep any failures for a retry.
+        self.upload_progress = drop_completed(self.upload_progress)
         self.clear_pending()
         self.batch_name = ""
+        self.busy_label = ""
         self._load_all()
 
     @rx.event
@@ -854,10 +865,20 @@ class InvoiceExtractState(SharedUploadState):
         self._load_all()
 
     @rx.event
-    def re_extract_upload(self):
-        """Re-run the AI extraction layer on this upload and refresh fields."""
+    async def re_extract_upload(self):
+        """Re-run the AI extraction layer on this upload and refresh fields.
+
+        A re-extract is a live model call (~10-25s), so the loader is shown
+        for the whole of it — never a silent freeze.
+        """
+        import asyncio
+
+        self.busy_label = "Re-extracting this invoice with the AI layer…"
+        yield
         try:
-            res = ie.re_extract_upload(self.selected_upload_id, actor=self.username)
+            res = await asyncio.to_thread(
+                ie.re_extract_upload, self.selected_upload_id, actor=self.username
+            )
             if res["ai_used"]:
                 self.flash = (
                     f"Re-extracted with AI ({res['ai_model']}) — "
@@ -869,6 +890,8 @@ class InvoiceExtractState(SharedUploadState):
                 )
         except ie.InvoiceExtractError as exc:
             self.error = str(exc)
+        finally:
+            self.busy_label = ""
         self.field_inputs = {}
         self._load_all()
 

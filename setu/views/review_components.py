@@ -399,6 +399,10 @@ def accountants_read() -> rx.Component:
                 ),
                 width="100%", align="center",
             ),
+            c.ai_progress(
+                "Drafting the accountant's read with the model…",
+                visible=ReconcileState.read_busy,
+            ),
             rx.cond(
                 ReconcileState.read_text != "",
                 rx.text(ReconcileState.read_text, style=t.TEXT["body"]),
@@ -1563,7 +1567,7 @@ def report_export() -> rx.Component:
             ),
             rx.cond(
                 ReconcileState.report_busy,
-                c.info_banner("Building the report…"),
+                c.ai_progress("Building the report — charts, workbook and print layout…"),
                 rx.fragment(),
             ),
             rx.cond(

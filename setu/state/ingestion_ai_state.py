@@ -23,11 +23,12 @@ import reflex as rx
 from src.auth import service as auth
 from src.clients import service as clients
 from src.data_paths import VALID_SOURCE_TYPES
+from src.ingestion_ai import detect
 from src.ingestion_ai import service as ingestion_ai
 from src.ingestion_ai import periods as period_utils
 from src.shared import discovery
 from setu.state.history import HistoryEntry
-from setu.state.shared_upload import SharedUploadState
+from setu.state.shared_upload import SharedUploadState, drop_completed
 
 # The dropdown must speak the accountant's vocabulary, not our folder keys,
 # and it must be displayed in a sensible order. The books slot in particular
@@ -507,6 +508,10 @@ class IngestionAiState(SharedUploadState):
     # runs, so the view can show a spinner + what it's doing.
     busy_label: str = ""
 
+    # "Auto-detected GSTR-2B — …", set when a dropped file's source type is
+    # picked for you. Empty when the evidence was not decisive.
+    source_type_detected: str = ""
+
     # raw-file preview (first rows of the actual sheet)
     preview_headers: list[str] = []
     preview_rows: list[list[str]] = []
@@ -864,6 +869,8 @@ class IngestionAiState(SharedUploadState):
         label is human-facing), so this stores it directly."""
         if key in VALID_SOURCE_TYPES:
             self.source_type = key
+            # A human choice supersedes the auto-detect hint.
+            self.source_type_detected = ""
 
     def set_period(self, v: str):
         self.period = v
@@ -1000,10 +1007,26 @@ class IngestionAiState(SharedUploadState):
 
     @rx.event
     async def stage(self, files: list[rx.UploadFile]):
-        """Stage dropped files, then pre-fill the required Period field from
-        the first file's own evidence."""
+        """Stage dropped files, pre-fill the required Period field, and
+        auto-pick the Source type from the file's own name/headers. The
+        Source-type dropdown stays as the override — the guess only fills it
+        in, and the engine still classifies the file at ingestion time."""
         await super().stage(files)
         self._infer_period()
+        self._infer_source_type()
+
+    def _infer_source_type(self) -> None:
+        self.source_type_detected = ""
+        if not self.pending:
+            return
+        pf = self.pending[0]
+        detected, reason = detect.detect_source_type_from_path(
+            pf.filename, pf.stage_path, allowed=set(_ordered_source_types())
+        )
+        if detected:
+            self.source_type = detected
+            label = SOURCE_TYPE_LABELS.get(detected, detected)
+            self.source_type_detected = f"Auto-detected {label} — {reason}. Change it if that's wrong."
 
     # ------------------------------------------------------------------
     # Upload — staged (FilePreviewChip) then per-file progress
@@ -1119,6 +1142,10 @@ class IngestionAiState(SharedUploadState):
         self.period = ""
         self.period_inferred = ""
         self.period_inferred_source = ""
+        self.source_type_detected = ""
+        # A finished file lives in the uploads list below, NOT above the
+        # Upload button — drop the ticked rows, keep any failures for retry.
+        self.upload_progress = drop_completed(self.upload_progress)
         self.clear_pending()
         self._load_all()
 

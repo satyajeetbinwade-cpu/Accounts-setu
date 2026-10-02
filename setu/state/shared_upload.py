@@ -60,7 +60,7 @@ class PendingFile:
     stage_path: str = ""     # absolute path to the staged bytes on disk
 
 
-def _human_size(n: int) -> str:
+def human_size(n: int) -> str:
     if n >= 1_048_576:
         return f"{n / 1_048_576:.1f} MB"
     if n >= 1024:
@@ -79,14 +79,15 @@ class UploadProgressRow:
     label: str             # stage label / error text
 
 
-def _read_staged_bytes(stage_path: str) -> bytes:
+def read_staged_bytes(stage_path: str) -> bytes:
+    """Bytes of a staged (pre-upload) file, or b"" when it is gone."""
     if stage_path and os.path.exists(stage_path):
         with open(stage_path, "rb") as fh:
             return fh.read()
     return b""
 
 
-def _discard_staged(*paths: str) -> None:
+def discard_staged(*paths: str) -> None:
     for p in paths:
         if p:
             try:
@@ -95,9 +96,82 @@ def _discard_staged(*paths: str) -> None:
                 pass
 
 
+# Backwards-compat aliases (this module's own class used the underscore names).
+_human_size = human_size
+_read_staged_bytes = read_staged_bytes
+_discard_staged = discard_staged
+
+
+# A file that has finished uploading successfully is NO LONGER "in the drop
+# zone" — its outcome lives in the module's own uploaded list. These stages
+# are therefore dropped from the progress area once an upload pass ends, so a
+# ticked file never lingers above the Upload button. ``failed`` deliberately
+# stays, because that is where the retry affordance lives.
+COMPLETED_STAGES = (STAGE_DONE, STAGE_NEEDS_REVIEW)
+
+
+def drop_completed(rows: list["UploadProgressRow"]) -> list["UploadProgressRow"]:
+    """Rows still worth showing after an upload pass — failures only."""
+    return [r for r in rows if r.stage not in COMPLETED_STAGES]
+
+
+def advance_stage(
+    rows: list["UploadProgressRow"], key: str, stage: str, *, pct: int = 0, label: str = "",
+) -> list["UploadProgressRow"]:
+    """The ONE per-file stage transition, shared by every upload surface."""
+    out: list["UploadProgressRow"] = []
+    for r in rows:
+        if r.key == key:
+            out.append(UploadProgressRow(key=key, filename=r.filename, stage=stage, pct=pct, label=label))
+        else:
+            out.append(r)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Byte helpers reused by both modules (thumbnail + viewer sniffing).
 # ---------------------------------------------------------------------------
+
+
+def build_pending(filename: str, data: bytes) -> "PendingFile | None":
+    """Materialise a dropped file into a :class:`PendingFile`.
+
+    Builds the drop-zone thumbnail / type icon and persists the bytes to a
+    per-session temp dir so they survive a Reflex hot reload (a module-level
+    dict would be wiped — documented trap). Returns ``None`` for an empty
+    read so the caller can simply skip it.
+
+    Shared by F3, F3-B AND the Reconcile flow, so a staged file looks and
+    behaves identically on every upload surface.
+    """
+    if not data:
+        return None
+    ext = _file_ext(filename)
+    thumb_kind = "icon"
+    thumb_src = ""
+    if ext in ("jpg", "jpeg", "png"):
+        t = _image_thumb(data)
+        if t:
+            thumb_kind, thumb_src = "image", t
+    elif ext == "pdf":
+        png = _pdf_first_page_png(data)
+        if png:
+            thumb_kind, thumb_src = "pdf", f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+    key = f"{filename}:{len(data)}"
+    os.makedirs(_STAGE_DIR, exist_ok=True)
+    stage_path = os.path.join(_STAGE_DIR, f"{abs(hash(key)):x}.{ext or 'bin'}")
+    with open(stage_path, "wb") as fh:
+        fh.write(data)
+    return PendingFile(
+        key=key,
+        filename=filename,
+        size=len(data),
+        thumb_kind=thumb_kind,
+        thumb_src=thumb_src,
+        ext=ext,
+        size_label=human_size(len(data)),
+        stage_path=stage_path,
+    )
 
 
 def _file_ext(filename: str) -> str:
@@ -239,44 +313,21 @@ class SharedUploadState(AuthState):
             self._add_pending(name, data)
 
     def _add_pending(self, filename: str, data: bytes) -> None:
-        ext = _file_ext(filename)
-        thumb_kind = "icon"
-        thumb_src = ""
-        if ext in ("jpg", "jpeg", "png"):
-            t = _image_thumb(data)
-            if t:
-                thumb_kind, thumb_src = "image", t
-        elif ext == "pdf":
-            png = _pdf_first_page_png(data)
-            if png:
-                thumb_kind, thumb_src = "pdf", f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
-        key = f"{filename}:{len(data)}"
-        if any(p.key == key for p in self.pending):
+        pf = build_pending(filename, data)
+        if pf is None:
             return
-        # Persist bytes to disk so they survive hot reload + are cheaply
-        # re-readable at upload time (thumbnails only live in the chip).
-        os.makedirs(_STAGE_DIR, exist_ok=True)
-        stage_path = os.path.join(_STAGE_DIR, f"{abs(hash(key)):x}.{ext or 'bin'}")
-        with open(stage_path, "wb") as fh:
-            fh.write(data)
-        self.pending = self.pending + [
-            PendingFile(key=key, filename=filename, size=len(data), thumb_kind=thumb_kind, thumb_src=thumb_src, ext=ext, size_label=_human_size(len(data)), stage_path=stage_path)
-        ]
+        if any(p.key == pf.key for p in self.pending):
+            return
+        self.pending = self.pending + [pf]
 
     def _pending_bytes(self, key: str) -> bytes:
         for p in self.pending:
             if p.key == key:
-                return _read_staged_bytes(p.stage_path)
+                return read_staged_bytes(p.stage_path)
         return b""
 
     def _set_stage(self, key: str, stage: str, *, pct: int = 0, label: str = "") -> None:
-        rows = []
-        for r in self.upload_progress:
-            if r.key == key:
-                rows.append(UploadProgressRow(key=key, filename=r.filename, stage=stage, pct=pct, label=label))
-            else:
-                rows.append(r)
-        self.upload_progress = rows
+        self.upload_progress = advance_stage(self.upload_progress, key, stage, pct=pct, label=label)
 
     @rx.event
     def begin_upload(self, key: str, filename: str, size: int):

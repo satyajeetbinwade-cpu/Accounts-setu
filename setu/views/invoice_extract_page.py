@@ -204,6 +204,10 @@ def _upload_section() -> rx.Component:
                     ),
                     rx.fragment(),
                 ),
+                c.ai_progress(
+                    InvoiceExtractState.busy_label,
+                    visible=InvoiceExtractState.busy_label != "",
+                ),
                 rx.hstack(
                     rx.button(
                         "Upload & extract",
@@ -1179,6 +1183,12 @@ def invoice_extract_page() -> rx.Component:
             ),
             rx.cond(InvoiceExtractState.flash != "", c.info_banner(InvoiceExtractState.flash), rx.fragment()),
             rx.cond(InvoiceExtractState.error != "", c.inline_reason(InvoiceExtractState.error), rx.fragment()),
+            # Global loader: a batch upload or an AI re-extract shows here, so
+            # no background step can look like a frozen screen.
+            c.ai_progress(
+                InvoiceExtractState.busy_label,
+                visible=InvoiceExtractState.busy_label != "",
+            ),
             rx.hstack(
                 *[_hub_button(label) for label in _hub()],
                 spacing="2",

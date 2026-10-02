@@ -415,14 +415,16 @@ def _rerun_dialog() -> rx.Component:
 
 
 def _upload_card() -> rx.Component:
-    """One upload widget for the whole stage — the source-type is chosen from
-    a dropdown (a literal option list), so the widget id stays a Python
-    literal (rx.upload ids cannot contain a Var)."""
+    """One upload widget for the whole stage. The slot is auto-detected from
+    the dropped file's own name/headers; the dropdown stays as the override.
+    Uses the SAME staged-file chips and per-file progress the other upload
+    screens use, so the Reconcile upload can never behave differently."""
     return c.card(
         rx.vstack(
             c.section_title(
                 "Upload a file",
-                "Pick the slot it belongs to, then drop the file. It's normalized immediately.",
+                "Drop the file — we'll detect which slot it belongs to. Change the slot "
+                "if the guess is wrong, then upload. It's normalized immediately.",
             ),
             rx.hstack(
                 rx.vstack(
@@ -432,6 +434,11 @@ def _upload_card() -> rx.Component:
                         value=ReconcileState.upload_slot_label,
                         on_change=ReconcileState.set_upload_slot_label,
                         width="260px",
+                    ),
+                    rx.cond(
+                        ReconcileState.upload_detected != "",
+                        rx.text(ReconcileState.upload_detected, style=t.TEXT["micro"]),
+                        rx.fragment(),
                     ),
                     spacing="1",
                     align="start",
@@ -449,6 +456,7 @@ def _upload_card() -> rx.Component:
                         id="rc_upload",
                         accept=_ACCEPT,
                         multiple=False,
+                        on_drop=ReconcileState.stage_upload_files,
                         border=f"1px dashed {t.Color.BORDER.value}",
                         border_radius="10px",
                         background=t.Color.SURFACE.value,
@@ -460,16 +468,53 @@ def _upload_card() -> rx.Component:
                 align="end",
                 wrap="wrap",
             ),
+            # FilePreviewChip — the chosen file IS shown before upload, with a
+            # thumbnail / type icon and a remove button.
+            rx.cond(
+                ReconcileState.pending.length() > 0,
+                rx.vstack(
+                    rx.text("Ready to upload", style=t.TEXT["label"]),
+                    rx.vstack(
+                        rx.foreach(
+                            ReconcileState.pending,
+                            lambda pf: c.file_preview_chip(
+                                pf,
+                                on_remove=ReconcileState.remove_pending(pf.key),
+                            ),
+                        ),
+                        spacing="2",
+                        width="100%",
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
+            # UploadProgressState — Queued → Uploading (%) → Reading & mapping.
+            rx.cond(
+                ReconcileState.upload_progress.length() > 0,
+                rx.vstack(
+                    rx.foreach(
+                        ReconcileState.upload_progress,
+                        lambda r: c.upload_progress_row(r),
+                    ),
+                    spacing="0",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
             rx.hstack(
                 rx.button(
                     "Upload & normalize",
-                    on_click=ReconcileState.handle_upload(rx.upload_files(upload_id="rc_upload")),
+                    on_click=ReconcileState.handle_upload,
+                    disabled=ReconcileState.pending.length() == 0,
                     background=t.Color.ACCENT.value,
                     color="#FFFFFF",
                 ),
                 rx.button(
                     "Clear",
-                    on_click=rx.clear_selected_files("rc_upload"),
+                    on_click=ReconcileState.clear_pending,
                     variant="soft",
                     background="transparent",
                     color=t.Color.TEXT_SECONDARY.value,
@@ -805,6 +850,10 @@ def review_page() -> rx.Component:
                 "The same review surface as the Reconcile flow's Review tab.",
             ),
             _banners(),
+            c.ai_progress(
+                ReconcileState.busy_label,
+                visible=ReconcileState.busy_label != "",
+            ),
             _review_stage(),
             spacing="5",
             width="100%",
@@ -827,6 +876,13 @@ def reconcile_page() -> rx.Component:
                 "Everything else lives under All tools and Setup.",
             ),
             _banners(),
+            # One global loader: any background step (a live mapping call, the
+            # matching engine, the AI read, a report render) shows here so the
+            # screen never looks frozen.
+            c.ai_progress(
+                ReconcileState.busy_label,
+                visible=ReconcileState.busy_label != "",
+            ),
             _rail(),
             rx.match(
                 ReconcileState.stage,
