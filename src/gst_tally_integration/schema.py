@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS gst_credentials (
 
 CREATE INDEX IF NOT EXISTS idx_gst_creds_client ON gst_credentials(client_id);
 CREATE INDEX IF NOT EXISTS idx_gst_creds_gstin  ON gst_credentials(gstin);
+-- One credential row per (client, GSTIN) so upsert_gst_credential can't race duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gst_creds_client_gstin ON gst_credentials(client_id, gstin);
 
 -- Tally connection config (one per company per client)
 CREATE TABLE IF NOT EXISTS tally_connections (

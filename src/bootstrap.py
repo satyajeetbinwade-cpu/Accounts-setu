@@ -36,6 +36,8 @@ _BOOT_STEPS: list[tuple[str, str, str]] = [
     ("C3x ai_models", "src.ai_models.service", "init_ai_models"),
     ("C5  instruction library", "src.c5.service", "init_c5"),
     ("C4  vault", "src.vault.service", "init_vault"),
+    ("Phase 2 communications", "src.communications.service", "init_communications"),
+    ("Phase 2 GST/Tally", "src.gst_tally_integration.service", "init_gst_tally"),
     ("F3  documents", "src.documents.service", "init_documents"),
     ("F6  format registry", "src.f6.service", "init_f6"),
     ("F3-AI ingestion", "src.ingestion_ai.service", "init_ingestion_ai"),

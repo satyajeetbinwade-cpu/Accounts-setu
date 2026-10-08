@@ -18,7 +18,6 @@ To use in production, set the provider config in the database:
 
 from __future__ import annotations
 
-import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart

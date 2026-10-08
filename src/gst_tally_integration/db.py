@@ -22,7 +22,7 @@ def list_gst_credentials(conn: sqlite3.Connection, client_id: Optional[int] = No
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM gst_credentials WHERE is_active=1").fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(gst_credentials)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(gst_credentials)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -62,7 +62,7 @@ def list_tally_connections(conn: sqlite3.Connection, client_id: Optional[int] = 
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM tally_connections WHERE is_active=1").fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(tally_connections)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(tally_connections)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -93,8 +93,8 @@ def upsert_tally_connection(
 
 def create_sync_op(
     conn: sqlite3.Connection,
-    client_id: int, direction: str, source: str, data_type: str,
-    *    period: Optional[str] = None,
+    client_id: int, direction: str, source: str, data_type: str, *,
+    period: Optional[str] = None,
     summary_json: str = "{}",
 ) -> int:
     cur = conn.execute(
@@ -151,8 +151,17 @@ def list_sync_ops(
         f"SELECT * FROM sync_operations {where_clause} ORDER BY created_at DESC LIMIT ?",
         params + [limit],
     ).fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(sync_operations)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(sync_operations)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
+
+
+def get_sync_op(conn: sqlite3.Connection, op_id: int) -> Optional[dict[str, Any]]:
+    """Fetch a single sync operation by id (no limit/filter scan)."""
+    row = conn.execute("SELECT * FROM sync_operations WHERE op_id = ?", (op_id,)).fetchone()
+    if row is None:
+        return None
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(sync_operations)").fetchall()]
+    return dict(zip(cols, row))
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +203,7 @@ def list_gst_returns(
         f"SELECT * FROM gst_returns WHERE {' AND '.join(where)} ORDER BY period DESC",
         params,
     ).fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(gst_returns)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(gst_returns)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -227,5 +236,5 @@ def list_tally_data(
         f"SELECT * FROM tally_data_cache WHERE {' AND '.join(where)} ORDER BY synced_at DESC LIMIT ?",
         params + [limit],
     ).fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(tally_data_cache)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(tally_data_cache)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]

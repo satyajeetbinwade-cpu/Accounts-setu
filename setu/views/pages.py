@@ -302,6 +302,18 @@ def _security_route():
     return security_page()
 
 
+def _followups_route():
+    from setu.views.communication_page import communication_page
+
+    return communication_page()
+
+
+def _integrations_route():
+    from setu.views.gst_tally_page import gst_tally_page
+
+    return gst_tally_page()
+
+
 def render_route(route: str) -> rx.Component:
     if route == "/admin":
         return _admin_route()
@@ -347,6 +359,10 @@ def render_route(route: str) -> rx.Component:
         return _reconcile_route()
     if route == "/security":
         return _security_route()
+    if route == "/follow-ups":
+        return _followups_route()
+    if route == "/integrations":
+        return _integrations_route()
     if route in BUILT_ROUTES:
         return BUILT_ROUTES[route]()
     return placeholder_for(route)
@@ -411,6 +427,10 @@ def _make_page(route: str):
         return _reconcile_route
     if route == "/security":
         return _security_route
+    if route == "/follow-ups":
+        return _followups_route
+    if route == "/integrations":
+        return _integrations_route
     if route in BUILT_ROUTES:
         return BUILT_ROUTES[route]
 

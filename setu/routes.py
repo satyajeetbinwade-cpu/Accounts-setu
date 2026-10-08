@@ -25,6 +25,7 @@ class Screen:
 AREAS: dict[str, list[Screen]] = {
     "Reconcile": [
         Screen("Reconcile", "/reconcile", "route"),
+        Screen("Follow-ups", "/follow-ups", "mail"),
         Screen("Dashboard", "/", "layout-dashboard"),
     ],
     "All tools": [
@@ -42,6 +43,7 @@ AREAS: dict[str, list[Screen]] = {
         Screen("Filing", "/filing", "calendar-check", "filing.view"),
     ],
     "Setup": [
+        Screen("Integrations", "/integrations", "plug"),
         Screen("Config", "/config", "sliders-horizontal"),
         Screen("Settings", "/settings", "settings", "settings.view"),
         Screen("Rules", "/rules", "book-open", "rules.view"),
@@ -71,4 +73,5 @@ MODULE_INVENTORY: list[tuple[str, str]] = [
     ("Module 8", "Action Center"),
     ("F3-B", "Invoice Extraction & Digitalization"),
     ("F4", "Universal Edit & Version History"),
+    ("P2", "Communications & GST/Tally Integration"),
 ]

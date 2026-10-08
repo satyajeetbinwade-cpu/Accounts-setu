@@ -25,6 +25,7 @@ import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
 from typing import Any, Optional
+from xml.sax.saxutils import escape
 
 
 class TallyClient:
@@ -191,7 +192,7 @@ class TallyClient:
         for e in entry.get("entries", []):
             xml_entries += f"""
         <ALLLEDGERENTRIES.LIST>
-            <LEDGERNAME>{e['ledger']}</LEDGERNAME>
+            <LEDGERNAME>{escape(str(e['ledger']))}</LEDGERNAME>
             <ISDEEMEDPOSITIVE>{"Yes" if e['type'] == "Dr" else "No"}</ISDEEMEDPOSITIVE>
             <AMOUNT>{abs(e['amount']):.2f}</AMOUNT>
         </ALLLEDGERENTRIES.LIST>"""
@@ -203,9 +204,9 @@ class TallyClient:
 <TALLYMESSAGE>
     <VOUCHER>
         <VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>
-        <DATE>{entry['date']}</DATE>
-        <VOUCHERNUMBER>{entry.get('voucher_number', '')}</VOUCHERNUMBER>
-        <NARRATION>{entry.get('narration', '')}</NARRATION>
+        <DATE>{escape(str(entry['date']))}</DATE>
+        <VOUCHERNUMBER>{escape(str(entry.get('voucher_number', '')))}</VOUCHERNUMBER>
+        <NARRATION>{escape(str(entry.get('narration', '')))}</NARRATION>
         <PERSISTEDVIEW>Journal Voucher</PERSISTEDVIEW>
         <VCHGSTCLASS>0</VCHGSTCLASS>
         {xml_entries}

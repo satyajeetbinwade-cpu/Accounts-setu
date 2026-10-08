@@ -11,11 +11,13 @@ from setu.state.ai_models_state import AiModelsState
 from setu.state.auth_state import AuthState
 from setu.state.c5_state import C5State
 from setu.state.client_state import ClientState, NewClientState
+from setu.state.communication_state import CommunicationState
 from setu.state.dashboard_state import DashboardState
 from setu.state.documents_state import DocumentsState
 from setu.state.f5_state import F5State
 from setu.state.f6_state import F6State
 from setu.state.filing_state import FilingState
+from setu.state.gst_tally_state import GstTallyState
 from setu.state.ingestion_ai_state import IngestionAiState
 from setu.state.invoice_extract_state import InvoiceExtractState
 from setu.state.module2_state import Module2State
@@ -36,11 +38,13 @@ __all__ = [
     "C5State",
     "ClientState",
     "NewClientState",
+    "CommunicationState",
     "DashboardState",
     "DocumentsState",
     "F5State",
     "F6State",
     "FilingState",
+    "GstTallyState",
     "IngestionAiState",
     "InvoiceExtractState",
     "Module2State",

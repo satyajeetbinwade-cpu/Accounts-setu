@@ -5,15 +5,15 @@ Follows the same pattern as setu/state/client_state.py.
 
 from __future__ import annotations
 
-import reflex as rx
 from typing import Optional
 
 from src.communications import service as comms
 from src.communications.models import FollowUpRecipient, FollowUpRequest
 from src.clients import service as client_svc
+from setu.state.auth_state import AuthState
 
 
-class CommunicationState(rx.State):
+class CommunicationState(AuthState):
     """State for sending follow-ups and managing communication preferences."""
 
     # ---- Client selection ----

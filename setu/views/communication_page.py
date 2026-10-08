@@ -6,7 +6,7 @@ import reflex as rx
 
 from setu.foundation import components as c
 from setu.foundation import tokens as t
-from phase2.setu_state.communication_state import CommunicationState
+from setu.state.communication_state import CommunicationState
 
 
 def _client_selector() -> rx.Component:
@@ -249,7 +249,7 @@ def _message_composer() -> rx.Component:
 
 def _preview_panel() -> rx.Component:
     return rx.cond(
-        CommunicationState.preview_subject != "" or CommunicationState.preview_body != "",
+        (CommunicationState.preview_subject != "") | (CommunicationState.preview_body != ""),
         c.card(
             rx.vstack(
                 rx.hstack(
@@ -343,12 +343,23 @@ def _communication_log() -> rx.Component:
                         lambda log: rx.hstack(
                             rx.vstack(
                                 rx.text(
-                                    log.get("channel", "").upper() + " — " + (log.get("subject", "") or "(no subject)"),
+                                    log.get("channel", "").to(str).upper(),
+                                    " — ",
+                                    rx.cond(
+                                        log.get("subject", "") != "",
+                                        log.get("subject", ""),
+                                        "(no subject)",
+                                    ),
                                     font_size="13px",
                                     font_weight="600",
                                 ),
                                 rx.text(
-                                    f"To: {log.get('recipient_email') or log.get('recipient_phone', '')}",
+                                    "To: ",
+                                    rx.cond(
+                                        log.get("recipient_email", "") != "",
+                                        log.get("recipient_email", ""),
+                                        log.get("recipient_phone", ""),
+                                    ),
                                     style=t.TEXT["micro"],
                                 ),
                                 spacing="1",

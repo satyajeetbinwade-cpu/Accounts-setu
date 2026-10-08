@@ -27,6 +27,7 @@ from src.gst_tally_integration import db as gtdb
 from src.gst_tally_integration.schema import init_gst_tally_schema
 from src.gst_tally_integration.gst_portal.client import GstPortalClient
 from src.gst_tally_integration.tally.client import TallyClient
+from src.vault.crypto import decrypt, encrypt
 
 
 class GstTallyError(Exception):
@@ -44,6 +45,21 @@ def init_gst_tally(db_path=None) -> None:
 
 def _connect(db_path=None):
     return recon_db.get_connection(db_path)
+
+
+def _decrypt_password(stored: str) -> str:
+    """Decrypt a stored GST password.
+
+    Falls back to the raw value when it is not vault ciphertext (a row
+    written before encryption-at-rest was wired in), so existing data keeps
+    working after the change.
+    """
+    if not stored:
+        return ""
+    try:
+        return decrypt(stored)
+    except Exception:
+        return stored
 
 
 # ---------------------------------------------------------------------------
@@ -68,14 +84,13 @@ def save_gst_credential(
 ) -> int:
     """Save encrypted GST portal credentials.
 
-    In production, password should be encrypted using the vault module
-    (src/vault/) before storage.
+    The password is encrypted at rest with the C4 vault key (Fernet) and is
+    only decrypted at the exact point of use.
     """
-    # TODO: Encrypt password using src/vault/service.py
     conn = _connect(db_path)
     try:
         return gtdb.upsert_gst_credential(
-            conn, client_id, gstin, username, password,
+            conn, client_id, gstin, username, encrypt(password),
         )
     finally:
         conn.close()
@@ -164,7 +179,7 @@ def fetch_from_gst_portal(
         client = GstPortalClient(
             gstin=gstin,
             username=gst_cred["username"],
-            password=gst_cred["encrypted_password"],
+            password=_decrypt_password(gst_cred["encrypted_password"]),
             sandbox=True,  # TODO: make configurable
         )
 
@@ -346,13 +361,14 @@ def push_reconciliation_to_tally(
         gtdb.update_sync_op_status(
             conn, op_id, "previewing",
             details_json=json.dumps({
+                "conn_id": conn_id,
                 "entries": entries,
                 "total_debit": sum(
-                    abs(e.get("amount", 0)) for e in entries
+                    abs(leg.get("amount", 0)) for e in entries
                     for leg in e.get("entries", []) if leg.get("type") == "Dr"
                 ),
                 "total_credit": sum(
-                    abs(e.get("amount", 0)) for e in entries
+                    abs(leg.get("amount", 0)) for e in entries
                     for leg in e.get("entries", []) if leg.get("type") == "Cr"
                 ),
             }),
@@ -397,9 +413,11 @@ def push_to_gst_portal(
         gtdb.update_sync_op_status(
             conn, op_id, "previewing",
             details_json=json.dumps({
+                "gstin": gstin,
                 "return_type": return_type,
                 "period": period,
                 "data_keys": list(data.keys()),
+                "data": data,
             }),
         )
 
@@ -424,9 +442,8 @@ def confirm_sync_operation(op_id: int, confirmed_by: str, *, db_path=None) -> No
     """
     conn = _connect(db_path)
     try:
-        ops = gtdb.list_sync_ops(conn, status="previewing")
-        op = next((o for o in ops if o["op_id"] == op_id), None)
-        if not op:
+        op = gtdb.get_sync_op(conn, op_id)
+        if not op or op["status"] != "previewing":
             raise GstTallyError(f"Sync operation #{op_id} not found or not in preview state.")
 
         gtdb.update_sync_op_status(
@@ -462,7 +479,10 @@ def _execute_push(conn, op) -> None:
 
     if op["source"] == "tally":
         tally_configs = gtdb.list_tally_connections(conn, op["client_id"])
-        tally_config = next(iter(tally_configs), None)
+        wanted_conn_id = details.get("conn_id")
+        tally_config = next(
+            (t for t in tally_configs if t["conn_id"] == wanted_conn_id), None
+        ) or next(iter(tally_configs), None)
         if not tally_config:
             raise GstTallyError("Tally connection not found for push execution.")
 
@@ -481,14 +501,17 @@ def _execute_push(conn, op) -> None:
 
     elif op["source"] == "gst_portal":
         creds = gtdb.list_gst_credentials(conn, op["client_id"])
-        gst_cred = next(iter(creds), None)
+        wanted_gstin = details.get("gstin")
+        gst_cred = next(
+            (c for c in creds if c["gstin"] == wanted_gstin), None
+        ) or next(iter(creds), None)
         if not gst_cred:
             raise GstTallyError("GST credentials not found for push execution.")
 
         client = GstPortalClient(
             gstin=gst_cred["gstin"],
             username=gst_cred["username"],
-            password=gst_cred["encrypted_password"],
+            password=_decrypt_password(gst_cred["encrypted_password"]),
             sandbox=True,
         )
 
@@ -518,7 +541,6 @@ def list_sync_operations(
 def get_sync_operation(op_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
     conn = _connect(db_path)
     try:
-        ops = gtdb.list_sync_ops(conn, limit=1000)
-        return next((o for o in ops if o["op_id"] == op_id), None)
+        return gtdb.get_sync_op(conn, op_id)
     finally:
         conn.close()

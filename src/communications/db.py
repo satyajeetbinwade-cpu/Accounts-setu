@@ -22,7 +22,7 @@ def list_providers(conn: sqlite3.Connection, *, channel: Optional[str] = None) -
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM followup_providers ORDER BY channel, provider_id").fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(followup_providers)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(followup_providers)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -41,6 +41,7 @@ def upsert_provider(
                config_json=?, updated_at=datetime('now') WHERE provider_id=?""",
             (channel, provider_type, label, config_json, provider_id),
         )
+        conn.commit()
         return provider_id
     cur = conn.execute(
         "INSERT INTO followup_providers (channel, provider_type, label, config_json) VALUES (?, ?, ?, ?)",
@@ -64,7 +65,7 @@ def list_templates(conn: sqlite3.Connection, *, channel: Optional[str] = None) -
         rows = conn.execute(
             "SELECT * FROM followup_templates WHERE is_active=1 ORDER BY name"
         ).fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(followup_templates)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(followup_templates)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -74,7 +75,7 @@ def get_template(conn: sqlite3.Connection, name: str) -> Optional[dict[str, Any]
     ).fetchone()
     if not row:
         return None
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(followup_templates)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(followup_templates)").fetchall()]
     return dict(zip(cols, row))
 
 
@@ -143,7 +144,7 @@ def list_logs(
         rows = conn.execute(
             "SELECT * FROM communication_log ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
-    cols = [d[0] for d in conn.execute("PRAGMA table_info(communication_log)").fetchall()]
+    cols = [d[1] for d in conn.execute("PRAGMA table_info(communication_log)").fetchall()]
     return [dict(zip(cols, r)) for r in rows]
 
 
@@ -175,7 +176,7 @@ def upsert_followup_pref(
     preferred_channel: str,
 ) -> int:
     existing = conn.execute(
-        "SELECT pref_id FROM client_followup_prefs WHERE client_id=? AND contact_id=?",
+        "SELECT pref_id FROM client_followup_prefs WHERE client_id=? AND contact_id IS ?",
         (client_id, contact_id),
     ).fetchone()
     if existing:

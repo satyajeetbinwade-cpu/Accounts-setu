@@ -6,7 +6,7 @@ import reflex as rx
 
 from setu.foundation import components as c
 from setu.foundation import tokens as t
-from phase2.setu_state.gst_tally_state import GstTallyState
+from setu.state.gst_tally_state import GstTallyState
 
 
 _TABS = ["GST Portal", "Tally", "Connections", "Sync History"]
@@ -68,42 +68,38 @@ def _gst_portal_fetch() -> rx.Component:
         c.card(
             rx.vstack(
                 rx.text("Fetch from GST Portal", style=t.TEXT["card_title"]),
-                rx.cond(
-                    GstTallyState.client_branches.length() > 0,
-                    rx.grid(
-                        rx.vstack(
-                            rx.text("GSTIN", style=t.TEXT["label"]),
-                            rx.select(
-                                [b["gstin"] for b in GstTallyState.client_branches],
-                                value=GstTallyState.selected_gstin,
-                                on_change=GstTallyState.select_gstin,
-                                width="100%",
-                            ),
-                            spacing="1", align="start", width="100%",
+                rx.grid(
+                    rx.vstack(
+                        rx.text("GSTIN", style=t.TEXT["label"]),
+                        rx.input(
+                            value=GstTallyState.selected_gstin,
+                            on_change=GstTallyState.select_gstin,
+                            placeholder="Client GSTIN",
+                            width="100%",
                         ),
-                        rx.vstack(
-                            rx.text("Data type", style=t.TEXT["label"]),
-                            rx.select(
-                                ["returns", "invoices", "filing_calendar"],
-                                value=GstTallyState.fetch_data_type,
-                                on_change=GstTallyState.set_fetch_data_type,
-                                width="100%",
-                            ),
-                            spacing="1", align="start", width="100%",
-                        ),
-                        rx.vstack(
-                            rx.text("Period (MMYYYY)", style=t.TEXT["label"]),
-                            rx.input(
-                                value=GstTallyState.fetch_period,
-                                on_change=GstTallyState.set_fetch_period,
-                                placeholder="e.g. 082026",
-                                width="100%",
-                            ),
-                            spacing="1", align="start", width="100%",
-                        ),
-                        columns="3", spacing="4", width="100%",
+                        spacing="1", align="start", width="100%",
                     ),
-                    c.empty_state("No GSTIN/branches for this client.", icon="map-pin"),
+                    rx.vstack(
+                        rx.text("Data type", style=t.TEXT["label"]),
+                        rx.select(
+                            ["returns", "invoices", "filing_calendar"],
+                            value=GstTallyState.fetch_data_type,
+                            on_change=GstTallyState.set_fetch_data_type,
+                            width="100%",
+                        ),
+                        spacing="1", align="start", width="100%",
+                    ),
+                    rx.vstack(
+                        rx.text("Period (MMYYYY)", style=t.TEXT["label"]),
+                        rx.input(
+                            value=GstTallyState.fetch_period,
+                            on_change=GstTallyState.set_fetch_period,
+                            placeholder="e.g. 082026",
+                            width="100%",
+                        ),
+                        spacing="1", align="start", width="100%",
+                    ),
+                    columns="3", spacing="4", width="100%",
                 ),
                 rx.hstack(
                     rx.button(
@@ -365,6 +361,18 @@ def _connections_tab() -> rx.Component:
 
 # ---- Sync history tab ----
 
+def _status_pill(status) -> rx.Component:
+    """Status → pill with a literal variant (``pill`` needs a static variant)."""
+    return rx.match(
+        status,
+        ("completed", c.pill(status, variant="rule")),
+        ("confirmed", c.pill(status, variant="rule")),
+        ("failed", c.pill(status, variant="danger")),
+        ("previewing", c.pill(status, variant="ai")),
+        c.pill(status, variant="placeholder"),
+    )
+
+
 def _sync_history() -> rx.Component:
     return c.card(
         rx.vstack(
@@ -398,7 +406,12 @@ def _sync_history() -> rx.Component:
                             rx.hstack(
                                 rx.vstack(
                                     rx.text(
-                                        f"{op.get('source', '').upper()} — {op.get('data_type', '')} ({op.get('direction', '')})",
+                                        op.get("source", "").to(str).upper(),
+                                        " — ",
+                                        op.get("data_type", ""),
+                                        " (",
+                                        op.get("direction", ""),
+                                        ")",
                                         font_weight="600",
                                     ),
                                     rx.text(
@@ -467,14 +480,7 @@ def _sync_history() -> rx.Component:
                             rx.text(f"#{op['op_id']}", style=t.TEXT["micro"], width="40px"),
                             rx.text(f"{op['source']}/{op['data_type']}", width="140px"),
                             rx.text(op["direction"], width="60px"),
-                            c.pill(op["status"], variant=rx.match(
-                                op["status"],
-                                ("completed", "rule"),
-                                ("confirmed", "rule"),
-                                ("failed", "danger"),
-                                ("previewing", "ai"),
-                                "placeholder",
-                            )),
+                            _status_pill(op["status"]),
                             rx.text(op.get("created_at", ""), style=t.TEXT["micro"]),
                             width="100%", align="center",
                             padding="6px 0",

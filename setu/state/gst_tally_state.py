@@ -6,14 +6,14 @@ Manages the preview → confirm workflow for external data integration.
 from __future__ import annotations
 
 import json
-import reflex as rx
 from typing import Optional
 
 from src.clients import service as client_svc
 from src.gst_tally_integration import service as gt_svc
+from setu.state.auth_state import AuthState
 
 
-class GstTallyState(rx.State):
+class GstTallyState(AuthState):
     """State for GST Portal & Tally integration."""
 
     # ---- Client selection ----
@@ -21,10 +21,8 @@ class GstTallyState(rx.State):
     selected_client_name: str = ""
     clients: list[dict] = []
 
-    # ---- Branch/GSTIN selection ----
-    client_branches: list[dict] = []
+    # ---- GSTIN selection (flat model: one GST registration per client) ----
     selected_gstin: str = ""
-    selected_branch_id: int = 0
 
     # ---- GST credentials ----
     gst_credentials: list[dict] = []
@@ -71,12 +69,8 @@ class GstTallyState(rx.State):
         client = client_svc.get_client(client_id)
         if client:
             self.selected_client_name = client["legal_name"]
-
-        # Load branches
-        self.client_branches = client_svc.list_branches(client_id, include_inactive=False)
-        if self.client_branches:
-            self.selected_gstin = self.client_branches[0]["gstin"]
-            self.selected_branch_id = self.client_branches[0]["branch_id"]
+            # The EndClient model is flat: one GST registration per client.
+            self.selected_gstin = client.get("gstin") or ""
 
         # Load credentials and connections
         self._refresh_creds_and_connections()
@@ -242,10 +236,8 @@ class GstTallyState(rx.State):
             self.preview_summary = json.dumps(self.op_details, indent=2)
 
     def confirm_op(self, op_id: int):
-        from setu.state import AuthState
-        username = getattr(AuthState, "username", "admin")
         try:
-            gt_svc.confirm_sync_operation(op_id, confirmed_by=username)
+            gt_svc.confirm_sync_operation(op_id, confirmed_by=self.username or "admin")
             self.flash = f"Sync operation #{op_id} confirmed and executed."
             self._load_pending_ops()
             self.selected_op = None
