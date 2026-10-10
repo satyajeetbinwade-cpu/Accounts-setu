@@ -69,7 +69,6 @@
   @media (max-width:900px){.gallery{grid-template-columns:1fr}}
   .gcard{background:#fff;border:1px solid var(--border);border-radius:10px;padding:11px}
   .gcard .why{font-size:11px;color:var(--text2);margin:0}
-  .scen{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
   .status{margin-top:10px;font-size:12px;color:var(--text2)}
   .status b{color:var(--text)}
   .missing{font-size:11.5px;color:var(--ai-on);margin-top:8px}
@@ -99,11 +98,11 @@
     <code>review</code>, <code>ok</code>); the 70% bar is <code>AUTO_FILE_CONFIDENCE_THRESHOLD</code>.
   </div>
 
-  <!-- ================= LIVE PAGE ================= -->
+  <!-- ================= THE PAGE ================= -->
   <div class="sect">
     <div class="hd">
-      <h2>The page, driven through each case</h2>
-      <span class="micro">pick a scenario — one file per row, always</span>
+      <h2>The page, with a month half in</h2>
+      <span class="micro">one file per row, each in the state it has reached</span>
     </div>
 
     <div class="panel">
@@ -111,25 +110,10 @@
         <p class="frame-title">2. Upload</p>
         <p class="frame-sub">Every file this run needs gets its own row. Choose the file and it's uploaded and normalized straight away — the row then tells you what it found.</p>
 
-        <div class="scen">
-          <button class="btn" id="sHappy">Happy path</button>
-          <button class="btn" id="sReview">Needs review</button>
-          <button class="btn" id="sPartial">Partial report</button>
-          <button class="btn" id="sReuse">Shape already known</button>
-          <button class="btn" id="sConfirm">Below 70%</button>
-          <button class="btn" id="sWrong">Wrong file in a row</button>
-          <button class="btn" id="sUnknown">Can't identify</button>
-          <button class="btn" id="sFail">Unreadable</button>
-          <button class="btn" id="sNotIngested">On disk, never normalized</button>
-          <button class="btn" id="sExisting">From the last run</button>
-          <button class="btn" id="sReset">Reset</button>
-        </div>
-
         <div id="rows"></div>
 
-        <p class="missing" id="missing">Still needed: the books row and the portal row.</p>
+        <p class="missing" id="missing"></p>
         <button class="btn primary" id="go" disabled>Continue to reconcile →</button>
-        <p class="status" id="status">Nothing chosen yet. Each row takes one file, and choosing it uploads and normalizes in one step.</p>
       </div>
     </div>
   </div>
@@ -228,7 +212,8 @@
     if (state === 'wrong') return '' +
       '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
       '<span class="grow"><span class="nm">' + file + '</span><br>' +
-      '<span class="micro">This looks like a <b>GSTR-2B</b> export, not your purchase register. Nothing was filed.</span></span>' +
+      '<span class="micro">This looks like a <b>' + (o.looksLike || 'GSTR-2B') + '</b> export, not your ' +
+      (o.notRow || 'purchase register') + '. Nothing was filed.</span></span>' +
       '<span class="actions"><button class="btn tiny primary" data-act="move">Move it to the GSTR-2B row</button>' +
       '<button class="btn tiny" data-act="keep">Keep it here anyway</button>' +
       '<button class="btn tiny" data-act="pick">Choose a different file</button></span></div>';
@@ -310,205 +295,22 @@
     }).join('');
   }
 
-  // ---------------------------------------------------------------- live page
-  const state = {};
-  const rowsHost = document.getElementById('rows');
-  const missingEl = document.getElementById('missing');
-  const statusEl = document.getElementById('status');
-  const goBtn = document.getElementById('go');
-  let busy = false;
-
-  const SUPPLIED = ['ok','review','partial','shapeReused','existing','multiple'];
-
-  function paint () {
-    rowsHost.innerHTML =
-      rowHTML(state.books.state,  Object.assign({}, BOOKS,  state.books.opts),  'books') +
-      rowHTML(state.portal.state, Object.assign({}, PORTAL, state.portal.opts), 'portal') +
-      rowHTML(state.note.state,   Object.assign({}, NOTE,   state.note.opts),   'note');
-    refreshFoot();
+  // ---------------------------------------------------------------- the page
+  // A fixed mid-month snapshot rather than a demo rig: a file still being read,
+  // one that landed, one dropped in the wrong row, and the optional row left be.
+  function paintPage () {
+    document.getElementById('rows').innerHTML =
+      rowHTML('uploading', { file: 'Purchase Register Aug 2026.xlsx', pct: 62 }, 'books') +
+      rowHTML('ok', { title: 'GSTR-2B', file: 'GSTR2B_082026.xlsx', conf: 99, rows: '1,204' }, 'gstr2b') +
+      rowHTML('wrong', { title: 'IMS', file: 'GSTR2B_082026.xlsx', notRow: 'IMS export' }, 'ims') +
+      rowHTML('skipped', { title: 'Credit / Debit Note Register', pill: 'optional', pillCls: 'acc' }, 'note');
+    const missing = document.getElementById('missing');
+    missing.style.color = 'var(--ai-on)';
+    missing.textContent = 'Still needed: the books row.';
   }
 
-  function refreshFoot () {
-    const booksOk = SUPPLIED.includes(state.books.state);
-    const portalOk = SUPPLIED.includes(state.portal.state);
-    const need = [];
-    if (!booksOk)  need.push('the books row');
-    if (!portalOk) need.push('the portal row');
-    if (need.length) {
-      missingEl.style.color = 'var(--ai-on)';
-      missingEl.textContent = 'Still needed: ' + need.join(' and ') + '.';
-      goBtn.disabled = true;
-    } else {
-      missingEl.style.color = 'var(--rule-on)';
-      missingEl.textContent = 'Ready: books side and portal side both present. The note register is optional.';
-      goBtn.disabled = false;
-    }
-  }
-
-  const setStatus = t => { statusEl.innerHTML = t; };
-
-  function reset () {
-    state.books  = { state:'waiting', opts:null };
-    state.portal = { state:'waiting', opts:null };
-    state.note   = { state:'waiting', opts:null };
-    busy = false;
-    paint();
-    setStatus('Nothing chosen yet. Each row takes one file, and choosing it uploads and normalizes in one step.');
-  }
-
-  // one action: choose -> (busy) -> verdict
-  function choose (which, file, verdict, opts, note) {
-    busy = true;
-    state[which] = { state:'uploading', opts:{ file:file, pct:40 } };
-    paint();
-    setStatus('Uploading &amp; normalizing <b>' + file + '</b> — saved to this client and period, then read and mapped.');
-
-    let p = 40;
-    const iv = setInterval(() => {
-      p = Math.min(p + 11, 96);
-      const b = rowsHost.querySelector('.uprow.busy .bar > i');
-      if (b) b.style.width = p + '%';
-    }, 200);
-
-    setTimeout(() => {
-      clearInterval(iv);
-      state[which] = { state:verdict, opts:Object.assign({ file:file }, opts || {}) };
-      busy = false;
-      paint();
-      setStatus(note);
-    }, 1500);
-  }
-
-  const titleOf = k => ({ books:'Books / Purchase Register', portal:'GSTR-2B', note:'Credit / Debit Note Register' })[k];
-
-  document.getElementById('sHappy').addEventListener('click', () => {
-    reset();
-    choose('books', 'Purchase Register Aug 2026.xlsx', 'ok', { title:'Books / Purchase Register', conf:97, rows:'4,182' },
-      '<b>Purchase Register Aug 2026.xlsx</b> filed to the books row — 4,182 rows, fully mapped.');
-    setTimeout(() => choose('portal', 'GSTR2B_082026.xlsx', 'ok', { title:'GSTR-2B', conf:99, rows:'1,204' },
-      '<b>GSTR2B_082026.xlsx</b> filed to the portal row — 1,204 rows, fully mapped. Both sides in.'), 2100);
-  });
-
-  document.getElementById('sReview').addEventListener('click', () => {
-    reset();
-    choose('portal', 'GSTR2B_082026.xlsx', 'review', { title:'GSTR-2B', rows:'1,204', review:3 },
-      '<b>GSTR2B_082026.xlsx</b> normalized, but 3 field(s) need review. You can run anyway — the report will carry the caveat.');
-  });
-
-  document.getElementById('sPartial').addEventListener('click', () => {
-    reset();
-    choose('books', 'Purchase Register Aug 2026.xlsx', 'partial', { title:'Books / Purchase Register', rows:'4,182', missing:2 },
-      '<b>Purchase Register Aug 2026.xlsx</b> normalized, but 2 required fields are unmapped — the report will be marked partial. It still runs.');
-  });
-
-  document.getElementById('sReuse').addEventListener('click', () => {
-    reset();
-    choose('portal', 'GSTR2B_072026.xlsx', 'shapeReused', { title:'GSTR-2B', rows:'1,118' },
-      '<b>GSTR2B_072026.xlsx</b> matched a file shape we already trust — the mapping was reused and no model call was needed.');
-  });
-
-  document.getElementById('sConfirm').addEventListener('click', () => {
-    reset();
-    choose('portal', 'GSTR2B_082026.xlsx', 'confirm', { title:'GSTR-2B', conf:68, short:'GSTR-2B' },
-      '<b>GSTR2B_082026.xlsx</b> was identified with only 68% confidence, so it is <b>not</b> filed yet.');
-  });
-
-  document.getElementById('sWrong').addEventListener('click', () => {
-    reset();
-    choose('books', 'GSTR2B_082026.xlsx', 'wrong', { title:'Books / Purchase Register' },
-      '<b>GSTR2B_082026.xlsx</b> was <b>not</b> filed — it looks like a GSTR-2B. Move it, keep it, or choose another file.');
-  });
-
-  document.getElementById('sUnknown').addEventListener('click', () => {
-    reset();
-    choose('note', 'scan_0012.pdf', 'unknown', { title:'Credit / Debit Note Register', conf:41 },
-      '<b>scan_0012.pdf</b> couldn\'t be identified. It is kept; nothing was guessed.');
-  });
-
-  document.getElementById('sFail').addEventListener('click', () => {
-    reset();
-    choose('portal', 'GSTR2B_082026.xlsx', 'failed', { title:'GSTR-2B' },
-      '<b>GSTR2B_082026.xlsx</b> couldn\'t be read. Your original file is untouched.');
-  });
-
-  document.getElementById('sNotIngested').addEventListener('click', () => {
-    reset();
-    state.portal = { state:'notIngested', opts:{ file:'GSTR2B_082026.xlsx' } };
-    paint();
-    setStatus('Found <b>GSTR2B_082026.xlsx</b> on disk for this period, but it has no stored result — normalize it to use it.');
-  });
-
-  document.getElementById('sExisting').addEventListener('click', () => {
-    reset();
-    state.portal = { state:'existing', opts:{ file:'GSTR2B_082026.xlsx' } };
-    paint();
-    setStatus('Found <b>GSTR2B_082026.xlsx</b> already normalized for this client and period — reusing it, nothing to upload.');
-  });
-
-  document.getElementById('sReset').addEventListener('click', reset);
-
-  // row actions — every file-picking one re-runs upload & normalize
-  rowsHost.addEventListener('click', (e) => {
-    const btn = e.target.closest('button[data-act]');
-    if (!btn || busy) return;
-    const act = btn.dataset.act;
-    const row = btn.closest('.uprow');
-    const which = row && row.dataset.row;
-    const kind = which === 'portal' ? 'portal' : which === 'note' ? 'note' : 'books';
-
-    if (act === 'cancel') { reset(); return; }
-
-    if (act === 'pick' || act === 'replace' || act === 'retry' || act === 'normalize') {
-      const label = act === 'retry' ? 'Trying again' : act === 'normalize' ? 'Normalizing' : 'Replacing';
-      const f = (state[kind].opts && state[kind].opts.file) || ({ books:BOOKS, portal:PORTAL, note:NOTE })[kind].file;
-      choose(kind, f, 'ok', { title:titleOf(kind), conf:97, rows: kind === 'note' ? '36' : '1,204' },
-        label + ' <b>' + f + '</b> — the whole pipeline ran again: saved, normalizing, mapped.');
-      return;
-    }
-
-    if (act === 'move') {
-      state.books = { state:'waiting', opts:null };
-      state.portal = { state:'ok', opts:{ file:'GSTR2B_082026.xlsx', title:'GSTR-2B', conf:99, rows:'1,204' } };
-      paint();
-      setStatus('Moved <b>GSTR2B_082026.xlsx</b> to the GSTR-2B row — it normalizes again under that document, since mappings are per document.');
-      return;
-    }
-
-    if (act === 'keep') {
-      state.books = { state:'partial', opts:{ file:'GSTR2B_082026.xlsx', title:'Books / Purchase Register', rows:'1,204', missing:2 } };
-      paint();
-      setStatus('Kept it in the books row. The run will flag it: the report comes out <b>partial</b> rather than silently wrong.');
-      return;
-    }
-
-    if (act === 'confirm') {
-      const f = (state[kind].opts && state[kind].opts.file) || ({ books:BOOKS, portal:PORTAL, note:NOTE })[kind].file;
-      state[kind] = { state:'ok', opts:{ file:f, title:titleOf(kind), conf:68, rows: kind === 'books' ? '900' : '1,204' } };
-      paint();
-      setStatus('Confirmed. It\'ll be used for this run.');
-      return;
-    }
-
-    if (act === 'tray') {
-      state.note = { state:'waiting', opts:null };
-      paint();
-      setStatus('Moved <b>scan_0012.pdf</b> to the unfiled tray — file it whenever you like; the note row is optional so nothing is blocked.');
-      return;
-    }
-
-    if (act === 'remove') {
-      state[kind] = { state:'waiting', opts:null };
-      paint();
-      setStatus('Removed. That row is empty again — choose a file and it uploads &amp; normalizes in one step.');
-      return;
-    }
-
-    if (act === 'open') { setStatus('Opening the field review for this file — you can fix just the flagged fields.'); return; }
-    if (act === 'type') { setStatus('Choose the document type for this file — the same list the rows use.'); return; }
-  });
-
+  paintPage();
   paintGallery();
-  reset();
 </script>
 </body>
 </html>
