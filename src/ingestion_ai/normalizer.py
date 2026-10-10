@@ -1079,6 +1079,20 @@ def _classification_verdict(
     )
 
 
+def suggested_slot(source_type: str, doc_type: str) -> Optional[str]:
+    """The slot a mis-filed document probably belongs in, for the UI's
+    "move it" action — or ``None`` when there is nothing to suggest.
+
+    ``None`` means the classification was unknown, has no slot in this app
+    (e.g. GSTR-1), or already agrees with ``source_type``. Callers decide
+    whether the returned slot exists for the recon type in play.
+    """
+    suggested = _SUGGESTED_SLOT.get(_canonical_doc_type(doc_type))
+    if not suggested or suggested == source_type:
+        return None
+    return suggested
+
+
 # ---------------------------------------------------------------------------
 # 3. Field mapping (Prompt 1)
 # ---------------------------------------------------------------------------
