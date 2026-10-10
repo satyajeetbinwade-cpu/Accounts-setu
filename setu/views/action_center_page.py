@@ -11,7 +11,7 @@ import reflex as rx
 
 from setu.foundation import components as c
 from setu.foundation import tokens as t
-from setu.state.action_center_state import Module8State
+from setu.state.action_center_state import FlaggedItemRow, Module8State
 from setu.views import report_page, shell
 
 

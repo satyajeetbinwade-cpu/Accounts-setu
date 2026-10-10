@@ -16,7 +16,7 @@ The upload handler is async because Reflex ``UploadFile.read()`` is a coroutine.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import reflex as rx
 
