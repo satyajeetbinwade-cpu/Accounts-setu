@@ -143,7 +143,7 @@ def _c5_runtime_context(client_id: Optional[int] = None) -> str:
 
 def upload_and_infer(
     *, client_id: int, source_type: str, filename: str, file_bytes: bytes, period: Optional[str],
-    actor: str, client_ref: Optional[str] = None, recon_type: Optional[str] = None, db_path=None,
+    actor: str, recon_type: Optional[str] = None, db_path=None,
 ) -> dict[str, Any]:
     """File a raw source upload into F3, then run the UNIFIED ingestion
     layer over it.
@@ -180,8 +180,8 @@ def upload_and_infer(
     # "upload.csv", losing the real extension (an .xlsx upload would then be
     # parsed as CSV and yield no rows).
     result = normalizer.normalize_source_file(
-        file_bytes, source_type, client_ref or str(client_id), period,
-        client_id=client_id, recon_type=recon_type, actor=actor,
+        file_bytes, source_type, client_id, period,
+        recon_type=recon_type, actor=actor,
         filename=filename, db_path=db_path,
     )
 
@@ -281,70 +281,15 @@ def _doc_type_for_source(source_type: str) -> str:
     }.get(source_type, "Other")
 
 
-def _folder_name_for_client(client_id: int, client_ref: Optional[str] = None) -> Optional[str]:
-    """Resolve the data/ FOLDER name for a client id.
-
-    The reconciliation engine reads files from `data/<folder>/<period>/
-    <source_type>/`, where the folder is a client's folder name (often
-    abbreviated), NOT F2's `legal_name`. An upload stored only in the DB
-    never reached that folder, so a confirmed file was invisible to the
-    Reconcile flow. This maps a client id onto the folder whose name best
-    matches the client's legal name (exact, then normalized-prefix), and
-    falls back to the passed client_ref, then the DB client row's own name.
-    """
-    from src.data_paths import DATA_ROOT
-
-    candidates: list[str] = []
-    try:
-        from src.clients import service as clients
-
-        for c in clients.list_clients(include_inactive=True):
-            if int(c["client_id"]) == int(client_id):
-                candidates.append(str(c["legal_name"]))
-                break
-    except Exception:  # noqa: BLE001
-        pass
-    if client_ref:
-        candidates.append(str(client_ref))
-
-    on_disk = [p.name for p in DATA_ROOT.iterdir() if p.is_dir()] if DATA_ROOT.exists() else []
-
-    def norm(name: str) -> str:
-        return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-    # Exact folder-name match, then the BEST (longest-overlap) normalized
-    # prefix match either way. Longest wins: "Acme Textiles Pvt Ltd" must
-    # resolve to "AcmeTextiles", never the shorter unrelated "acme" folder.
-    for cand in candidates:
-        if cand in on_disk:
-            return cand
-    best: Optional[tuple[int, str]] = None
-    for cand in candidates:
-        n = norm(cand)
-        for folder in on_disk:
-            f = norm(folder)
-            if f and n and (f == n or f.startswith(n) or n.startswith(f)):
-                overlap = min(len(f), len(n))
-                if best is None or overlap > best[0]:
-                    best = (overlap, folder)
-    if best is not None:
-        return best[1]
-    # No match on disk — fall back to the client's own name (source_data_path
-    # will create the folder) rather than silently dropping the file.
-    if candidates:
-        return candidates[0]
-    return None
-
-
 def materialize_upload_to_disk(
-    upload_id: int, *, client_ref: Optional[str] = None, db_path=None,
+    upload_id: int, *, db_path=None,
 ) -> Optional[str]:
     """Copy an upload's stored bytes into the client's data/ folder so the
     reconciliation engine can see it.
 
     THE MISSING LINK: `upload_and_infer()` stores bytes ONLY in F3's
     document_versions BLOB, and the Reconcile flow's file picker reads the
-    DISK folder (`data/<client>/<period>/<source_type>/`). Without this
+    DISK folder (`data/<client_id>/<period>/<source_type>/`). Without this
     step a confirmed upload could never be chosen for reconciliation.
     Called from `confirm_mapping()`.
 
@@ -364,24 +309,22 @@ def materialize_upload_to_disk(
         period = (doc.get("period") if doc else None) or upload.get("period")
         filename = upload["filename"]
         source_type = upload["source_type"]
+        client_id = upload["client_id"]
     finally:
         conn.close()
 
     if not file_bytes:
         return None
 
-    folder = _folder_name_for_client(upload["client_id"], client_ref)
-    if not folder:
-        return None
     # Never create the unfiled sentinel folder. A file written to
-    # `data/<client>/-/<source_type>/` is unreachable by every period picker,
-    # so it would look filed while being permanently invisible to
+    # `data/<client_id>/-/<source_type>/` is unreachable by every period
+    # picker, so it would look filed while being permanently invisible to
     # reconciliation. The period is required at upload time; this is the
     # defensive backstop.
     if not period_utils.is_valid_period(period):
         return None
     try:
-        directory = source_data_path(folder, period, source_type)
+        directory = source_data_path(client_id, period, source_type)
         dest = directory / filename
         dest.write_bytes(file_bytes)
         return filename
@@ -427,7 +370,7 @@ def unfiled_uploads(*, db_path=None) -> list[dict[str, Any]]:
 
 
 def set_upload_period(
-    upload_id: int, period: str, *, actor: str, client_ref: Optional[str] = None, db_path=None,
+    upload_id: int, period: str, *, actor: str, db_path=None,
 ) -> dict[str, Any]:
     """Re-file an upload under a real period so reconciliation can see it.
 
@@ -469,11 +412,10 @@ def set_upload_period(
         ddb.set_document_period(conn, upload["document_id"], period)
 
         # 2. re-key the stored ingestion result (its key embeds the period)
-        ref = client_ref or str(client_id)
         rekeyed = idb.rekey_ingestion_result(
             conn,
-            old_upload_key=normalizer.upload_key(ref, old_period, source_type, filename),
-            new_upload_key=normalizer.upload_key(ref, period, source_type, filename),
+            old_upload_key=normalizer.upload_key(client_id, old_period, source_type, filename),
+            new_upload_key=normalizer.upload_key(client_id, period, source_type, filename),
             period=period,
         )
     finally:
@@ -481,7 +423,7 @@ def set_upload_period(
 
     # 3. move the bytes on disk (best-effort — the DB is already consistent)
     moved = _move_upload_on_disk(
-        client_id, old_period, period, source_type, filename, client_ref=client_ref,
+        client_id, old_period, period, source_type, filename,
     )
 
     # 4. audit — the period is a stored value a person changed.
@@ -502,7 +444,7 @@ def set_upload_period(
 
 def _move_upload_on_disk(
     client_id: int, old_period: Optional[str], new_period: str, source_type: str,
-    filename: str, *, client_ref: Optional[str] = None,
+    filename: str,
 ) -> bool:
     """Move a filed source file from its old period folder to the new one.
 
@@ -512,18 +454,17 @@ def _move_upload_on_disk(
     """
     import shutil
 
-    from src.data_paths import DATA_ROOT, source_data_path
+    from src.data_paths import data_dir, source_data_path
 
-    folder = _folder_name_for_client(client_id, client_ref)
-    if not folder:
+    try:
+        old_dir = data_dir(client_id, (old_period or period_utils.PERIOD_UNFILED), source_type)
+    except ValueError:
         return False
-
-    old_dir = DATA_ROOT / folder / (old_period or period_utils.PERIOD_UNFILED) / source_type
     old_path = old_dir / filename
     if not old_path.exists():
         return False
     try:
-        new_dir = source_data_path(folder, new_period, source_type)
+        new_dir = source_data_path(client_id, new_period, source_type)
         shutil.move(str(old_path), str(new_dir / filename))
     except Exception:  # noqa: BLE001
         return False
@@ -658,7 +599,7 @@ def stored_result_for_upload(upload_id: int, *, db_path=None) -> Optional[dict[s
     """The persisted ingestion result for a raw upload.
 
     Deliberately does NOT compose the upload key from the raw_upload row:
-    that row carries neither ``client_ref`` nor ``period``, so the composed
+    that row carries neither ``client_id`` nor ``period``, so the composed
     key never matched what ``normalize_source_file()`` stored, and every
     upload displayed "0 row(s) read · 0 row(s) extracted" regardless of how
     many rows it actually read. Resolving through the document (which does
@@ -695,7 +636,7 @@ def upload_row_counts(upload_id: int, *, db_path=None) -> dict[str, int]:
 
 def confirm_mapping(
     upload_id: int, *, field_overrides: dict[str, Optional[str]], trust_for_reuse: bool, actor: str,
-    client_ref: Optional[str] = None, allow_empty: bool = False, layout_scope: Optional[str] = None,
+    allow_empty: bool = False, layout_scope: Optional[str] = None,
     db_path=None,
 ) -> None:
     """Human confirmation of the (possibly edited) mapping. Never
@@ -776,13 +717,13 @@ def confirm_mapping(
     # already succeeded.
     try:
         stored = normalizer.get_stored_result(
-            client_ref or str(upload["client_id"]), upload.get("period"),
+            upload["client_id"], upload.get("period"),
             upload["source_type"], upload["filename"], db_path=db_path,
         )
         signature = (stored or {}).get("header_signature")
         if signature:
             normalizer.confirm_shape_mapping(
-                client_ref or str(upload["client_id"]), upload["source_type"], signature,
+                upload["client_id"], upload["source_type"], signature,
                 field_overrides=field_overrides, trust_for_reuse=trust_for_reuse,
                 actor=actor, db_path=db_path,
             )
@@ -797,18 +738,18 @@ def confirm_mapping(
     # un-confirm a mapping that already succeeded.
     _audit_confirmation(
         upload, field_overrides, actor=actor,
-        layout_scope=layout_scope, client_ref=client_ref, db_path=db_path,
+        layout_scope=layout_scope, db_path=db_path,
     )
 
     # Materialize the confirmed file into the client's data/ folder so the
     # Reconcile flow can actually pick it (F3 stores bytes only as a DB BLOB;
     # the engine reads the disk folder). Best-effort — never un-confirms.
-    materialize_upload_to_disk(upload_id, client_ref=client_ref, db_path=db_path)
+    materialize_upload_to_disk(upload_id, db_path=db_path)
 
 
 def _audit_confirmation(
     upload: dict[str, Any], field_overrides: dict[str, Optional[str]], *,
-    actor: str, layout_scope: Optional[str], client_ref: Optional[str], db_path=None,
+    actor: str, layout_scope: Optional[str], db_path=None,
 ) -> None:
     """§5.6 — emit `mapping_confirmed` plus one F4 entry per CHANGED field."""
     try:
@@ -974,7 +915,6 @@ def canonical_frame_for_upload(upload_id: int, *, db_path=None):
             data = version.get("file_bytes") if version else None
             filename = upload["filename"]
             source_type = upload["source_type"]
-            client_ref = upload.get("client_ref") or str(upload["client_id"])
             period = (doc.get("period") if doc else None) or upload.get("period")
             stored = idb.find_ingestion_result(
                 conn, client_id=upload["client_id"], source_type=source_type, filename=filename,
@@ -1200,7 +1140,7 @@ def provenance(upload_id: int, *, db_path=None) -> dict[str, Any]:
 
 
 def re_run_mapping(
-    upload_id: int, *, actor: str, client_ref: Optional[str] = None, db_path=None,
+    upload_id: int, *, actor: str, db_path=None,
 ) -> dict[str, Any]:
     """Force a fresh model mapping for an already-ingested file.
 
@@ -1234,7 +1174,7 @@ def re_run_mapping(
             "The original file bytes are no longer available for this upload — re-upload the file."
         )
 
-    ref = client_ref or str(upload["client_id"])
+    ref = upload["client_id"]
     source_type = upload["source_type"]
     filename = upload["filename"]
 
@@ -1250,7 +1190,7 @@ def re_run_mapping(
             if headers:
                 signature = normalizer._header_signature([str(h) for h in headers])
                 idb.delete_shape(
-                    conn, client_ref=ref, source_type=source_type, header_signature=signature,
+                    conn, client_id=ref, source_type=source_type, header_signature=signature,
                 )
             idb.delete_ingestion_result(
                 conn, normalizer.upload_key(ref, period, source_type, filename),
@@ -1291,8 +1231,8 @@ def re_run_mapping(
 
 
 def re_run_file(
-    client: str, period: Optional[str], source_type: str, filename: str,
-    *, actor: str, client_id: Optional[int] = None, recon_type: Optional[str] = None, db_path=None,
+    client_id: int, period: Optional[str], source_type: str, filename: str,
+    *, actor: str, recon_type: Optional[str] = None, db_path=None,
 ) -> dict[str, Any]:
     """Force a fresh mapping for a file identified by its coordinates.
 
@@ -1305,7 +1245,7 @@ def re_run_file(
     """
     from src.data_paths import source_data_path
 
-    path = source_data_path(client, period, source_type) / filename
+    path = source_data_path(client_id, period, source_type) / filename
     if not path.exists():
         raise IngestionAIError(f"Source file not found: {path}")
 
@@ -1314,15 +1254,15 @@ def re_run_file(
     try:
         conn = idb.connect(db_path)
         try:
-            stored = normalizer.get_stored_result(client, period, source_type, filename, db_path=db_path)
+            stored = normalizer.get_stored_result(client_id, period, source_type, filename, db_path=db_path)
             headers = (stored or {}).get("headers") or []
             if headers:
                 signature = normalizer._header_signature([str(h) for h in headers])
                 idb.delete_shape(
-                    conn, client_ref=client, source_type=source_type, header_signature=signature,
+                    conn, client_id=client_id, source_type=source_type, header_signature=signature,
                 )
             idb.delete_ingestion_result(
-                conn, normalizer.upload_key(client, period, source_type, filename),
+                conn, normalizer.upload_key(client_id, period, source_type, filename),
             )
         finally:
             conn.close()
@@ -1330,8 +1270,8 @@ def re_run_file(
         pass
 
     result = normalizer.normalize_source_file(
-        path, source_type, client, period,
-        client_id=client_id, recon_type=recon_type, actor=actor,
+        path, source_type, client_id, period,
+        recon_type=recon_type, actor=actor,
         db_path=db_path, use_cache=False,
     )
     return {
@@ -1520,8 +1460,8 @@ def confirm_shape_mapping(*args, **kwargs) -> None:
     return normalizer.confirm_shape_mapping(*args, **kwargs)
 
 
-def list_shapes(*, client_ref=None, source_type=None, db_path=None):
-    return normalizer.list_shapes(client_ref=client_ref, source_type=source_type, db_path=db_path)
+def list_shapes(*, client_id=None, source_type=None, db_path=None):
+    return normalizer.list_shapes(client_id=client_id, source_type=source_type, db_path=db_path)
 
 
 def revoke_shape_trust(shape_id: int, *, db_path=None) -> None:

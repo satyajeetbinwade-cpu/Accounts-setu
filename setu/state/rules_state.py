@@ -259,6 +259,16 @@ class RulesState(AuthState):
         self.client_for_rule[key] = client_id
         self._load_client_value(key)
 
+    @rx.event
+    def set_client_for_rule_value(self, key: str, v):
+        """Picker callback: the widget hands a client_id string; store the id."""
+        try:
+            cid = int(v or 0)
+        except (TypeError, ValueError):
+            cid = 0
+        self.set_client_for_rule(key, cid)
+
+    @rx.event
     def set_value(self, key: str, v: str):
         self.value[key] = v
 

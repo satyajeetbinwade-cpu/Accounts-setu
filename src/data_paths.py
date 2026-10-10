@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from src.shared.periods import is_valid_period
+from src.shared.periods import PERIOD_UNFILED, is_valid_period
 from src.shared.vocab import SOURCE_TYPES, is_valid_source_type
 
 DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
@@ -47,11 +47,17 @@ def client_data_root(client_id) -> Path:
 def data_dir(client_id, period: str, source_type: str) -> Path:
     """Return ``data/<client_id>/<period>/<source_type>/`` WITHOUT creating it.
 
-    Validates every segment. Use this for reads / existence checks.
+    Validates every segment. The period must be ``YYYY-MM`` — or the exact
+    unfiled sentinel ``"-"``, which is a legitimate *stored* folder for a file
+    whose period is not yet known (never a reconcilable period). Anything else
+    is rejected, so a ``"../"`` trick can never reach the filesystem.
     """
     cid = require_client_id(client_id)
-    if not is_valid_period(period):
-        raise ValueError(f"Invalid period {period!r}; expected 'YYYY-MM'")
+    if str(period) != PERIOD_UNFILED and not is_valid_period(period):
+        raise ValueError(
+            f"Invalid period {period!r}; expected 'YYYY-MM' or the unfiled "
+            f"sentinel {PERIOD_UNFILED!r}"
+        )
     if not is_valid_source_type(source_type):
         raise ValueError(
             f"Unknown source_type {source_type!r}; expected one of {sorted(SOURCE_TYPES)}"
@@ -66,6 +72,20 @@ def source_data_path(client_id, period: str, source_type: str) -> Path:
     on an invalid client id, period or source type.
     """
     path = data_dir(client_id, period, source_type)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def exports_dir(client_id, period: str) -> Path:
+    """The ``data/<client_id>/<period>/exports/`` directory (created).
+
+    Reports and workbooks live beside their period's source files, so an
+    export is always reachable from the client/period it belongs to.
+    """
+    cid = require_client_id(client_id)
+    if str(period) != PERIOD_UNFILED and not is_valid_period(period):
+        raise ValueError(f"Invalid period {period!r}; expected 'YYYY-MM'")
+    path = DATA_ROOT / str(cid) / str(period) / "exports"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

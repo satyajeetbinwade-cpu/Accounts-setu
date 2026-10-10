@@ -354,7 +354,7 @@ class IngestionResult:
 
     source_type: str
     filename: str
-    client: str
+    client_id: int
     period: Optional[str]
     status: str
     canonical_df: pd.DataFrame
@@ -472,8 +472,7 @@ class IngestionResult:
         return {
             "source_type": self.source_type,
             "filename": self.filename,
-            "client": self.client,
-            "period": self.period,
+            "client_id": self.client_id,            "period": self.period,
             "status": self.status,
             "field_mappings": [m.to_dict() for m in self.field_mappings],
             "unmapped_required_fields": self.unmapped_required_fields,
@@ -1498,8 +1497,8 @@ _NOTE_IDENTITY_REASONS = {
 
 
 def _note_register_result(
-    path: Any, source_type: str, filename: str, client: str, period: Optional[str],
-    *, recon_type: Optional[str], signature: str, client_id: Optional[int],
+    path: Any, source_type: str, filename: str, client_id: int, period: Optional[str],
+    *, recon_type: Optional[str], signature: str,
     actor: str, db_path=None,
 ) -> Optional[IngestionResult]:
     """Try the deterministic NOTE-register path for a books note register.
@@ -1583,7 +1582,7 @@ def _note_register_result(
     )
 
     result = IngestionResult(
-        source_type=source_type, filename=filename, client=client, period=period,
+        source_type=source_type, filename=filename, client_id=client_id, period=period,
         status=status, canonical_df=parsed.frame, field_mappings=mappings,
         unmapped_required_fields=unmapped_required,
         row_count_in=parsed.row_count_read, row_count_out=parsed.row_count_parsed,
@@ -1611,8 +1610,8 @@ def _note_register_result(
 
 
 def _books_register_result(
-    path: Any, source_type: str, filename: str, client: str, period: Optional[str],
-    *, recon_type: Optional[str], signature: str, client_id: Optional[int],
+    path: Any, source_type: str, filename: str, client_id: int, period: Optional[str],
+    *, recon_type: Optional[str], signature: str,
     actor: str, db_path=None,
 ) -> Optional[IngestionResult]:
     """Try the deterministic rate-bucket path for a books register.
@@ -1694,11 +1693,10 @@ def _books_register_result(
     )
 
     result = IngestionResult(
-        source_type=source_type, filename=filename, client=client, period=period,
+        source_type=source_type, filename=filename, client_id=client_id, period=period,
         status=status, canonical_df=parsed.frame, field_mappings=mappings,
         unmapped_required_fields=unmapped_required,
         row_count_in=parsed.row_count_read, row_count_out=len(parsed.frame),
-        warnings=warnings, headers=[], header_row=parsed.metadata.header_row,
         sheet_name=None, sheet_ambiguous=False, classification=None,
         model_used=None, llm_cached=False, header_signature=signature,
         notes=[
@@ -1719,10 +1717,9 @@ def _books_register_result(
 def normalize_source_file(
     file: Any,
     source_type: str,
-    client: str,
+    client_id: int,
     period: Optional[str],
     *,
-    client_id: Optional[int] = None,
     recon_type: Optional[str] = None,
     actor: str = "system",
     filename: Optional[str] = None,
@@ -1736,9 +1733,8 @@ def normalize_source_file(
             object with `.read()`.
         source_type: The declared upload slot — "tally_purchase_register",
             "gstr2b", "ims", "form26as", "tds", or a 2C source.
-        client: The client folder/name the upload belongs to.
+        client_id: The F2 ``end_clients.client_id`` this upload belongs to.
         period: The period string, or None.
-        client_id: Optional F2 client_id, for the shape cache.
         recon_type: 'GST'/'TDS'/'OTHER' when known. Only affects the
             required-field gate for the 'tally' slot, which feeds both GST
             and TDS recon from one file.
@@ -1769,7 +1765,7 @@ def normalize_source_file(
             if "no sheet containing tabular data" not in str(exc):
                 raise
             result = IngestionResult(
-                source_type=source_type, filename=filename, client=client, period=period,
+                source_type=source_type, filename=filename, client_id=client_id, period=period,
                 status=STATUS_EMPTY, canonical_df=pd.DataFrame(), field_mappings=[],
                 unmapped_required_fields=[], row_count_in=0, row_count_out=0,
                 warnings=[], headers=[], header_row=None, sheet_name=None,
@@ -1835,7 +1831,7 @@ def normalize_source_file(
                     )
                 )
                 result = IngestionResult(
-                    source_type=source_type, filename=filename, client=client, period=period,
+                    source_type=source_type, filename=filename, client_id=client_id, period=period,
                     status=bridge_status, canonical_df=bridge_df, field_mappings=bridge_mappings,
                     unmapped_required_fields=bridge_unmapped_required,
                     row_count_in=len(read.df), row_count_out=len(bridge_df), warnings=warnings,
@@ -1857,9 +1853,9 @@ def normalize_source_file(
         # Register sheet in one workbook, so a mis-detection would be silent.
         if source_type in _NOTE_SOURCE_TYPES:
             note_result = _note_register_result(
-                path, source_type, filename, client, period,
+                path, source_type, filename, client_id, period,
                 recon_type=recon_type, signature=signature,
-                client_id=client_id, actor=actor, db_path=db_path,
+                actor=actor, db_path=db_path,
             )
             if note_result is not None:
                 _persist_result(note_result, client_id=client_id, actor=actor, db_path=db_path)
@@ -1876,9 +1872,9 @@ def normalize_source_file(
         # has no rate-bucketed columns at all.
         if source_type in _BOOKS_SOURCE_TYPES:
             books = _books_register_result(
-                path, source_type, filename, client, period,
+                path, source_type, filename, client_id, period,
                 recon_type=recon_type, signature=signature,
-                client_id=client_id, actor=actor, db_path=db_path,
+                actor=actor, db_path=db_path,
             )
             if books is not None:
                 _persist_result(books, client_id=client_id, actor=actor, db_path=db_path)
@@ -1889,7 +1885,7 @@ def normalize_source_file(
         if use_cache and conn is not None:
             try:
                 cached_shape = idb.get_shape(
-                    conn, client_ref=client, source_type=source_type, header_signature=signature
+                    conn, client_id=client_id, source_type=source_type, header_signature=signature
                 )
             except Exception:  # noqa: BLE001
                 cached_shape = None
@@ -1924,7 +1920,7 @@ def normalize_source_file(
                     else STATUS_WRONG_SLOT
                 )
                 result = IngestionResult(
-                    source_type=source_type, filename=filename, client=client, period=period,
+                    source_type=source_type, filename=filename, client_id=client_id, period=period,
                     status=status, canonical_df=pd.DataFrame(), field_mappings=[],
                     unmapped_required_fields=required,
                     row_count_in=len(read.df), row_count_out=0, warnings=warnings,
@@ -1942,8 +1938,8 @@ def normalize_source_file(
                 source_type, headers, samples, db_path=db_path, c5_context=c5_context
             )
             _store_shape(
-                client, source_type, signature, headers, mappings, classification,
-                model_used, client_id=client_id, actor=actor, db_path=db_path,
+                client_id, source_type, signature, headers, mappings, classification,
+                model_used, actor=actor, db_path=db_path,
             )
 
         # --- Deterministic identity rescue ---
@@ -1994,7 +1990,7 @@ def normalize_source_file(
             status = STATUS_OK
 
         result = IngestionResult(
-            source_type=source_type, filename=filename, client=client, period=period,
+            source_type=source_type, filename=filename, client_id=client_id, period=period,
             status=status, canonical_df=canonical_df, field_mappings=mappings,
             unmapped_required_fields=unmapped_required,
             row_count_in=len(read.df), row_count_out=len(canonical_df), warnings=warnings,
@@ -2089,9 +2085,9 @@ def _mappings_from_cache(
 
 
 def _store_shape(
-    client: str, source_type: str, signature: str, headers: list[str],
+    client_id: int, source_type: str, signature: str, headers: list[str],
     mappings: list[FieldMapping], classification: Optional[dict[str, Any]],
-    model_used: Optional[str], *, client_id: Optional[int], actor: str, db_path=None,
+    model_used: Optional[str], *, actor: str, db_path=None,
 ) -> None:
     """Cache the model's mapping for this exact file shape. Best-effort —
     a cache write failure must never break an otherwise-good ingestion."""
@@ -2110,11 +2106,11 @@ def _store_shape(
             }
             confidences = [m.confidence for m in mappings if m.confidence is not None]
             idb.upsert_shape(
-                conn, client_ref=client, source_type=source_type, header_signature=signature,
+                conn, client_id=client_id, source_type=source_type, header_signature=signature,
                 headers=headers, mapping=mapping_json, classification=classification,
                 model_used=model_used,
                 confidence_floor=min(confidences) if confidences else None,
-                trusted=False, source="ai", client_id=client_id, actor=actor,
+                trusted=False, source="ai", actor=actor,
             )
         finally:
             conn.close()
@@ -2123,10 +2119,14 @@ def _store_shape(
 
 
 def _persist_result(
-    result: IngestionResult, *, client_id: Optional[int], actor: str, db_path=None,
+    result: IngestionResult, *, client_id: Optional[int] = None, actor: str, db_path=None,
 ) -> None:
     """Record the result so the Run screen and Smart Ingestion read the
-    SAME object rather than each re-deriving it. Best-effort."""
+    SAME object rather than each re-deriving it. Best-effort.
+
+    ``client_id`` is accepted for backward compatibility only; the identity
+    comes from ``result.client_id``.
+    """
     try:
         from src.ingestion_ai import db as idb
 
@@ -2134,8 +2134,8 @@ def _persist_result(
         try:
             idb.upsert_ingestion_result(
                 conn,
-                upload_key=upload_key(result.client, result.period, result.source_type, result.filename),
-                client_ref=result.client, client_id=client_id, period=result.period,
+                upload_key=upload_key(result.client_id, result.period, result.source_type, result.filename),
+                client_id=result.client_id, period=result.period,
                 source_type=result.source_type, filename=result.filename, status=result.status,
                 header_row=result.header_row, sheet_name=result.sheet_name,
                 sheet_ambiguous=result.sheet_ambiguous, headers=result.headers,
@@ -2155,8 +2155,8 @@ def _persist_result(
         pass
 
 
-def upload_key(client: str, period: Optional[str], source_type: str, filename: str) -> str:
-    return f"{client}/{period or '-'}/{source_type}/{filename}"
+def upload_key(client_id: int, period: Optional[str], source_type: str, filename: str) -> str:
+    return f"{int(client_id)}/{period or '-'}/{source_type}/{filename}"
 
 
 # ---------------------------------------------------------------------------
@@ -2165,7 +2165,7 @@ def upload_key(client: str, period: Optional[str], source_type: str, filename: s
 
 
 def get_stored_result(
-    client: str, period: Optional[str], source_type: str, filename: str, *, db_path=None,
+    client_id: int, period: Optional[str], source_type: str, filename: str, *, db_path=None,
 ) -> Optional[dict[str, Any]]:
     """The persisted IngestionResult for an upload, or None."""
     try:
@@ -2174,7 +2174,7 @@ def get_stored_result(
         conn = idb.connect(db_path)
         try:
             return idb.get_ingestion_result(
-                conn, upload_key(client, period, source_type, filename)
+                conn, upload_key(client_id, period, source_type, filename)
             )
         finally:
             conn.close()
@@ -2183,7 +2183,7 @@ def get_stored_result(
 
 
 def confirm_shape_mapping(
-    client: str, source_type: str, header_signature: str,
+    client_id: int, source_type: str, header_signature: str,
     *, field_overrides: dict[str, Optional[str]], trust_for_reuse: bool, actor: str, db_path=None,
 ) -> None:
     """Persist a human-confirmed mapping for this exact file shape.
@@ -2198,7 +2198,7 @@ def confirm_shape_mapping(
     conn = idb.connect(db_path)
     try:
         existing = idb.get_shape(
-            conn, client_ref=client, source_type=source_type, header_signature=header_signature
+            conn, client_id=client_id, source_type=source_type, header_signature=header_signature
         )
         prior = (existing or {}).get("mapping") or {}
         mapping_json: dict[str, Any] = {}
@@ -2214,25 +2214,25 @@ def confirm_shape_mapping(
                 ),
             }
         idb.upsert_shape(
-            conn, client_ref=client, source_type=source_type, header_signature=header_signature,
+            conn, client_id=client_id, source_type=source_type, header_signature=header_signature,
             headers=(existing or {}).get("headers") or [],
             mapping=mapping_json,
             classification=(existing or {}).get("classification"),
             model_used=(existing or {}).get("model_used"),
             confidence_floor=1.0 if all(field_overrides.values()) else None,
             trusted=trust_for_reuse, source="trusted_profile" if trust_for_reuse else "ai",
-            client_id=(existing or {}).get("client_id"), actor=actor,
+            actor=actor,
         )
     finally:
         conn.close()
 
 
-def list_shapes(*, client_ref: Optional[str] = None, source_type: Optional[str] = None, db_path=None):
+def list_shapes(*, client_id: Optional[int] = None, source_type: Optional[str] = None, db_path=None):
     from src.ingestion_ai import db as idb
 
     conn = idb.connect(db_path)
     try:
-        return idb.list_shapes(conn, client_ref=client_ref, source_type=source_type)
+        return idb.list_shapes(conn, client_id=client_id, source_type=source_type)
     finally:
         conn.close()
 
@@ -2270,8 +2270,8 @@ class IngestionBlockedError(RuntimeError):
 
 
 def _canonical_frame_for(
-    client: str, period: Optional[str], source_type: str, filename: str,
-    *, recon_type: Optional[str], client_id: Optional[int], actor: str, db_path=None,
+    client_id: int, period: Optional[str], source_type: str, filename: str,
+    *, recon_type: Optional[str], actor: str, db_path=None,
 ) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Return (canonical frame, caveats) for one selected file, normalizing
     it on demand if it hasn't been normalized yet.
@@ -2282,7 +2282,7 @@ def _canonical_frame_for(
     was mapped, and the caveats explain which checks the report will not be
     able to make. A partial report that states its own limits beats a dead end.
     """
-    stored = get_stored_result(client, period, source_type, filename, db_path=db_path)
+    stored = get_stored_result(client_id, period, source_type, filename, db_path=db_path)
     # A GSTR-2B / IMS export has a KNOWN fixed layout parsed deterministically
     # by the F6 bridge. Replaying a stored mapping for such a file re-derives
     # from a SINGLE sheet and silently drops every other sheet (B2B-CDNR, …),
@@ -2305,28 +2305,28 @@ def _canonical_frame_for(
         if _stored_mapping_is_stale(stored, source_type):
             from src.data_paths import source_data_path
 
-            path = source_data_path(client, period, source_type) / filename
+            path = source_data_path(client_id, period, source_type) / filename
             if not path.exists():
                 raise IngestionBlockedError(f"Source file not found: {path}")
             result = normalize_source_file(
-                path, source_type, client, period, client_id=client_id,
+                path, source_type, client_id, period,
                 recon_type=recon_type, actor=actor, db_path=db_path,
             )
         else:
             # Already normalized — re-derive the frame from the file using the
             # stored mapping, so the engine gets exactly what the user confirmed.
             result = _renormalize_from_stored(
-                client, period, source_type, filename, stored,
-                recon_type=recon_type, client_id=client_id, actor=actor, db_path=db_path,
+                client_id, period, source_type, filename, stored,
+                recon_type=recon_type, actor=actor, db_path=db_path,
             )
     else:
         from src.data_paths import source_data_path
 
-        path = source_data_path(client, period, source_type) / filename
+        path = source_data_path(client_id, period, source_type) / filename
         if not path.exists():
             raise IngestionBlockedError(f"Source file not found: {path}")
         result = normalize_source_file(
-            path, source_type, client, period, client_id=client_id,
+            path, source_type, client_id, period,
             recon_type=recon_type, actor=actor, db_path=db_path,
         )
 
@@ -2396,15 +2396,15 @@ def _stored_mapping_is_stale(stored: dict[str, Any], source_type: str) -> bool:
 
 
 def _renormalize_from_stored(
-    client: str, period: Optional[str], source_type: str, filename: str, stored: dict[str, Any],
-    *, recon_type: Optional[str], client_id: Optional[int], actor: str, db_path=None,
+    client_id: int, period: Optional[str], source_type: str, filename: str, stored: dict[str, Any],
+    *, recon_type: Optional[str], actor: str, db_path=None,
 ) -> IngestionResult:
     """Rebuild the canonical frame from a stored result's mapping, without
     re-calling the model. Used on every run so the engine consumes exactly
     the mapping the user saw and confirmed."""
     from src.data_paths import source_data_path
 
-    path = source_data_path(client, period, source_type) / filename
+    path = source_data_path(client_id, period, source_type) / filename
     if not path.exists():
         raise IngestionBlockedError(f"Source file not found: {path}")
 
@@ -2442,7 +2442,7 @@ def _renormalize_from_stored(
     if hard_stopped:
         status = STATUS_BLOCKED
     result = IngestionResult(
-        source_type=source_type, filename=filename, client=client, period=period,
+        source_type=source_type, filename=filename, client_id=client_id, period=period,
         status=status, canonical_df=canonical_df, field_mappings=mappings,
         unmapped_required_fields=unmapped_required,
         row_count_in=len(read.df), row_count_out=len(canonical_df),
@@ -2471,24 +2471,27 @@ def _prev_period(period: Optional[str]) -> Optional[str]:
     return f"{year:04d}-{month - 1:02d}"
 
 
-def _note_file(client: str, period: Optional[str], source_type: str, filename: Optional[str]) -> Optional[Path]:
+def _note_file(client_id: int, period: Optional[str], source_type: str, filename: Optional[str]) -> Optional[Path]:
     """The on-disk path of a note-bearing source file, or None.
 
-    Deliberately does NOT go through `source_data_path()`, which CREATES the
-    directory: probing for a previous period that has no files must not leave
-    an empty folder behind (it would show up as a period on every picker).
+    Deliberately does NOT create the directory: probing for a previous period
+    that has no files must not leave an empty folder behind (it would show up
+    as a period on every picker).
     """
-    from src.data_paths import DATA_ROOT
+    from src.data_paths import data_dir
 
     if not period or not filename:
         return None
-    path = DATA_ROOT / client / str(period) / source_type / str(filename)
+    try:
+        path = data_dir(client_id, str(period), source_type) / str(filename)
+    except ValueError:
+        return None
     return path if path.exists() else None
 
 
 def load_note_frames(
-    client: str, period: Optional[str], *, selected_files: Optional[dict[str, str]] = None,
-    client_id: Optional[int] = None, actor: str = "system", db_path=None,
+    client_id: int, period: Optional[str], *, selected_files: Optional[dict[str, str]] = None,
+    actor: str = "system", db_path=None,
 ) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame], list[str]]:
     """``(books_notes, portal_notes, adjacent_portal_notes, warnings)``.
 
@@ -2506,12 +2509,12 @@ def load_note_frames(
     warnings: list[str] = []
 
     books_notes: Optional[pd.DataFrame] = None
-    register = _note_file(client, period, "credit_notes", sel.get("credit_notes"))
+    register = _note_file(client_id, period, "credit_notes", sel.get("credit_notes"))
     if register is not None:
         try:
             frame, _caveats = _canonical_frame_for(
-                client, period, "credit_notes", sel["credit_notes"], recon_type="GST",
-                client_id=client_id, actor=actor, db_path=db_path,
+                client_id, period, "credit_notes", sel["credit_notes"], recon_type="GST",
+                actor=actor, db_path=db_path,
             )
             books_notes = frame
         except Exception as exc:  # noqa: BLE001
@@ -2522,7 +2525,7 @@ def load_note_frames(
 
     portal_notes: Optional[pd.DataFrame] = None
     for source_type in ("gstr2b", "ims"):
-        path = _note_file(client, period, source_type, sel.get(source_type))
+        path = _note_file(client_id, period, source_type, sel.get(source_type))
         if path is None:
             continue
         try:
@@ -2541,7 +2544,7 @@ def load_note_frames(
     previous = _prev_period(period)
     if previous:
         for source_type in ("gstr2b", "ims"):
-            path = _note_file(client, previous, source_type, sel.get(source_type))
+            path = _note_file(client_id, previous, source_type, sel.get(source_type))
             if path is None:
                 continue
             try:
@@ -2560,12 +2563,11 @@ def load_note_frames(
 
 
 def load_canonical_pair(
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     selected_files: Optional[dict[str, str]] = None,
     *,
-    client_id: Optional[int] = None,
     actor: str = "system",
     db_path=None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -2596,7 +2598,7 @@ def load_canonical_pair(
     def _pick(source_types: list[str]) -> Optional[tuple[str, str]]:
         for st in source_types:
             fn = sel.get(st)
-            if fn and (source_data_path(client, period, st) / fn).exists():
+            if fn and (source_data_path(client_id, period, st) / fn).exists():
                 return st, fn
         return None
 
@@ -2618,14 +2620,14 @@ def load_canonical_pair(
         # Without a books side there is nothing to reconcile against — this is
         # the one missing-source case that genuinely cannot produce a report.
         raise IngestionBlockedError(
-            f"No books-side file selected for {client}/{period}. "
+            f"No books-side file selected for client_id={client_id}/{period}. "
             "Choose your internal books file on the Upload screen."
         )
     portal_pick = _pick(portal_sources)
 
     books_df, books_caveats = _canonical_frame_for(
-        client, period, books_pick[0], books_pick[1], recon_type=recon_type,
-        client_id=client_id, actor=actor, db_path=db_path,
+        client_id, period, books_pick[0], books_pick[1], recon_type=recon_type,
+        actor=actor, db_path=db_path,
     )
     caveats.extend(books_caveats)
 
@@ -2650,8 +2652,8 @@ def load_canonical_pair(
         })
     else:
         portal_df, portal_caveats = _canonical_frame_for(
-            client, period, portal_pick[0], portal_pick[1], recon_type=recon_type,
-            client_id=client_id, actor=actor, db_path=db_path,
+            client_id, period, portal_pick[0], portal_pick[1], recon_type=recon_type,
+            actor=actor, db_path=db_path,
         )
         caveats.extend(portal_caveats)
 
@@ -2667,7 +2669,7 @@ def load_canonical_pair(
             fn = sel.get(st)
             if not fn:
                 continue
-            p = source_data_path(client, period, st) / fn
+            p = source_data_path(client_id, period, st) / fn
             if p.exists():
                 for note in portal_run_notes(p, st):
                     # When a note register IS supplied the notes are actually

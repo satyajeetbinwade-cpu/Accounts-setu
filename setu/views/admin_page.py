@@ -580,25 +580,25 @@ def _teams_section() -> rx.Component:
                         rx.foreach(
                             AdminState.team_clients,
                             lambda cl: rx.button(
-                                cl,
+                                cl.legal_name,
                                 size="1",
                                 variant="soft",
                                 width="100%",
                                 justify="start",
                                 background=rx.cond(
-                                    AdminState.team_selected_client == cl,
+                                    AdminState.team_selected_client_id == cl.client_id,
                                     t.Color.ACCENT.value,
                                     "transparent",
                                 ),
                                 color=rx.cond(
-                                    AdminState.team_selected_client == cl,
+                                    AdminState.team_selected_client_id == cl.client_id,
                                     "#FFFFFF",
                                     t.Color.TEXT_PRIMARY.value,
                                 ),
                                 border=f"1px solid {t.Color.BORDER.value}",
                                 border_radius="8px",
                                 _hover={"background": "#EEF2F8"},
-                                on_click=AdminState.select_team_client(cl),
+                                on_click=AdminState.select_team_client(cl.client_id.to_string()),
                             ),
                         ),
                         spacing="1",
@@ -614,9 +614,9 @@ def _teams_section() -> rx.Component:
             ),
             c.card(
                 rx.cond(
-                    AdminState.team_selected_client != "",
+                    AdminState.team_selected_client_id != 0,
                     rx.vstack(
-                        rx.text(f"Team for {AdminState.team_selected_client}", style=t.TEXT["card_title"]),
+                        rx.text(f"Team for {AdminState.team_selected_client_name}", style=t.TEXT["card_title"]),
                         rx.cond(
                             AdminState.team_members.length() > 0,
                             rx.vstack(

@@ -257,11 +257,10 @@ def _instruction_form() -> rx.Component:
             ),
             rx.cond(
                 C5State.form_scope == "client",
-                rx.select(
-                    C5State.client_options.map(lambda o: o.legal_name),
-                    on_change=lambda v: C5State.set_form_client_id(
-                        C5State.client_options.filter(lambda o: o.legal_name == v)[0].client_id
-                    ),
+                c.client_picker(
+                    C5State.client_options,
+                    value=C5State.form_client_id,
+                    on_change=C5State.set_form_client_id,
                     placeholder="Select a client",
                     width="280px",
                 ),

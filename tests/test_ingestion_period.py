@@ -144,20 +144,18 @@ def scratch(tmp_path, monkeypatch):
     monkeypatch.setattr("src.shared.discovery.DATA_ROOT", data_root)
 
     conn = recon_db.get_connection(str(db_path))
-    try:
-        from src.documents.schema import init_documents_schema
-        from src.f4.schema import init_f4_schema
+    conn.close()
 
-        init_documents_schema(conn)
-        init_ingestion_ai_schema(conn)
-        init_f4_schema(conn)
-    finally:
-        conn.close()
+    from conftest import seed_client
+    from src import bootstrap
+
+    bootstrap.init_all(db_path)
+    seed_client(db_path, "Test Client")
 
     return {"db_path": str(db_path), "data_root": data_root}
 
 
-def _seed_upload(scratch, *, period, filename="082026_export.xlsx", source_type="gstr2b", client_ref="TestClient"):
+def _seed_upload(scratch, *, period, filename="082026_export.xlsx", source_type="gstr2b"):
     """Create a document + raw_upload + stored ingestion result, and write
     the bytes to disk exactly as the real upload path would."""
     from src.data_paths import source_data_path
@@ -177,8 +175,8 @@ def _seed_upload(scratch, *, period, filename="082026_export.xlsx", source_type=
         )
         idb.upsert_ingestion_result(
             conn,
-            upload_key=normalizer.upload_key(client_ref, period, source_type, filename),
-            client_ref=client_ref, client_id=1, period=period, source_type=source_type,
+            upload_key=normalizer.upload_key(1, period, source_type, filename),
+            client_id=1, period=period, source_type=source_type,
             filename=filename, status="ok", header_row=0, sheet_name=None, sheet_ambiguous=False,
             headers=["gstin"], mapping=[], classification=None, unmapped_required=[],
             warnings=[], row_count_in=1, row_count_out=1, model_used=None, llm_cached=False,
@@ -187,7 +185,7 @@ def _seed_upload(scratch, *, period, filename="082026_export.xlsx", source_type=
     finally:
         conn.close()
 
-    directory = source_data_path(client_ref, period or UNFILED, source_type)
+    directory = source_data_path(1, period or UNFILED, source_type)
     (directory / filename).write_bytes(b"data")
     return upload_id
 
@@ -197,11 +195,11 @@ def test_set_upload_period_moves_rekeys_and_audits(scratch):
     db_path = scratch["db_path"]
     data_root = scratch["data_root"]
 
-    old_dir = data_root / "TestClient" / UNFILED / "gstr2b"
+    old_dir = data_root / "1" / UNFILED / "gstr2b"
     assert (old_dir / "082026_export.xlsx").exists(), "the file starts unfiled on disk"
 
     out = ingestion_ai.set_upload_period(
-        upload_id, PERIOD, actor="tester", client_ref="TestClient", db_path=db_path,
+        upload_id, PERIOD, actor="tester", db_path=db_path,
     )
     assert out["period"] == PERIOD
     assert out["moved"] is True
@@ -215,15 +213,15 @@ def test_set_upload_period_moves_rekeys_and_audits(scratch):
         assert doc["period"] == PERIOD
 
         # 2. the stored result is reachable under the NEW key
-        new_key = normalizer.upload_key("TestClient", PERIOD, "gstr2b", "082026_export.xlsx")
+        new_key = normalizer.upload_key(1, PERIOD, "gstr2b", "082026_export.xlsx")
         assert idb.get_ingestion_result(conn, new_key) is not None
-        old_key = normalizer.upload_key("TestClient", None, "gstr2b", "082026_export.xlsx")
+        old_key = normalizer.upload_key(1, None, "gstr2b", "082026_export.xlsx")
         assert idb.get_ingestion_result(conn, old_key) is None
     finally:
         conn.close()
 
     # 3. the bytes moved, and the unfiled folder is gone
-    assert (data_root / "TestClient" / PERIOD / "gstr2b" / "082026_export.xlsx").exists()
+    assert (data_root / "1" / PERIOD / "gstr2b" / "082026_export.xlsx").exists()
     assert not (old_dir / "082026_export.xlsx").exists()
     assert not old_dir.exists(), "the empty unfiled folder is tidied away"
 
@@ -238,11 +236,11 @@ def test_set_upload_period_rejects_an_invalid_period(scratch):
     upload_id = _seed_upload(scratch, period=None)
     with pytest.raises(ingestion_ai.IngestionAIError):
         ingestion_ai.set_upload_period(
-            upload_id, "-", actor="tester", client_ref="TestClient", db_path=scratch["db_path"],
+            upload_id, "-", actor="tester", db_path=scratch["db_path"],
         )
     with pytest.raises(ingestion_ai.IngestionAIError):
         ingestion_ai.set_upload_period(
-            upload_id, "Aug 2026", actor="tester", client_ref="TestClient", db_path=scratch["db_path"],
+            upload_id, "Aug 2026", actor="tester", db_path=scratch["db_path"],
         )
 
 
@@ -259,13 +257,13 @@ def test_materialize_refuses_to_write_the_unfiled_sentinel(scratch):
     must never be written to the unreachable `-` folder."""
     upload_id = _seed_upload(scratch, period=None)
     # Remove the seeded file so we can prove nothing new is written.
-    (scratch["data_root"] / "TestClient" / UNFILED / "gstr2b" / "082026_export.xlsx").unlink()
+    (scratch["data_root"] / "1" / UNFILED / "gstr2b" / "082026_export.xlsx").unlink()
 
     result = ingestion_ai.materialize_upload_to_disk(
-        upload_id, client_ref="TestClient", db_path=scratch["db_path"],
+        upload_id, db_path=scratch["db_path"],
     )
     assert result is None
-    assert not (scratch["data_root"] / "TestClient" / UNFILED / "gstr2b" / "082026_export.xlsx").exists()
+    assert not (scratch["data_root"] / "1" / UNFILED / "gstr2b" / "082026_export.xlsx").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +277,11 @@ def test_discovery_labels_and_excludes_the_unfiled_period(scratch):
     _seed_upload(scratch, period=None, filename="unfiled.xlsx")
     _seed_upload(scratch, period=PERIOD, filename="filed.xlsx")
 
-    all_periods = discovery.list_periods("TestClient")
+    all_periods = discovery.list_periods(1)
     assert UNFILED in all_periods, "an unfiled file must never be silently invisible"
     assert PERIOD in all_periods
 
-    reconcilable = discovery.reconcilable_periods("TestClient")
+    reconcilable = discovery.reconcilable_periods(1)
     assert UNFILED not in reconcilable
     assert PERIOD in reconcilable
 
@@ -294,5 +292,5 @@ def test_source_file_status_still_finds_unfiled_files(scratch):
     from src.shared import discovery
 
     _seed_upload(scratch, period=None, filename="unfiled.xlsx")
-    status = discovery.source_file_status("TestClient", UNFILED, "GST")
+    status = discovery.source_file_status(1, UNFILED, "GST")
     assert "unfiled.xlsx" in status["gstr2b"]["files"]

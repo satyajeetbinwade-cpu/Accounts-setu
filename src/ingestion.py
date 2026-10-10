@@ -109,7 +109,7 @@ def _resolve_recon_type(source_type: str, recon_type: Optional[str]) -> str:
 
 
 def _find_source_file(
-    client: str, period: str, source_type: str, recon_type: Optional[str] = None
+    client_id: int, period: str, source_type: str, recon_type: Optional[str] = None
 ) -> Optional[str]:
     """Return the first CSV/Excel filename found in the source dir, or None.
 
@@ -121,7 +121,7 @@ def _find_source_file(
     ``load_source_file``'s explicit column validation still raises the clear,
     actionable error rather than silently misbehaving.
     """
-    directory = source_data_path(client, period, source_type)
+    directory = source_data_path(client_id, period, source_type)
     candidates: list[Path] = []
     for pattern in ("*.csv", "*.xlsx", "*.xls"):
         candidates.extend(sorted(directory.glob(pattern)))
@@ -266,7 +266,7 @@ def _trim_strings(df: pd.DataFrame, fields: list[str]) -> None:
 
 
 def load_source_file(
-    client: str,
+    client_id: int,
     period: str,
     source_type: str,
     filename: str,
@@ -283,7 +283,7 @@ def load_source_file(
         GST_CANONICAL_FIELDS if resolved_recon_type == "GST" else TDS_CANONICAL_FIELDS
     )
 
-    directory = source_data_path(client, period, source_type)
+    directory = source_data_path(client_id, period, source_type)
     path = directory / filename
     if not path.exists():
         raise FileNotFoundError(f"Source file not found: {path}")
@@ -394,7 +394,7 @@ def _print_validation_summary(
 
 
 def load_gst_pair(
-    client: str,
+    client_id: int,
     period: str,
     selected_files: Optional[dict[str, str]] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -406,26 +406,26 @@ def load_gst_pair(
     the previous behaviour of scanning the source directory.
     """
     sel = selected_files or {}
-    books_file = sel.get("tally") or _find_source_file(client, period, "tally", recon_type="GST")
+    books_file = sel.get("tally") or _find_source_file(client_id, period, "tally", recon_type="GST")
     if not books_file:
         raise FileNotFoundError(
-            f"No 'tally' source file found for client={client!r} period={period!r}"
+            f"No 'tally' source file found for client_id={client_id!r} period={period!r}"
         )
-    books_df = load_source_file(client, period, "tally", books_file, recon_type="GST")
+    books_df = load_source_file(client_id, period, "tally", books_file, recon_type="GST")
 
     for portal_source in ("gstr2b", "ims"):
-        portal_file = sel.get(portal_source) or _find_source_file(client, period, portal_source)
+        portal_file = sel.get(portal_source) or _find_source_file(client_id, period, portal_source)
         if portal_file:
-            portal_df = load_source_file(client, period, portal_source, portal_file)
+            portal_df = load_source_file(client_id, period, portal_source, portal_file)
             return books_df, portal_df
 
     raise FileNotFoundError(
-        f"No 'gstr2b' or 'ims' source file found for client={client!r} period={period!r}"
+        f"No 'gstr2b' or 'ims' source file found for client_id={client_id!r} period={period!r}"
     )
 
 
 def load_tds_pair(
-    client: str,
+    client_id: int,
     period: str,
     selected_files: Optional[dict[str, str]] = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -434,21 +434,21 @@ def load_tds_pair(
     ``selected_files`` maps source_type -> filename (see load_gst_pair).
     """
     sel = selected_files or {}
-    books_file = sel.get("tally") or _find_source_file(client, period, "tally", recon_type="TDS")
+    books_file = sel.get("tally") or _find_source_file(client_id, period, "tally", recon_type="TDS")
     if not books_file:
         raise FileNotFoundError(
-            f"No 'tally' source file found for client={client!r} period={period!r}"
+            f"No 'tally' source file found for client_id={client_id!r} period={period!r}"
         )
-    books_df = load_source_file(client, period, "tally", books_file, recon_type="TDS")
+    books_df = load_source_file(client_id, period, "tally", books_file, recon_type="TDS")
 
     for portal_source in ("form26as", "tds"):
-        portal_file = sel.get(portal_source) or _find_source_file(client, period, portal_source)
+        portal_file = sel.get(portal_source) or _find_source_file(client_id, period, portal_source)
         if portal_file:
-            portal_df = load_source_file(client, period, portal_source, portal_file)
+            portal_df = load_source_file(client_id, period, portal_source, portal_file)
             return books_df, portal_df
 
     raise FileNotFoundError(
-        f"No 'form26as' or 'tds' source file found for client={client!r} period={period!r}"
+        f"No 'form26as' or 'tds' source file found for client_id={client_id!r} period={period!r}"
     )
 
 
@@ -486,9 +486,9 @@ def _normalize_header(name: Any) -> str:
     return re.sub(r"[\s._\-/]", "", str(name).strip().lower())
 
 
-def load_other_source_file(client: str, period: str, source_type: str, filename: str) -> pd.DataFrame:
+def load_other_source_file(client_id: int, period: str, source_type: str, filename: str) -> pd.DataFrame:
     """Load a 2C source file into the generic 2C canonical frame."""
-    directory = source_data_path(client, period, source_type)
+    directory = source_data_path(client_id, period, source_type)
     path = directory / filename
     if not path.exists():
         raise FileNotFoundError(f"Source file not found: {path}")
@@ -547,7 +547,7 @@ def _normalize_dates_flexible(series: pd.Series, *, field: str = "", context: st
 
 
 def load_other_pair(
-    client: str,
+    client_id: int,
     period: str,
     source_key: str,
     selected_files: Optional[dict[str, str]] = None,
@@ -559,17 +559,17 @@ def load_other_pair(
     same tally export used by 2A/2B, read through the generic 2C loader.
     """
     sel = selected_files or {}
-    books_file = sel.get("tally") or _find_source_file(client, period, "tally")
+    books_file = sel.get("tally") or _find_source_file(client_id, period, "tally")
     if not books_file:
         raise FileNotFoundError(
-            f"No 'tally' source file found for client={client!r} period={period!r}"
+            f"No 'tally' source file found for client_id={client_id!r} period={period!r}"
         )
-    books_df = load_other_source_file(client, period, "tally", books_file)
+    books_df = load_other_source_file(client_id, period, "tally", books_file)
 
-    portal_file = sel.get(source_key) or _find_source_file(client, period, source_key)
+    portal_file = sel.get(source_key) or _find_source_file(client_id, period, source_key)
     if not portal_file:
         raise FileNotFoundError(
-            f"No {source_key!r} source file found for client={client!r} period={period!r}"
+            f"No {source_key!r} source file found for client_id={client_id!r} period={period!r}"
         )
-    portal_df = load_other_source_file(client, period, source_key, portal_file)
+    portal_df = load_other_source_file(client_id, period, source_key, portal_file)
     return books_df, portal_df

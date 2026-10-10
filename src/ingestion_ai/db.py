@@ -261,7 +261,7 @@ def untrust_shapes_for_profile(
 
 
 def delete_shape(
-    conn: sqlite3.Connection, *, client_ref: str, source_type: str, header_signature: str,
+    conn: sqlite3.Connection, *, client_id: int, source_type: str, header_signature: str,
 ) -> int:
     """Delete a cached shape so the next ingest of this file shape re-maps.
 
@@ -272,9 +272,9 @@ def delete_shape(
     cur = conn.execute(
         """
         DELETE FROM ingestion_shape_cache
-        WHERE client_ref = ? AND source_type = ? AND header_signature = ?
+        WHERE client_id = ? AND source_type = ? AND header_signature = ?
         """,
-        (client_ref, source_type, header_signature),
+        (int(client_id), source_type, header_signature),
     )
     conn.commit()
     return cur.rowcount or 0
@@ -297,8 +297,8 @@ def rekey_ingestion_result(
 ) -> int:
     """Move a stored ingestion result to a new period.
 
-    The upload key EMBEDS the period (``"<client>/<period>/<source_type>/
-    <filename>"``), so re-filing a document under a different period must
+    The upload key EMBEDS the period ("<client_id>/<period>/<source_type>/
+    <filename>"), so re-filing a document under a different period must
     re-key its result row as well. Moving the bytes on disk alone would
     leave the Reconcile slot reading "not ingested yet", because the slot
     looks the result up by the NEW key.
@@ -337,25 +337,25 @@ def _decode_shape_row(row: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]
 
 
 def get_shape(
-    conn: sqlite3.Connection, *, client_ref: str, source_type: str, header_signature: str,
+    conn: sqlite3.Connection, *, client_id: int, source_type: str, header_signature: str,
 ) -> Optional[dict[str, Any]]:
     return _decode_shape_row(
         _row_to_dict(
             conn,
             """
             SELECT * FROM ingestion_shape_cache
-            WHERE client_ref = ? AND source_type = ? AND header_signature = ?
+            WHERE client_id = ? AND source_type = ? AND header_signature = ?
             """,
-            (client_ref, source_type, header_signature),
+            (int(client_id), source_type, header_signature),
         )
     )
 
 
 def upsert_shape(
-    conn: sqlite3.Connection, *, client_ref: str, source_type: str, header_signature: str,
+    conn: sqlite3.Connection, *, client_id: int, source_type: str, header_signature: str,
     headers: list[str], mapping: dict[str, Any], classification: Optional[dict[str, Any]],
     model_used: Optional[str], confidence_floor: Optional[float], trusted: bool, source: str,
-    client_id: Optional[int], actor: str,
+    actor: str,
 ) -> int:
     """Insert or refresh a shape row. `times_used` is deliberately NOT
     reset on update — it accumulates across reuse."""
@@ -363,12 +363,11 @@ def upsert_shape(
     conn.execute(
         """
         INSERT INTO ingestion_shape_cache
-            (client_id, client_ref, source_type, header_signature, headers_json, mapping_json,
+            (client_id, source_type, header_signature, headers_json, mapping_json,
              classification_json, model_used, confidence_floor, trusted, source,
              times_used, created_by, created_at, updated_at, last_used_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-        ON CONFLICT(client_ref, source_type, header_signature) DO UPDATE SET
-            client_id = excluded.client_id,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        ON CONFLICT(client_id, source_type, header_signature) DO UPDATE SET
             headers_json = excluded.headers_json,
             mapping_json = excluded.mapping_json,
             classification_json = excluded.classification_json,
@@ -379,7 +378,7 @@ def upsert_shape(
             updated_at = excluded.updated_at
         """,
         (
-            client_id, client_ref, source_type, header_signature,
+            int(client_id), source_type, header_signature,
             json.dumps(headers), json.dumps(mapping),
             json.dumps(classification) if classification else None,
             model_used, confidence_floor, int(trusted), source, actor, now, now, now,
@@ -389,9 +388,9 @@ def upsert_shape(
     row = conn.execute(
         """
         SELECT shape_id FROM ingestion_shape_cache
-        WHERE client_ref = ? AND source_type = ? AND header_signature = ?
+        WHERE client_id = ? AND source_type = ? AND header_signature = ?
         """,
-        (client_ref, source_type, header_signature),
+        (int(client_id), source_type, header_signature),
     ).fetchone()
     return row[0]
 
@@ -418,13 +417,13 @@ def set_shape_trust(conn: sqlite3.Connection, shape_id: int, trusted: bool) -> N
 
 
 def list_shapes(
-    conn: sqlite3.Connection, *, client_ref: Optional[str] = None, source_type: Optional[str] = None,
+    conn: sqlite3.Connection, *, client_id: Optional[int] = None, source_type: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM ingestion_shape_cache WHERE 1=1"
     params: list[Any] = []
-    if client_ref:
-        sql += " AND client_ref = ?"
-        params.append(client_ref)
+    if client_id is not None:
+        sql += " AND client_id = ?"
+        params.append(int(client_id))
     if source_type:
         sql += " AND source_type = ?"
         params.append(source_type)
@@ -439,7 +438,7 @@ def list_shapes(
 
 
 def upsert_ingestion_result(
-    conn: sqlite3.Connection, *, upload_key: str, client_ref: str, client_id: Optional[int],
+    conn: sqlite3.Connection, *, upload_key: str, client_id: int,
     period: Optional[str], source_type: str, filename: str, status: str, header_row: Optional[int],
     sheet_name: Optional[str], sheet_ambiguous: bool, headers: list[str], mapping: list[dict[str, Any]],
     classification: Optional[dict[str, Any]], unmapped_required: list[str], warnings: list[str],
@@ -455,12 +454,12 @@ def upsert_ingestion_result(
     conn.execute(
         """
         INSERT INTO ingestion_results
-            (upload_key, client_ref, client_id, period, source_type, filename, status, header_row,
+            (upload_key, client_id, period, source_type, filename, status, header_row,
              sheet_name, sheet_ambiguous, headers_json, mapping_json, classification_json,
              unmapped_required_json, warnings_json, notes_json, message, row_count_in, row_count_out,
              model_used, llm_cached, validation_json, metadata_json, rate_matrix_json,
              dispositions_json, ingestion_path, created_at, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(upload_key) DO UPDATE SET
             client_id = excluded.client_id,
             period = excluded.period,
@@ -488,7 +487,7 @@ def upsert_ingestion_result(
             created_by = excluded.created_by
         """,
         (
-            upload_key, client_ref, client_id, period, source_type, filename, status, header_row,
+            upload_key, int(client_id), period, source_type, filename, status, header_row,
             sheet_name, int(sheet_ambiguous), json.dumps(headers), json.dumps(mapping),
             json.dumps(classification) if classification else None,
             json.dumps(unmapped_required), json.dumps(warnings), json.dumps(notes or []),
@@ -534,8 +533,8 @@ def find_ingestion_result(
 ) -> Optional[dict[str, Any]]:
     """Look up a persisted ingestion result WITHOUT composing the upload key.
 
-    The key is ``"<client_ref>/<period>/<source_type>/<filename>"``, but
-    ``raw_uploads`` stores neither the client_ref nor the period — so a
+    The key is "<client_id>/<period>/<source_type>/<filename>", but
+    ``raw_uploads`` stores neither the client name nor the period — so a
     caller holding only a raw_upload row cannot rebuild the key and would
     silently read back nothing (which is exactly how a file that genuinely
     read 37 rows came to be displayed as "0 row(s) read"). Matching on the
@@ -599,13 +598,13 @@ def list_raw_uploads_with_context(
 
 
 def list_ingestion_results(
-    conn: sqlite3.Connection, *, client_ref: Optional[str] = None, source_type: Optional[str] = None,
+    conn: sqlite3.Connection, *, client_id: Optional[int] = None, source_type: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM ingestion_results WHERE 1=1"
     params: list[Any] = []
-    if client_ref:
-        sql += " AND client_ref = ?"
-        params.append(client_ref)
+    if client_id is not None:
+        sql += " AND client_id = ?"
+        params.append(int(client_id))
     if source_type:
         sql += " AND source_type = ?"
         params.append(source_type)

@@ -96,7 +96,7 @@ def context_bar() -> rx.Component:
         rx.hstack(
             c.client_picker(
                 ReconcileState.clients,
-                value=ReconcileState.ctx_client,
+                value=ReconcileState.ctx_client_id,
                 on_change=ReconcileState.set_ctx_client,
                 width="190px",
                 size="1",

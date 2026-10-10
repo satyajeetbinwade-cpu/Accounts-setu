@@ -566,6 +566,11 @@ class InvoiceExtractState(SharedUploadState):
         self._load_uploads()
 
     @rx.event
+    def set_export_client(self, v: str):
+        self.export_client_id = _to_int(v)
+        self._load_export()
+
+    @rx.event
     def set_upload_client_by_name(self, name: str):
         self.upload_client_id = self._id_for_name(name)
         self._load_uploads()

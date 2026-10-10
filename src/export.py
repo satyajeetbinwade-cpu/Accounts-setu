@@ -17,7 +17,7 @@ import yaml
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
-from src.data_paths import DATA_ROOT
+from src.data_paths import exports_dir
 from src.queries import get_results, get_run, get_run_summary
 
 _MATCH_REASON_WIDTH = 90
@@ -25,10 +25,17 @@ _DEFAULT_COL_WIDTH = 22
 _WRAP_COLUMNS = {"match_reason"}
 
 
-def _exports_dir(client: str, period: str) -> Path:
-    d = DATA_ROOT / client / period / "exports"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+def _client_name(client_id, *, db_path=None) -> str:
+    """The client's CURRENT legal name (display only — identity is client_id)."""
+    try:
+        from src.clients import service as clients
+
+        c = clients.get_client(int(client_id), db_path=db_path)
+        if c:
+            return str(c["legal_name"])
+    except Exception:  # noqa: BLE001
+        pass
+    return f"#{client_id}"
 
 
 def _flatten_record_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -87,7 +94,7 @@ def _write_sheet(writer, sheet_name: str, df: pd.DataFrame) -> None:
             ws.column_dimensions[letter].width = min(max(max_len + 2, 10), _DEFAULT_COL_WIDTH)
 
 
-def _write_summary_sheet(writer, run: dict[str, Any], summary: dict[str, Any]) -> None:
+def _write_summary_sheet(writer, run: dict[str, Any], summary: dict[str, Any], client_name: str) -> None:
     ws = writer.book.create_sheet("Summary", 0)
 
     ws["A1"] = "Run Summary"
@@ -95,7 +102,7 @@ def _write_summary_sheet(writer, run: dict[str, Any], summary: dict[str, Any]) -
 
     rows = [
         ("Run ID", run["run_id"]),
-        ("Client", run["client"]),
+        ("Client", client_name),
         ("Period", run["period"]),
         ("Recon Type", run["recon_type"]),
         ("Run Timestamp", run["run_timestamp"]),
@@ -154,7 +161,7 @@ def export_run(run_id: int, output_path: str | Path | None = None, *, db_path=No
     a Summary sheet. Returns the path written.
 
     If output_path is None, writes to
-    data/{client}/{period}/exports/{recon_type}_run{run_id}_{timestamp}.xlsx
+    data/{client_id}/{period}/exports/{recon_type}_run{run_id}_{timestamp}.xlsx
     """
     run = get_run(run_id, db_path=db_path)
     if run is None:
@@ -162,11 +169,12 @@ def export_run(run_id: int, output_path: str | Path | None = None, *, db_path=No
 
     results_df = get_results(run_id, db_path=db_path)
     summary = get_run_summary(run_id, db_path=db_path)
+    client_name = _client_name(run["client_id"], db_path=db_path)
 
     if output_path is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         fname = f"{run['recon_type']}_run{run_id}_{ts}.xlsx"
-        output_path = _exports_dir(run["client"], run["period"]) / fname
+        output_path = exports_dir(run["client_id"], run["period"]) / fname
     else:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -181,6 +189,6 @@ def export_run(run_id: int, output_path: str | Path | None = None, *, db_path=No
             sheet_name = classification[:31]  # Excel sheet name limit
             _write_sheet(writer, sheet_name, sheet_df)
 
-        _write_summary_sheet(writer, run, summary)
+        _write_summary_sheet(writer, run, summary, client_name)
 
     return output_path

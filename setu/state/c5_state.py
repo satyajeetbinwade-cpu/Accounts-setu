@@ -265,8 +265,11 @@ class C5State(AuthState):
     def set_form_scope(self, v: str):
         self.form_scope = v
 
-    def set_form_client_id(self, v: int):
-        self.form_client_id = v
+    def set_form_client_id(self, v):
+        try:
+            self.form_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.form_client_id = 0
 
     def set_form_summary(self, v: str):
         self.form_summary = v

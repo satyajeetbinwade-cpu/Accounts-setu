@@ -110,12 +110,9 @@ def _rule_row(rule) -> rx.Component:
             # Client picker (override scope only)
             rx.cond(
                 RulesState.scope[key] == "client",
-                rx.select(
-                    RulesState.client_options.map(lambda o: o.legal_name),
-                    on_change=lambda v: RulesState.set_client_for_rule(
-                        key,
-                        RulesState.client_options.filter(lambda o: o.legal_name == v)[0].client_id,
-                    ),
+                c.client_picker(
+                    RulesState.client_options,
+                    on_change=lambda v: RulesState.set_client_for_rule_value(key, v),
                     placeholder="Select a client",
                     width="280px",
                 ),

@@ -185,7 +185,7 @@ def _slot_info(monkeypatch, stored, source_type="credit_notes"):
 
     monkeypatch.setattr(rs.ingestion_ai, "get_stored_result", lambda *a, **k: stored)
     return rs.ReconcileState._slot_info(
-        SimpleNamespace(ctx_client="C", ctx_period="2026-08"), source_type, "Note Register.xlsx"
+        SimpleNamespace(ctx_client_id=1, ctx_period="2026-08"), source_type, "Note Register.xlsx"
     )
 
 

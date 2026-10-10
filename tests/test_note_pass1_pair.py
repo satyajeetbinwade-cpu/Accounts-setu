@@ -25,6 +25,7 @@ from src.config_loader import load_config
 from src.ingestion_ai import f6_bridge
 
 CLIENT = "Pair Client"
+CLIENT_ID = 1
 PERIOD = "2025-04"
 
 BOOKS_GSTIN = "07AAAAA0000A1ZZ"
@@ -118,11 +119,11 @@ def _write_portal(path, data=None):
 def filed(tmp_path):
     """Both files filed for the period, under a private DATA_ROOT."""
     root = tmp_path / "data"
-    (root / CLIENT / PERIOD / "credit_notes").mkdir(parents=True)
-    (root / CLIENT / PERIOD / "gstr2b").mkdir(parents=True)
+    (root / str(CLIENT_ID) / PERIOD / "credit_notes").mkdir(parents=True)
+    (root / str(CLIENT_ID) / PERIOD / "gstr2b").mkdir(parents=True)
 
-    register = root / CLIENT / PERIOD / "credit_notes" / "Credit Note.xlsx"
-    portal = root / CLIENT / PERIOD / "gstr2b" / "GSTR2B.xlsx"
+    register = root / str(CLIENT_ID) / PERIOD / "credit_notes" / "Credit Note.xlsx"
+    portal = root / str(CLIENT_ID) / PERIOD / "gstr2b" / "GSTR2B.xlsx"
     _write_register(register)
     _write_portal(portal)
 
@@ -159,8 +160,8 @@ def pair_factory(tmp_path):
     def build(register_rows, cdnr_data):
         counter["n"] += 1
         root = data_paths.DATA_ROOT
-        notes_dir = root / CLIENT / PERIOD / "credit_notes"
-        portal_dir = root / CLIENT / PERIOD / "gstr2b"
+        notes_dir = root / str(CLIENT_ID) / PERIOD / "credit_notes"
+        portal_dir = root / str(CLIENT_ID) / PERIOD / "gstr2b"
         notes_dir.mkdir(parents=True, exist_ok=True)
         portal_dir.mkdir(parents=True, exist_ok=True)
 
@@ -171,8 +172,11 @@ def pair_factory(tmp_path):
 
         db = tmp_path / f"pair{counter['n']}.db"
         bootstrap.init_all(str(db))
+        from conftest import seed_client
+
+        seed_client(db, CLIENT)
         books, portal_frame, _adjacent, warnings = load_note_frames(
-            CLIENT, PERIOD,
+            CLIENT_ID, PERIOD,
             selected_files={"credit_notes": register.name, "gstr2b": portal.name},
             actor="test", db_path=str(db),
         )
@@ -287,9 +291,12 @@ def test_the_note_matches_on_the_primary_reference_key(filed, tmp_path):
 
     db = tmp_path / "pair.db"
     bootstrap.init_all(str(db))
+    from conftest import seed_client
+
+    seed_client(db, CLIENT)
 
     books, portal, adjacent, warnings = load_note_frames(
-        CLIENT, PERIOD,
+        CLIENT_ID, PERIOD,
         selected_files={"credit_notes": filed["credit_notes"], "gstr2b": filed["gstr2b"]},
         actor="test", db_path=str(db),
     )
@@ -328,8 +335,11 @@ def test_the_matched_note_is_not_an_invoice_row(filed, tmp_path):
 
     db = tmp_path / "pair2.db"
     bootstrap.init_all(str(db))
+    from conftest import seed_client
+
+    seed_client(db, CLIENT)
     books, portal, _adjacent, _warnings = load_note_frames(
-        CLIENT, PERIOD,
+        CLIENT_ID, PERIOD,
         selected_files={"credit_notes": filed["credit_notes"], "gstr2b": filed["gstr2b"]},
         actor="test", db_path=str(db),
     )

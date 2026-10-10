@@ -116,9 +116,9 @@ def _calendar() -> rx.Component:
                 c.section_title("Build / refresh calendar"),
                 rx.hstack(
                     c.client_picker(
-                        FilingState.client_options.map(lambda o: o.legal_name),
-                        value=FilingState.build_client_name,
-                        on_change=FilingState.set_build_client_by_name,
+                        FilingState.client_options,
+                        value=FilingState.build_client_id,
+                        on_change=FilingState.set_build_client,
                         width="240px",
                     ),
                     rx.vstack(
@@ -197,9 +197,9 @@ def _new_filing_form() -> rx.Component:
             ),
             rx.hstack(
                 c.client_picker(
-                    FilingState.client_options.map(lambda o: o.legal_name),
-                    value=FilingState.new_client_name,
-                    on_change=FilingState.set_new_client_by_name,
+                    FilingState.client_options,
+                    value=FilingState.new_client_id,
+                    on_change=FilingState.set_new_client,
                     width="240px",
                 ),
                 rx.vstack(
@@ -680,9 +680,9 @@ def _sources() -> rx.Component:
                 "credentials are configured in C4; manual upload always remains available.",
             ),
             c.client_picker(
-                FilingState.client_options.map(lambda o: o.legal_name),
-                value=FilingState.source_client_name,
-                on_change=FilingState.set_source_client_by_name,
+                FilingState.client_options,
+                value=FilingState.source_client_id,
+                on_change=FilingState.set_source_client,
                 width="240px",
             ),
             rx.cond(

@@ -174,12 +174,12 @@ def _upload_section() -> rx.Component:
         rx.hstack(
             rx.vstack(
                 rx.text("Client", style=t.TEXT["label"]),
-                rx.select(
-                    F6State.client_options.map(lambda o: o.legal_name),
-                    on_change=lambda v: F6State.set_upload_client(
-                        F6State.client_options.filter(lambda o: o.legal_name == v)[0].client_id.to_string()
-                    ),
-                    placeholder="Select a client", width="240px",
+                c.client_picker(
+                    F6State.client_options,
+                    value=F6State.upload_client_id,
+                    on_change=F6State.set_upload_client,
+                    placeholder="Select a client",
+                    width="240px",
                 ),
                 spacing="1", align="start",
             ),

@@ -16,31 +16,6 @@ from src import queries
 from src.reconciliation import review
 
 
-def resolve_client_id(folder: str, *, db_path=None) -> Optional[int]:
-    """Map a run's client FOLDER to its client_id, tolerantly (the folder name
-    and the registered legal name differ in punctuation and spacing)."""
-    def norm(name: str) -> str:
-        return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-    try:
-        from src.clients import service as clients
-
-        candidates = clients.list_clients(include_inactive=True)
-    except Exception:  # noqa: BLE001
-        return None
-    target = norm(folder)
-    if not target:
-        return None
-    for c in candidates:
-        if norm(c["legal_name"]) == target:
-            return c["client_id"]
-    for c in candidates:
-        n = norm(c["legal_name"])
-        if target and (n.startswith(target) or target.startswith(n)):
-            return c["client_id"]
-    return None
-
-
 def client_gstin_for(client_id: Optional[int], *, db_path=None) -> str:
     """The SELECTED CLIENT's own GSTIN, or "".
 
@@ -114,9 +89,9 @@ def load_run_model(
         raise ValueError(f"Run {run_id} not found")
 
     rows = queries.get_results(run_id, db_path=db_path).to_dict("records")
-    folder = run.get("client") or ""
     recon_type = run.get("recon_type") or "GST"
-    client_id = resolve_client_id(folder, db_path=db_path)
+    client_id = run.get("client_id")
+    client_id = int(client_id) if client_id is not None else None
 
     materiality_key = {
         "GST": "materiality.gst", "TDS": "materiality.tds", "OTHER": "materiality.other",

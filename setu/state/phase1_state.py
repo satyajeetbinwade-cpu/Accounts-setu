@@ -52,6 +52,21 @@ class RunSummary:
 
 
 @dataclass
+class ClientOption:
+    """A client selector row: identity is ``client_id``, the label is the
+    current legal name."""
+
+    client_id: int
+    legal_name: str
+
+
+def _client_name(client_id) -> str:
+    """The current display name for a client_id (identity is always the id)."""
+    opt = discovery.client_option(client_id)
+    return opt["display_name"] if opt else f"#{client_id}"
+
+
+@dataclass
 class ClassCount:
     label: str
     count: int
@@ -104,11 +119,11 @@ class Phase1State(PeriodPickerMixin, AuthState):
     # ------------------------------------------------------------------
     # Context (client / period / recon type / selected run)
     # ------------------------------------------------------------------
-    clients: list[str] = []
+    clients: list[ClientOption] = []
     recon_types: list[str] = []
     runs: list[RunSummary] = []
 
-    ctx_client: str = ""
+    ctx_client_id: int = 0
     ctx_period: str = ""
     ctx_recon_type: str = ""
     selected_run_id: int = 0
@@ -186,7 +201,10 @@ class Phase1State(PeriodPickerMixin, AuthState):
     # ==================================================================
     @rx.event
     def load(self):
-        self.clients = discovery.list_clients()
+        self.clients = [
+            ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
+            for c in discovery.list_clients()
+        ]
         self.recon_types = list(discovery.RECON_TYPES)
         # No default client/period/recon type: the pickers stay on their
         # placeholders until the user chooses deliberately.
@@ -218,7 +236,10 @@ class Phase1State(PeriodPickerMixin, AuthState):
 
     @rx.event
     def set_ctx_client(self, v: str):
-        self.ctx_client = v
+        try:
+            self.ctx_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.ctx_client_id = 0
         self.selected_run_id = 0
         # A different client invalidates the period and the run selection.
         self.reset_period()
@@ -238,18 +259,18 @@ class Phase1State(PeriodPickerMixin, AuthState):
         self._on_context_changed()
 
     def _load_runs(self) -> None:
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             self.runs = []
             return
         df = queries.list_runs(
-            client=self.ctx_client, period=self.ctx_period, recon_type=self.ctx_recon_type
+            client_id=self.ctx_client_id, period=self.ctx_period, recon_type=self.ctx_recon_type
         )
         rows: list[RunSummary] = []
         for _, r in df.iterrows():
             rows.append(
                 RunSummary(
                     run_id=int(r["run_id"]),
-                    client=r["client"],
+                    client=str(r.get("client_name_at_run") or ""),
                     period=r["period"],
                     recon_type=r["recon_type"],
                     timestamp=str(r.get("run_timestamp") or "").replace("T", " ").split(".")[0],
@@ -267,7 +288,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
 
     @rx.var
     def has_context(self) -> bool:
-        return bool(self.ctx_client and self.ctx_period and self.ctx_recon_type)
+        return bool(self.ctx_client_id and self.ctx_period and self.ctx_recon_type)
 
     @rx.var
     def period_is_unfiled(self) -> bool:
@@ -281,10 +302,10 @@ class Phase1State(PeriodPickerMixin, AuthState):
     # Run tool
     # ==================================================================
     def _load_slots(self) -> None:
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             self.slots = []
             return
-        status = discovery.source_file_status(self.ctx_client, self.ctx_period, self.ctx_recon_type)
+        status = discovery.source_file_status(self.ctx_client_id, self.ctx_period, self.ctx_recon_type)
         books_types = set(discovery.BOOKS_SOURCE_TYPES)
         out: list[SourceSlot] = []
         for source_type in discovery.RECON_SOURCE_TYPES[self.ctx_recon_type]:
@@ -312,7 +333,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
     def _file_runnable(self, source_type: str, filename: str) -> tuple[bool, str]:
         try:
             stored = ingestion_ai.get_stored_result(
-                self.ctx_client, self.ctx_period, source_type, filename
+                self.ctx_client_id, self.ctx_period, source_type, filename
             )
         except Exception as exc:  # noqa: BLE001
             return False, f"Couldn't read ingestion state: {exc}"
@@ -385,7 +406,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
         self.flash = ""
         self.run_result = ""
         self.run_caveats = []
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             self.error = "Pick a client, period, and recon type first."
             return
         if period_utils.is_unfiled(self.ctx_period):
@@ -395,12 +416,13 @@ class Phase1State(PeriodPickerMixin, AuthState):
             )
             return
         selected_files = {s.source_type: s.selected for s in self.slots if s.selected}
-        client_id = _client_id_for_folder(self.ctx_client)
+        client_id = self.ctx_client_id
         try:
             config = load_config()
             run_id = execute_run(
-                self.ctx_client, self.ctx_period, self.ctx_recon_type, None, config,
-                selected_files=selected_files, client_id=client_id, actor=self.username,
+                self.ctx_client_id, _client_name(self.ctx_client_id),
+                self.ctx_period, self.ctx_recon_type, None, config,
+                selected_files=selected_files, actor=self.username,
             )
         except RunExecutionError as exc:
             self.error = str(exc)
@@ -422,7 +444,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
 
         run = queries.get_run(run_id) or {}
         self.run_caveats = [c.get("label") or c.get("code") or "" for c in (run.get("caveats") or [])]
-        self.flash = f"Run {run_id} complete for {self.ctx_client} / {self.ctx_period} / {self.ctx_recon_type}."
+        self.flash = f"Run {run_id} complete for {_client_name(self.ctx_client_id)} / {self.ctx_period} / {self.ctx_recon_type}."
         self.run_result = str(run_id)
         self._load_runs()
         self.selected_run_id = run_id
@@ -551,7 +573,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
         if row is None:
             return
         queries.mark_reviewed(
-            self.ctx_client, self.ctx_period, self.ctx_recon_type,
+            self.ctx_client_id, self.ctx_period, self.ctx_recon_type,
             row.get("fingerprint"), note=self.review_note or None, result=row,
         )
         self.flash = "Marked reviewed."
@@ -564,7 +586,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
         if row is None:
             return
         queries.clear_review(
-            self.ctx_client, self.ctx_period, self.ctx_recon_type, row.get("fingerprint")
+            self.ctx_client_id, self.ctx_period, self.ctx_recon_type, row.get("fingerprint")
         )
         self.flash = "Review cleared."
         self.selected_result_id = 0
@@ -834,27 +856,6 @@ def _record_fields(record, differing: set[str]) -> list[RecordField]:
             )
         )
     return out
-
-
-def _client_id_for_folder(folder: str) -> int | None:
-    from src.clients import service as clients
-
-    def norm(name: str) -> str:
-        return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-    try:
-        candidates = clients.list_clients(include_inactive=True)
-    except Exception:  # noqa: BLE001
-        return None
-    target = norm(folder)
-    for c in candidates:
-        if norm(c["legal_name"]) == target:
-            return c["client_id"]
-    for c in candidates:
-        n = norm(c["legal_name"])
-        if target and (n.startswith(target) or target.startswith(n)):
-            return c["client_id"]
-    return None
 
 
 _SYNC_SOURCE_FOR = {

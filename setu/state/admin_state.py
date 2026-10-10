@@ -85,6 +85,14 @@ class SecurityEventRow:
     created_at: str
 
 
+@dataclass
+class ClientOption:
+    """A client the teams editor can scope to: identity is ``client_id``."""
+
+    client_id: int
+    legal_name: str
+
+
 def _fmt(ts) -> str:
     if not ts:
         return ""
@@ -138,8 +146,8 @@ class AdminState(AuthState):
     lookup_holder_users: list[HolderUserRow] = []
 
     # ---- Clients & Teams ------------------------------------------------
-    team_clients: list[str] = []
-    team_selected_client: str = ""
+    team_clients: list[ClientOption] = []
+    team_selected_client_id: int = 0
     team_members: list[HolderUserRow] = []  # reuse: user_id/display_name/role_name
     team_addable: list[HolderUserRow] = []
 
@@ -253,19 +261,22 @@ class AdminState(AuthState):
         from src.shared import discovery
 
         try:
-            self.team_clients = discovery.list_clients()
+            self.team_clients = [
+                ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
+                for c in discovery.list_clients()
+            ]
         except Exception:  # noqa: BLE001
             self.team_clients = []
-        if self.team_selected_client:
+        if self.team_selected_client_id:
             self._load_team_members()
 
     def _load_team_members(self) -> None:
-        client = self.team_selected_client
-        if not client:
+        client_id = self.team_selected_client_id
+        if not client_id:
             self.team_members = []
             self.team_addable = []
             return
-        team = auth.team_for_client(client)
+        team = auth.team_for_client(client_id)
         self.team_members = [
             HolderUserRow(
                 user_id=m["user_id"],
@@ -570,23 +581,33 @@ class AdminState(AuthState):
     # ------------------------------------------------------------------
     # Clients & Teams
     # ------------------------------------------------------------------
+    @rx.var
+    def team_selected_client_name(self) -> str:
+        for o in self.team_clients:
+            if o.client_id == self.team_selected_client_id:
+                return o.legal_name
+        return ""
+
     @rx.event
-    def select_team_client(self, client: str):
-        self.team_selected_client = client
+    def select_team_client(self, v: str):
+        try:
+            self.team_selected_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.team_selected_client_id = 0
         self._load_team_members()
 
     @rx.event
     def add_team_member(self, user_id: int):
-        if not self.team_selected_client:
+        if not self.team_selected_client_id:
             return
-        auth.assign_user_to_client(user_id, self.team_selected_client, actor=self._actor())
+        auth.assign_user_to_client(user_id, self.team_selected_client_id, actor=self._actor())
         self._load_team_members()
 
     @rx.event
     def remove_team_member(self, user_id: int):
-        if not self.team_selected_client:
+        if not self.team_selected_client_id:
             return
-        auth.unassign_user_from_client(user_id, self.team_selected_client)
+        auth.unassign_user_from_client(user_id, self.team_selected_client_id)
         self._load_team_members()
 
     # ------------------------------------------------------------------

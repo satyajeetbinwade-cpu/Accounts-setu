@@ -623,7 +623,13 @@ def client_picker(
     on_add_new=None,
     show_add_new=True,
 ) -> rx.Component:
-    """Client selector with no default.
+    """Client selector with no default, keyed by ``client_id``.
+
+    ``options`` is a Var list of option rows carrying ``client_id`` (the
+    value) and ``legal_name`` (the label — the CURRENT name from
+    ``end_clients``, disambiguated when two clients share one). The selected
+    value handed to ``on_change`` is the ``client_id`` as a string; state
+    handlers coerce it to ``int``. Identity is never a name.
 
     ``add_new_label`` / ``on_add_new`` optionally render the "Add New Client"
     link beside the label (kept where a screen already offers it).
@@ -655,13 +661,21 @@ def client_picker(
         label_row = rx.text(label, style=t.TEXT["label"])
     return rx.vstack(
         label_row,
-        rx.select(
-            options,
+        rx.select.root(
+            rx.select.trigger(placeholder=placeholder, width=width, **props),
+            rx.select.content(
+                rx.select.group(
+                    rx.foreach(
+                        options,
+                        lambda option: rx.select.item(
+                            option.legal_name,
+                            value=option.client_id.to_string(),
+                        ),
+                    ),
+                ),
+            ),
             value=value,
             on_change=on_change,
-            placeholder=placeholder,
-            width=width,
-            **props,
         ),
         spacing="1",
         align="start",

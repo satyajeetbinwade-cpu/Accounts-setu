@@ -19,6 +19,7 @@ from src import db as recon_db
 from src.config_loader import load_config
 
 CLIENT = "Note Client"
+CLIENT_ID = 1
 PERIOD = "2025-04"
 
 HEADERS = [
@@ -46,7 +47,7 @@ ROWS = [
 def note_register(tmp_path):
     """A note register filed under a private DATA_ROOT."""
     root = tmp_path / "data"
-    folder = root / CLIENT / PERIOD / "credit_notes"
+    folder = root / str(CLIENT_ID) / PERIOD / "credit_notes"
     folder.mkdir(parents=True, exist_ok=True)
 
     path = folder / "Credit Note.xlsx"
@@ -73,6 +74,9 @@ def note_register(tmp_path):
 def db(tmp_path):
     path = tmp_path / "notes.db"
     bootstrap.init_all(str(path))
+    from conftest import seed_client
+
+    seed_client(path, CLIENT)
     return path
 
 
@@ -85,7 +89,7 @@ def test_note_results_live_in_their_own_table(db):
     conn = recon_db.get_connection(str(db))
     try:
         run_id = recon_db.insert_run(
-            conn, client=CLIENT, period=PERIOD, recon_type="GST",
+            conn, client_id=CLIENT_ID, client_name_at_run=CLIENT, period=PERIOD, recon_type="GST",
             run_timestamp="2025-05-01T00:00:00Z", config_snapshot="{}",
             source_file_names=["Credit Note.xlsx"],
         )
@@ -117,7 +121,7 @@ def test_note_results_are_empty_not_missing_for_a_run_without_notes(db):
     conn = recon_db.get_connection(str(db))
     try:
         run_id = recon_db.insert_run(
-            conn, client=CLIENT, period=PERIOD, recon_type="GST",
+            conn, client_id=CLIENT_ID, client_name_at_run=CLIENT, period=PERIOD, recon_type="GST",
             run_timestamp="2025-05-01T00:00:00Z", config_snapshot="{}",
             source_file_names=[],
         )
@@ -136,8 +140,8 @@ def test_the_note_pass_runs_when_a_register_is_supplied(note_register, db):
 
     run_notes: list[dict] = []
     results, register = _run_note_pass(
-        CLIENT, PERIOD, load_config()["gst"], note_register, run_notes,
-        client_id=None, actor="test", db_path=str(db),
+        CLIENT_ID, PERIOD, load_config()["gst"], note_register, run_notes,
+        actor="test", db_path=str(db),
     )
 
     assert len(results) == 2, "both register rows must become note results"
@@ -161,8 +165,8 @@ def test_the_note_pass_is_skipped_when_no_register_was_supplied(db):
 
     run_notes: list[dict] = []
     results, register = _run_note_pass(
-        CLIENT, PERIOD, load_config()["gst"], {}, run_notes,
-        client_id=None, actor="test", db_path=str(db),
+        CLIENT_ID, PERIOD, load_config()["gst"], {}, run_notes,
+        actor="test", db_path=str(db),
     )
     assert results == []
     assert register == "", "no register was read, so none is named as a source"
@@ -175,8 +179,8 @@ def test_a_missing_register_file_degrades_to_no_pass(db, tmp_path):
 
     run_notes: list[dict] = []
     results, register = _run_note_pass(
-        CLIENT, PERIOD, load_config()["gst"], {"credit_notes": "nope.xlsx"}, run_notes,
-        client_id=None, actor="test", db_path=str(db),
+        CLIENT_ID, PERIOD, load_config()["gst"], {"credit_notes": "nope.xlsx"}, run_notes,
+        actor="test", db_path=str(db),
     )
     assert results == []
     # A file that was never read must NOT be listed as a source of the run.
@@ -189,8 +193,8 @@ def test_probing_for_a_previous_period_does_not_create_a_folder(note_register, d
     from src.ingestion_ai.normalizer import load_note_frames
     from src.data_paths import DATA_ROOT
 
-    load_note_frames(CLIENT, PERIOD, selected_files=note_register, actor="test", db_path=str(db))
-    assert not (DATA_ROOT / CLIENT / "2025-03").exists()
+    load_note_frames(CLIENT_ID, PERIOD, selected_files=note_register, actor="test", db_path=str(db))
+    assert not (DATA_ROOT / str(CLIENT_ID) / "2025-03").exists()
 
 
 def test_prev_period_walks_back_across_a_year_boundary():
@@ -210,7 +214,7 @@ def test_the_register_frame_carries_the_note_columns_end_to_end(note_register, d
     from src.ingestion_ai.normalizer import load_note_frames
 
     books, portal, adjacent, warnings = load_note_frames(
-        CLIENT, PERIOD, selected_files=note_register, actor="test", db_path=str(db),
+        CLIENT_ID, PERIOD, selected_files=note_register, actor="test", db_path=str(db),
     )
     assert warnings == []
     assert portal is None and adjacent is None
@@ -230,7 +234,7 @@ def run_with_notes(db):
     conn = recon_db.get_connection(str(db))
     try:
         run_id = recon_db.insert_run(
-            conn, client=CLIENT, period=PERIOD, recon_type="GST",
+            conn, client_id=CLIENT_ID, client_name_at_run=CLIENT, period=PERIOD, recon_type="GST",
             run_timestamp="2025-05-01T00:00:00Z", config_snapshot="{}",
             source_file_names=["Credit Note.xlsx"],
         )

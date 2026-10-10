@@ -29,7 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from src.data_paths import DATA_ROOT, source_data_path
+from src.data_paths import exports_dir, source_data_path
+from src.shared.periods import PERIOD_UNFILED, is_valid_period
 from src.reconciliation import review
 from src.reconciliation import run_model
 
@@ -86,14 +87,29 @@ class ExportError(Exception):
 # ---------------------------------------------------------------------------
 
 
+def _client_name(client_id, *, db_path=None) -> str:
+    """The client's CURRENT legal name (display only — identity is client_id)."""
+    try:
+        from src.clients import service as clients
+
+        c = clients.get_client(int(client_id), db_path=db_path)
+        if c:
+            return str(c["legal_name"])
+    except Exception:  # noqa: BLE001
+        pass
+    return f"#{client_id}" if client_id else ""
+
+
 def _portal_file_for_run(run: dict[str, Any]) -> Optional[Path]:
     """The portal (GSTR-2B / IMS) workbook this run consumed, if it is still
     on disk. Credit notes are read from it, not re-derived."""
-    folder = run.get("client") or ""
+    client_id = run.get("client_id")
     period = run.get("period") or ""
     names = list(run.get("source_file_names") or [])
     for source_type in ("gstr2b", "ims"):
-        directory = source_data_path(folder, period, source_type)
+        if not client_id:
+            continue
+        directory = source_data_path(client_id, period, source_type)
         if not directory.exists():
             continue
         for name in names:
@@ -305,8 +321,8 @@ def build_export_data(run_id: int, *, db_path=None) -> dict[str, Any]:
 
     return {
         "run_id": run_id,
-        "client": run.get("client") or "",
-        "client_name": run.get("client") or "",
+        "client_id": run.get("client_id"),
+        "client_name": _client_name(run.get("client_id"), db_path=db_path),
         "period": run.get("period") or "",
         "period_label": review.format_period(run.get("period") or ""),
         "recon_type": model["recon_type"],
@@ -1126,9 +1142,8 @@ def write_pdf(html_text: str, output_path: Path) -> Path:
 
 
 def _exports_dir(data: dict[str, Any]) -> Path:
-    d = DATA_ROOT / (data["client"] or "unknown") / (data["period"] or "unknown") / "exports"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    period = data["period"] if is_valid_period(data.get("period")) else PERIOD_UNFILED
+    return exports_dir(data["client_id"], period)
 
 
 def export_report(run_id: int, fmt: str, *, db_path=None, output_path=None) -> Path:

@@ -468,10 +468,10 @@ def _document_detail() -> rx.Component:
                 rx.cond(
                     DocumentsState.can_reassign,
                     rx.vstack(
-                        rx.select(
-                            DocumentsState.client_options.map(lambda o: o.legal_name),
-                            value=DocumentsState.reassign_client_name,
-                            on_change=DocumentsState.set_reassign_client_by_name,
+                        c.client_picker(
+                            DocumentsState.client_options,
+                            value=DocumentsState.reassign_client_id,
+                            on_change=DocumentsState.set_reassign_client,
                             width="280px",
                         ),
                         rx.cond(

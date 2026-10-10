@@ -32,7 +32,7 @@ _ROLE_COLOR = {
 @dataclass
 class PeriodOption:
     label: str
-    client_folder: str
+    client_id: int
     period: str
     has_gst: bool
     has_tds: bool
@@ -169,7 +169,7 @@ class ReportState(AuthState):
         self.period_options = [
             PeriodOption(
                 label=p["label"],
-                client_folder=p["client_folder"],
+                client_id=p["client_id"],
                 period=p["period"],
                 has_gst="GST" in p["recon_types"],
                 has_tds="TDS" in p["recon_types"],
@@ -196,7 +196,7 @@ class ReportState(AuthState):
         if opt is None:
             return
         try:
-            rep = report_svc.build_period_report(opt.client_folder, opt.period)
+            rep = report_svc.build_period_report(opt.client_id, opt.period)
         except report_svc.ReportError as exc:
             self.error = str(exc)
             return

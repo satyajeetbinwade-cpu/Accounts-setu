@@ -129,9 +129,9 @@ def _upload_section() -> rx.Component:
                 ),
                 rx.hstack(
                     c.client_picker(
-                        InvoiceExtractState.client_names,
-                        value=InvoiceExtractState.upload_client_name,
-                        on_change=InvoiceExtractState.set_upload_client_by_name,
+                        InvoiceExtractState.client_options,
+                        value=InvoiceExtractState.upload_client_id,
+                        on_change=InvoiceExtractState.set_upload_client,
                         width="240px",
                     ),
                     rx.vstack(
@@ -938,9 +938,9 @@ def _export_section() -> rx.Component:
                     "data-pipeline level.",
                 ),
                 c.client_picker(
-                    InvoiceExtractState.client_names,
-                    value=InvoiceExtractState.export_client_name,
-                    on_change=InvoiceExtractState.set_export_client_by_name,
+                    InvoiceExtractState.client_options,
+                    value=InvoiceExtractState.export_client_id,
+                    on_change=InvoiceExtractState.set_export_client,
                     width="240px",
                 ),
                 rx.cond(

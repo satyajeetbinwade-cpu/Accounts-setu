@@ -263,18 +263,13 @@ def test_source_data_path_rejects_bad_input():
 
 
 def test_no_data_path_built_outside_data_paths():
-    """Fail if any module other than src/data_paths.py builds a data/ path —
-    except the known Step-3 remainder, which must SHRINK to zero as the
-    refactor completes (a new offender outside this list fails the test)."""
+    """Fail if ANY module other than src/data_paths.py builds a data/ path.
+
+    The Step-3 refactor removed every one, so the allowlist is now empty: a
+    NEW offender anywhere fails immediately."""
     import re
     root = Path(__file__).resolve().parents[1] / "src"
-    # Files still to be routed through data_paths (Step 3 remainder).
-    known_remaining = {
-        "export.py",
-        "reconciliation/report_export.py",
-        "ingestion_ai/normalizer.py",
-        "ingestion_ai/service.py",
-    }
+    known_remaining: set[str] = set()
     offenders = []
     for py in root.rglob("*.py"):
         if py.name == "data_paths.py":
@@ -285,4 +280,4 @@ def test_no_data_path_built_outside_data_paths():
                 rel = str(py.relative_to(root))
                 if rel not in known_remaining:
                     offenders.append(f"{rel}:{i}: {line.strip()}")
-    assert not offenders, "new data paths built outside src/data_paths.py:\n" + "\n".join(offenders)
+    assert not offenders, "data paths built outside src/data_paths.py:\n" + "\n".join(offenders)

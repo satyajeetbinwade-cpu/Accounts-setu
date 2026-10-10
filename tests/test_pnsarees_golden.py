@@ -29,6 +29,7 @@ BOOKS = FIXTURES / "PurchaseRegister(Bill-wise) (1).xlsx"
 GSTR2B = FIXTURES / "082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx"
 IMS = FIXTURES / "IMS_07AAACP9472A1ZJ_14092026_1 (1).xlsx"
 PERIOD = "2026-08"
+CLIENT_ID = 1
 
 # --- Golden books totals (§1.1) --------------------------------------------
 BOOKS_TOTALS = {
@@ -81,9 +82,8 @@ def pair(tmp_path_factory):
     """Load the canonical pair through the RUN path (not the parser directly),
     so the test exercises exactly what the engine consumes."""
     root = tmp_path_factory.mktemp("pnsarees")
-    client = "Test Client"
     for source_type, src in (("tally", BOOKS), ("gstr2b", GSTR2B), ("ims", IMS)):
-        dest = root / client / PERIOD / source_type
+        dest = root / str(CLIENT_ID) / PERIOD / source_type
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dest / src.name)
 
@@ -94,7 +94,7 @@ def pair(tmp_path_factory):
     try:
         selected = {"tally": BOOKS.name, "gstr2b": GSTR2B.name, "ims": IMS.name}
         books, portal, source_files, caveats, run_notes = load_canonical_pair(
-            client, PERIOD, "GST", selected, client_id=None,
+            CLIENT_ID, PERIOD, "GST", selected,
         )
         yield books, portal, source_files, caveats, run_notes
     finally:
@@ -326,18 +326,19 @@ def test_broken_books_mapping_blocks_the_run(tmp_path, monkeypatch):
     )
 
     root = tmp_path / "data"
-    client = "Test Client"
     for source_type, src in (("tally", BOOKS), ("gstr2b", GSTR2B), ("ims", IMS)):
-        dest = root / client / PERIOD / source_type
+        dest = root / str(CLIENT_ID) / PERIOD / source_type
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dest / src.name)
     monkeypatch.setattr(data_paths, "DATA_ROOT", root)
 
     db_path = tmp_path / "poc.db"
-    from src.ingestion_ai.schema import init_ingestion_ai_schema
+    from src import bootstrap
+    from conftest import seed_client
 
+    bootstrap.init_all(db_path)
+    seed_client(db_path, "Test Client")
     conn = idb.connect(db_path)
-    init_ingestion_ai_schema(conn)
     # A mapping that maps identity + invoice value but NOT the tax buckets —
     # exactly the broken parse the defect report describes.
     broken_mapping = [
@@ -354,8 +355,8 @@ def test_broken_books_mapping_blocks_the_run(tmp_path, monkeypatch):
     ]
     idb.upsert_ingestion_result(
         conn,
-        upload_key=upload_key(client, PERIOD, "tally", BOOKS.name),
-        client_ref=client, client_id=None, period=PERIOD, source_type="tally",
+        upload_key=upload_key(CLIENT_ID, PERIOD, "tally", BOOKS.name),
+        client_id=CLIENT_ID, period=PERIOD, source_type="tally",
         filename=BOOKS.name, status="partial", header_row=6, sheet_name="Sheet1",
         sheet_ambiguous=False, headers=[], mapping=broken_mapping, classification=None,
         unmapped_required=[], warnings=[], row_count_in=36, row_count_out=35,
@@ -370,7 +371,7 @@ def test_broken_books_mapping_blocks_the_run(tmp_path, monkeypatch):
 
     selected = {"tally": BOOKS.name, "gstr2b": GSTR2B.name, "ims": IMS.name}
     with pytest.raises(IngestionBlockedError) as exc:
-        load_canonical_pair(client, PERIOD, "GST", selected, db_path=db_path)
+        load_canonical_pair(CLIENT_ID, PERIOD, "GST", selected, db_path=db_path)
     message = str(exc.value)
     assert "failed validation" in message
     assert "tax_arithmetic" in message

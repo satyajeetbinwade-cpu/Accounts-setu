@@ -337,16 +337,12 @@ class ActionCenterContext:
             return None
         try:
             from src.auth import service as auth
-            from src.clients import service as clients
 
             if self._team_cache is None:
                 self._team_cache = {}
-            folder_key = self._folder_key_for_client(client_id, clients, auth)
-            if folder_key is None or folder_key not in self._team_cache:
-                team = auth.team_for_client(folder_key) if folder_key else []
-                if folder_key is not None:
-                    self._team_cache[folder_key] = team
-            team = self._team_cache.get(folder_key or "", [])
+            if client_id not in self._team_cache:
+                self._team_cache[client_id] = auth.team_for_client(int(client_id))
+            team = self._team_cache.get(client_id, [])
             if not team:
                 return None
             preferred = ("Senior Accountant", "Article-Trainee", "Manager")
@@ -358,42 +354,6 @@ class ActionCenterContext:
             return top.get("display_name") or top.get("username")
         except Exception:  # noqa: BLE001
             return None
-
-    def _folder_key_for_client(self, client_id: int, clients_mod, auth_mod) -> Optional[str]:
-        """F1's team assignment is keyed by the data/ folder name; F2's
-        client_id is numeric. Bridge them by matching the legal name against
-        the existing assignment keys (exact, then normalized)."""
-        if self._folder_key_cache is None:
-            self._folder_key_cache = {}
-        if client_id in self._folder_key_cache:
-            return self._folder_key_cache[client_id]
-
-        key: Optional[str] = None
-        try:
-            client = next(
-                (c for c in clients_mod.list_clients(include_inactive=True) if c["client_id"] == client_id),
-                None,
-            )
-            legal = _normalize_name(client["legal_name"]) if client else ""
-            assignment_keys = {a["client"] for a in auth_mod.all_assignments()}
-            for cand in assignment_keys:
-                if _normalize_name(cand) == legal:
-                    key = cand
-                    break
-            if key is None and legal:
-                for cand in assignment_keys:
-                    norm = _normalize_name(cand)
-                    if norm and (norm.startswith(legal) or legal.startswith(norm)):
-                        key = cand
-                        break
-        except Exception:  # noqa: BLE001
-            key = None
-        self._folder_key_cache[client_id] = key
-        return key
-
-
-def _normalize_name(name: str) -> str:
-    return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
 # ---------------------------------------------------------------------------

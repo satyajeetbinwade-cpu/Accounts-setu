@@ -177,16 +177,16 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
     from src.ingestion_ai.schema import init_ingestion_ai_schema
 
     db = str(tmp_path / "gate.db")
-    conn = recon_db.get_connection(db)
-    init_documents_schema(conn)
-    init_ingestion_ai_schema(conn)
-    conn.commit()
-    conn.close()
+    from conftest import seed_client
+    from src import bootstrap
+
+    bootstrap.init_all(db)
+    seed_client(db, "Test Client")
 
     res = s.upload_and_infer(
         client_id=1, source_type="tally", filename="pr.xlsx",
         file_bytes=FIXTURE.read_bytes(), period=PERIOD, actor="tester",
-        client_ref="TestClient", recon_type="GST", db_path=db,
+        recon_type="GST", db_path=db,
     )
     uid = res["upload_id"]
 
@@ -204,7 +204,7 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
     with pytest.raises(s.IngestionAIError) as exc:
         s.confirm_mapping(
             uid, field_overrides=overrides, trust_for_reuse=False, actor="tester",
-            client_ref="TestClient", db_path=db,
+            db_path=db,
         )
     assert "taxable_value" in str(exc.value)
 
@@ -214,7 +214,7 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
     overrides = {m["canonical_field"]: m.get("raw_column") for m in report["field_mapping"]}
     s.confirm_mapping(
         uid, field_overrides=overrides, trust_for_reuse=False, actor="tester",
-        client_ref="TestClient", db_path=db,
+        db_path=db,
     )
 
 
@@ -228,16 +228,16 @@ def test_t8_provenance_is_truthful(tmp_path):
     from src.ingestion_ai.schema import init_ingestion_ai_schema
 
     db = str(tmp_path / "prov.db")
-    conn = recon_db.get_connection(db)
-    init_documents_schema(conn)
-    init_ingestion_ai_schema(conn)
-    conn.commit()
-    conn.close()
+    from conftest import seed_client
+    from src import bootstrap
+
+    bootstrap.init_all(db)
+    seed_client(db, "Test Client")
 
     res = s.upload_and_infer(
         client_id=1, source_type="tally", filename="pr.xlsx",
         file_bytes=FIXTURE.read_bytes(), period=PERIOD, actor="tester",
-        client_ref="TestClient", recon_type="GST", db_path=db,
+        recon_type="GST", db_path=db,
     )
     prov = s.provenance(res["upload_id"], db_path=db)
     assert prov["path"] == "deterministic"

@@ -54,21 +54,20 @@ class RunExecutionError(RuntimeError):
 
 
 def _run_gst(
-    client: str,
+    client_id: int,
     period: str,
     gst_config: dict,
     selected_files: dict[str, str] | None = None,
     *,
-    client_id: int | None = None,
     actor: str = "system",
     db_path=None,
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     if USE_CANONICAL_INGESTION:
         books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
-            client, period, "GST", selected_files, client_id=client_id, actor=actor
+            client_id, period, "GST", selected_files, actor=actor, db_path=db_path
         )
     else:
-        books_df, portal_df = load_gst_pair(client, period, selected_files)
+        books_df, portal_df = load_gst_pair(client_id, period, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
         run_notes = []
@@ -97,8 +96,8 @@ def _run_gst(
         pass
 
     note_results, note_register = _run_note_pass(
-        client, period, gst_config, selected_files, run_notes,
-        client_id=client_id, actor=actor, db_path=db_path,
+        client_id, period, gst_config, selected_files, run_notes,
+        actor=actor, db_path=db_path,
     )
     # The register IS a source file of this run when it was actually read —
     # listing it keeps the report honest about its inputs, and lets re-opening
@@ -109,13 +108,12 @@ def _run_gst(
 
 
 def _run_note_pass(
-    client: str,
+    client_id: int,
     period: str,
     gst_config: dict,
     selected_files: dict[str, str] | None,
     run_notes: list[dict[str, Any]],
     *,
-    client_id: int | None,
     actor: str,
     db_path=None,
 ) -> tuple[list[dict[str, Any]], str]:
@@ -144,8 +142,8 @@ def _run_note_pass(
         from src.matching.note_matcher import match_notes, summarise_notes
 
         books_notes, portal_notes, adjacent_notes, warnings = load_note_frames(
-            client, period, selected_files=selected_files,
-            client_id=client_id, actor=actor, db_path=db_path,
+            client_id, period, selected_files=selected_files,
+            actor=actor, db_path=db_path,
         )
     except Exception:  # noqa: BLE001
         return [], register
@@ -193,20 +191,19 @@ def _run_note_pass(
 
 
 def _run_tds(
-    client: str,
+    client_id: int,
     period: str,
     tds_config: dict,
     selected_files: dict[str, str] | None = None,
     *,
-    client_id: int | None = None,
     actor: str = "system",
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     if USE_CANONICAL_INGESTION:
         books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
-            client, period, "TDS", selected_files, client_id=client_id, actor=actor
+            client_id, period, "TDS", selected_files, actor=actor
         )
     else:
-        books_df, portal_df = load_tds_pair(client, period, selected_files)
+        books_df, portal_df = load_tds_pair(client_id, period, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
         run_notes = []
@@ -219,12 +216,11 @@ def _run_tds(
 
 
 def _run_other(
-    client: str,
+    client_id: int,
     period: str,
     other_config: dict,
     selected_files: dict[str, str] | None = None,
     *,
-    client_id: int | None = None,
     actor: str = "system",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """2C — layer the six "Other" sources onto the SAME shared engine.
@@ -246,22 +242,22 @@ def _run_other(
         # Fall back to the first 2C source that has a file on disk.
         for key, _label in OTHER_SOURCES:
             try:
-                load_other_pair(client, period, key, selected_files)
+                load_other_pair(client_id, period, key, selected_files)
                 source_key = key
                 break
             except FileNotFoundError:
                 continue
     if source_key is None:
         raise FileNotFoundError(
-            f"No 2C source file found for client={client!r} period={period!r}"
+            f"No 2C source file found for client_id={client_id!r} period={period!r}"
         )
     if USE_CANONICAL_INGESTION:
         books_df, portal_df, source_files, caveats, run_notes = load_canonical_pair(
-            client, period, "OTHER", {**(selected_files or {}), "__source_key": source_key},
-            client_id=client_id, actor=actor,
+            client_id, period, "OTHER", {**(selected_files or {}), "__source_key": source_key},
+            actor=actor,
         )
     else:
-        books_df, portal_df = load_other_pair(client, period, source_key, selected_files)
+        books_df, portal_df = load_other_pair(client_id, period, source_key, selected_files)
         source_files = sorted(set(books_df["source_file"]) | set(portal_df["source_file"]))
         caveats = []
         run_notes = []
@@ -270,7 +266,8 @@ def _run_other(
 
 
 def execute_run(
-    client: str,
+    client_id: int,
+    client_name_at_run: str,
     period: str,
     recon_type: str,
     source_files: list[str] | None,
@@ -278,15 +275,17 @@ def execute_run(
     *,
     db_path: str | Path | None = None,
     selected_files: dict[str, str] | None = None,
-    client_id: int | None = None,
     actor: str = "system",
 ) -> int:
     """Execute one reconciliation run and persist it atomically.
 
     Args:
-        client: Client identifier.
+        client_id: The F2 ``end_clients.client_id`` — the ONLY identity used
+            for data paths, lookups and downstream generation.
+        client_name_at_run: The client's legal name at run time, stored as an
+            immutable display-only snapshot (never used for lookup).
         period: Period string, 'YYYY-MM'.
-        recon_type: 'GST' or 'TDS'.
+        recon_type: 'GST', 'TDS' or 'OTHER'.
         source_files: Optional explicit list of source filenames to record
             in the run row. If None, the filenames actually used by
             ingestion are recorded instead (the more reliable source of
@@ -297,8 +296,6 @@ def execute_run(
             pins exactly which on-disk file feeds the run. Passed through
             to ingestion; when absent, ingestion auto-discovers per
             source_type as before.
-        client_id: Optional F2 client_id, used by the ingestion layer's
-            shape cache and for downstream exception generation.
         actor: Who triggered the run, for the audit trail.
 
     Returns:
@@ -309,6 +306,9 @@ def execute_run(
         the transaction is rolled back — no run row and no result rows
         are left behind.
     """
+    from src.data_paths import require_client_id
+
+    client_id = require_client_id(client_id)
     recon_type = recon_type.upper()
     if recon_type not in VALID_RECON_TYPES:
         raise ValueError(f"recon_type must be one of {VALID_RECON_TYPES}, got {recon_type!r}")
@@ -320,19 +320,19 @@ def execute_run(
         try:
             if recon_type == "GST":
                 results, used_files, caveats, run_notes, note_results = _run_gst(
-                    client, period, config["gst"], selected_files,
-                    client_id=client_id, actor=actor, db_path=db_path,
+                    client_id, period, config["gst"], selected_files,
+                    actor=actor, db_path=db_path,
                 )
             elif recon_type == "TDS":
                 results, used_files, caveats, run_notes = _run_tds(
-                    client, period, config["tds"], selected_files,
-                    client_id=client_id, actor=actor,
+                    client_id, period, config["tds"], selected_files,
+                    actor=actor,
                 )
                 note_results = []
             else:
                 results, used_files, caveats, run_notes = _run_other(
-                    client, period, config["other"], selected_files,
-                    client_id=client_id, actor=actor,
+                    client_id, period, config["other"], selected_files,
+                    actor=actor,
                 )
                 note_results = []
         except IngestionBlockedError as exc:
@@ -341,18 +341,18 @@ def execute_run(
             # it is surfaced with its own plain-language message rather
             # than the generic "malformed source file" text.
             print(
-                f"[runner] Ingestion BLOCKED for client={client!r} period={period!r} "
+                f"[runner] Ingestion BLOCKED for client_id={client_id!r} period={period!r} "
                 f"recon_type={recon_type!r}: {exc}"
             )
             raise RunExecutionError(str(exc)) from exc
         except Exception as exc:
             detail = traceback.format_exc()
             print(
-                f"[runner] Matching FAILED for client={client!r} period={period!r} "
+                f"[runner] Matching FAILED for client_id={client_id!r} period={period!r} "
                 f"recon_type={recon_type!r}:\n{detail}"
             )
             raise RunExecutionError(
-                f"Reconciliation failed for {client}/{period}/{recon_type}: {exc}"
+                f"Reconciliation failed for client_id={client_id}/{period}/{recon_type}: {exc}"
             ) from exc
 
         assign_fingerprints(results, recon_type, period)
@@ -363,7 +363,8 @@ def execute_run(
 
         run_id = db.insert_run(
             conn,
-            client=client,
+            client_id=client_id,
+            client_name_at_run=client_name_at_run,
             period=period,
             recon_type=recon_type,
             run_timestamp=run_timestamp,

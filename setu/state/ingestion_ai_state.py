@@ -831,7 +831,7 @@ class IngestionAiState(SharedUploadState):
         self.shapes = [
             ShapeRow(
                 shape_id=s["shape_id"],
-                client_label=self._client_label(s.get("client_id")) if s.get("client_id") else (s.get("client_ref") or "—"),
+                client_label=self._client_label(s.get("client_id")) if s.get("client_id") else "—",
                 source_label=SOURCE_TYPE_LABELS.get(s["source_type"], s["source_type"]),
                 header_signature=s.get("header_signature") or "",
                 trusted=bool(s.get("trusted")),
@@ -917,7 +917,6 @@ class IngestionAiState(SharedUploadState):
                 self.file_period_upload_id,
                 self.file_period_value.strip(),
                 actor=self.username,
-                client_ref=self._client_ref(),
             )
         except ingestion_ai.IngestionAIError as exc:
             self.file_period_error = str(exc)
@@ -978,12 +977,6 @@ class IngestionAiState(SharedUploadState):
     def set_sort_key(self, v: str):
         self.sort_key = v
         self._load_uploads()
-
-    def _client_ref(self) -> str:
-        for c in self.client_options:
-            if c.client_id == self.client_id:
-                return c.legal_name
-        return str(self.client_id)
 
     # ------------------------------------------------------------------
     # Period (required) — suggestion + evidence
@@ -1096,7 +1089,6 @@ class IngestionAiState(SharedUploadState):
                     file_bytes=self._pending_bytes(pf.key),
                     period=self.period.strip(),
                     actor=self.username,
-                    client_ref=self._client_ref(),
                 )
                 status = res["status"]
                 if status == STATUS_EMPTY:
@@ -1272,7 +1264,7 @@ class IngestionAiState(SharedUploadState):
         yield
         try:
             out = ingestion_ai.re_run_mapping(
-                self.rerun_target_id, actor=self.username, client_ref=self._client_ref(),
+                self.rerun_target_id, actor=self.username,
             )
             self.flash = (
                 f"Re-ran {self.rerun_target_name} through the model — "
@@ -1895,7 +1887,6 @@ class IngestionAiState(SharedUploadState):
                 trust_for_reuse=self.trust_reuse,
                 layout_scope=self.layout_scope,
                 actor=self.username,
-                client_ref=self._client_ref(),
                 allow_empty=self.allow_empty_ack,
             )
             self.flash = (
@@ -1963,7 +1954,7 @@ class IngestionAiState(SharedUploadState):
             try:
                 ingestion_ai.confirm_mapping(
                     uid, field_overrides=mapping, trust_for_reuse=self.bulk_trust,
-                    actor=self.username, client_ref=self._client_ref(),
+                    actor=self.username,
                 )
                 done += 1
             except ingestion_ai.IngestionAIError as exc:

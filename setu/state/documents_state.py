@@ -503,8 +503,11 @@ class DocumentsState(SharedUploadState):
             self.error = str(exc)
         self._load_detail()
 
-    def set_reassign_client(self, client_id: int):
-        self.reassign_client_id = client_id
+    def set_reassign_client(self, v):
+        try:
+            self.reassign_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.reassign_client_id = 0
 
     @rx.event
     def set_reassign_client_by_name(self, name: str):

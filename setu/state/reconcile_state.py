@@ -20,7 +20,7 @@ import reflex as rx
 from src import queries
 from src.clients import service as clients
 from src.config_loader import load_config
-from src.data_paths import source_data_path
+from src.data_paths import data_dir, source_data_path
 from src.f5 import service as f5
 from src.ingestion_ai import detect as upload_detect
 from src.ingestion_ai import service as ingestion_ai
@@ -122,6 +122,21 @@ class RunOption:
 
     run_id: int
     label: str
+
+
+@dataclass
+class ClientOption:
+    """A client selector row: identity is ``client_id``, the label is the
+    current legal name (disambiguated when two clients share one)."""
+
+    client_id: int
+    legal_name: str
+
+
+def _client_name(client_id) -> str:
+    """The current display name for a client_id (identity is always the id)."""
+    opt = discovery.client_option(client_id)
+    return opt["display_name"] if opt else f"#{client_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +304,9 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     stage: int = 1
 
     # context
-    clients: list[str] = []
+    clients: list[ClientOption] = []
     recon_types: list[str] = []
-    ctx_client: str = ""
+    ctx_client_id: int = 0
     ctx_period: str = ""
     ctx_recon_type: str = ""
 
@@ -327,7 +342,12 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         """True only once Client, Period (Year + Month) and Recon type are all
         chosen. Drives the banner, the existing-run card and the Continue
         button, so nothing appears while the context is incomplete."""
-        return bool(self.ctx_client and self.ctx_period and self.ctx_recon_type)
+        return bool(self.ctx_client_id and self.ctx_period and self.ctx_recon_type)
+
+    @rx.var
+    def ctx_client_name(self) -> str:
+        """The current display name for the selected client_id."""
+        return _client_name(self.ctx_client_id) if self.ctx_client_id else ""
 
     upload_error: str = ""
     # The drop-zone's own state: a staged file (chips above the Upload button)
@@ -545,7 +565,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     # ==================================================================
     @rx.event
     def load(self, params: dict | None = None):
-        self.clients = discovery.list_clients()
+        self.clients = [
+            ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
+            for c in discovery.list_clients()
+        ]
         self.recon_types = list(discovery.RECON_TYPES)
         # No default client/period/recon type is chosen here: the pickers show
         # their placeholders until the user decides.
@@ -581,7 +604,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         latest run in the selected context (exactly what the guided flow's
         "Continue this run" does).
         """
-        self.clients = discovery.list_clients()
+        self.clients = [
+            ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
+            for c in discovery.list_clients()
+        ]
         self.recon_types = list(discovery.RECON_TYPES)
         self._load_context()
         try:
@@ -621,10 +647,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     def _load_existing_run(self) -> None:
         self.has_existing_run = False
         self.existing_run_id = 0
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             return
         df = queries.list_runs(
-            client=self.ctx_client, period=self.ctx_period, recon_type=self.ctx_recon_type
+            client_id=self.ctx_client_id, period=self.ctx_period, recon_type=self.ctx_recon_type
         )
         if not df.empty:
             latest = df.iloc[0]
@@ -635,11 +661,11 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     def _load_run_options(self) -> None:
         """Every run for this context, newest first — the standalone Review
         screen's run selector reads this."""
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             self.run_options = []
             return
         df = queries.list_runs(
-            client=self.ctx_client, period=self.ctx_period, recon_type=self.ctx_recon_type
+            client_id=self.ctx_client_id, period=self.ctx_period, recon_type=self.ctx_recon_type
         )
         self.run_options = [
             RunOption(
@@ -672,7 +698,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
 
     @rx.event
     def set_ctx_client(self, v: str):
-        self.ctx_client = v
+        try:
+            self.ctx_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.ctx_client_id = 0
         self.rail_return = False
         # A different client invalidates the period and everything below it.
         self.reset_period()
@@ -728,7 +757,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         ]
 
     def _max_reachable(self) -> int:
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             return 1
         if not self.run_id:
             return 3 if self.ready else 2
@@ -784,7 +813,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if not names:
             return
         for source_type in discovery.slot_types_for(self.ctx_recon_type):
-            for filename in _list_files(self.ctx_client, self.ctx_period, source_type):
+            for filename in _list_files(self.ctx_client_id, self.ctx_period, source_type):
                 if filename in names:
                     self.selections[source_type] = filename
                     break
@@ -793,7 +822,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     # Stage 2 — Upload
     # ==================================================================
     def _load_slots(self) -> None:
-        if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+        if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             # Context incomplete: nothing is offered and Stage 3 stays locked.
             self.slots = []
             self.books_ok = False
@@ -815,7 +844,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                     is_books=source_type in books_types,
                     is_note=source_type in note_types,
                     is_optional=source_type in note_types,
-                    files=_list_files(self.ctx_client, self.ctx_period, source_type),
+                    files=_list_files(self.ctx_client_id, self.ctx_period, source_type),
                     selected=filename,
                     code=info["code"],
                     chip_label=info["chip_label"],
@@ -846,7 +875,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if not filename:
             return empty
         stored = ingestion_ai.get_stored_result(
-            self.ctx_client, self.ctx_period, source_type, filename
+            self.ctx_client_id, self.ctx_period, source_type, filename
         )
         if stored is None:
             return {
@@ -931,7 +960,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 "This period holds files filed without a period — file them to a period "
                 "from Smart Ingestion before reconciling."
             )
-        for src in books + portals:
+        for src in list(books) + list(portals):
             s = by_type.get(src)
             if s and s.code in ("wrong", "not_ingested"):
                 blockers.append(f"{s.label} — {s.message or 'needs attention'}")
@@ -946,7 +975,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         # can be a live model call (~15-25s), so the loader is shown for the
         # whole of it — never a silent freeze.
         if filename and ingestion_ai.get_stored_result(
-            self.ctx_client, self.ctx_period, source_type, filename
+            self.ctx_client_id, self.ctx_period, source_type, filename
         ) is None:
             self.busy_label = f"Reading {filename} and mapping its columns…"
             yield
@@ -957,11 +986,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         self._load_slots()
 
     def _normalize(self, source_type: str, filename: str) -> None:
-        path = source_data_path(self.ctx_client, self.ctx_period, source_type) / filename
+        path = source_data_path(self.ctx_client_id, self.ctx_period, source_type) / filename
         try:
             ingestion_ai.normalize_source_file(
-                path, source_type, self.ctx_client, self.ctx_period,
-                client_id=_client_id_for_folder(self.ctx_client),
+                path, source_type, self.ctx_client_id, self.ctx_period,
                 recon_type=self.ctx_recon_type,
                 actor=self.username,
             )
@@ -1001,9 +1029,8 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         try:
             out = await asyncio.to_thread(
                 ingestion_ai.re_run_file,
-                self.ctx_client, self.ctx_period, self.rerun_source_type, self.rerun_filename,
+                self.ctx_client_id, self.ctx_period, self.rerun_source_type, self.rerun_filename,
                 actor=self.username,
-                client_id=_client_id_for_folder(self.ctx_client),
                 recon_type=self.ctx_recon_type,
             )
             how = "the deterministic layout parser" if not out.get("model_used") else "the model"
@@ -1137,7 +1164,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 pf.key, "processing", label="Reading the file and mapping its columns…"
             )
             yield
-            directory = source_data_path(self.ctx_client, self.ctx_period, source_type)
+            directory = source_data_path(self.ctx_client_id, self.ctx_period, source_type)
             dest = directory / pf.filename
             try:
                 dest.write_bytes(self._pending_bytes(pf.key))
@@ -1151,7 +1178,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 # normalization can be a live model call. Run it off the event
                 # loop so the loader keeps animating while it works.
                 if ingestion_ai.get_stored_result(
-                    self.ctx_client, self.ctx_period, source_type, dest.name
+                    self.ctx_client_id, self.ctx_period, source_type, dest.name
                 ) is None:
                     await asyncio.to_thread(self._normalize, source_type, dest.name)
                 self._set_upload_stage(pf.key, "done", pct=100, label="Uploaded and mapped")
@@ -1184,7 +1211,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if not selected:
             self.error = "No source files are selected."
             return
-        client_id = _client_id_for_folder(self.ctx_client)
+        client_id = self.ctx_client_id
         # The engine run can be long (it may make a live mapping call for an
         # unseen file shape). Show the loader and hand the work to a worker
         # thread so the request is not blocked.
@@ -1194,8 +1221,9 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             config = load_config()
             run_id = await asyncio.to_thread(
                 execute_run,
-                self.ctx_client, self.ctx_period, self.ctx_recon_type, None, config,
-                selected_files=selected, client_id=client_id, actor=self.username,
+                self.ctx_client_id, _client_name(self.ctx_client_id),
+                self.ctx_period, self.ctx_recon_type, None, config,
+                selected_files=selected, actor=self.username,
             )
         except RunExecutionError as exc:
             self.error = str(exc)
@@ -1286,7 +1314,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             from src.rules import service as rules
 
             v = rules.get_effective_number(
-                key, client_id=_client_id_for_folder(self.ctx_client), default=default
+                key, client_id=self.ctx_client_id or None, default=default
             )
             return float(v) if v is not None else default
         except Exception:  # noqa: BLE001
@@ -1499,7 +1527,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         """Compact PASS/FAIL strip: the F5 gate + an independent recompute.
         Rendered only where the data exists."""
         rows: list[IntegrityRow] = []
-        client_id = _client_id_for_folder(self.ctx_client)
+        client_id = self.ctx_client_id
         if client_id:
             try:
                 from src.f5 import service as f5
@@ -2111,7 +2139,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 continue
             try:
                 queries.mark_reviewed(
-                    self.ctx_client, self.ctx_period, self.ctx_recon_type,
+                    self.ctx_client_id, self.ctx_period, self.ctx_recon_type,
                     item["fingerprint"], note=self.bulk_note or None,
                     result=self._review_verdict(item),
                 )
@@ -2136,7 +2164,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 continue
             try:
                 queries.clear_review(
-                    self.ctx_client, self.ctx_period, self.ctx_recon_type, item["fingerprint"]
+                    self.ctx_client_id, self.ctx_period, self.ctx_recon_type, item["fingerprint"]
                 )
                 n += 1
             except Exception as exc:  # noqa: BLE001
@@ -2392,7 +2420,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if item is None:
             return
         queries.mark_reviewed(
-            self.ctx_client, self.ctx_period, self.ctx_recon_type, item["fingerprint"],
+            self.ctx_client_id, self.ctx_period, self.ctx_recon_type, item["fingerprint"],
             note=self.detail_note or None,
             result=self._review_verdict(item),
         )
@@ -2406,7 +2434,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         item = by_id.get(self.selected_result_id)
         if item is None:
             return
-        queries.clear_review(self.ctx_client, self.ctx_period, self.ctx_recon_type, item["fingerprint"])
+        queries.clear_review(self.ctx_client_id, self.ctx_period, self.ctx_recon_type, item["fingerprint"])
         self.flash = "Review cleared."
         self._load_review()
         self._load_drawer()
@@ -2483,7 +2511,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             return
         try:
             queries.set_field_override(
-                self.ctx_client, self.ctx_period, self.ctx_recon_type, fingerprint,
+                self.ctx_client_id, self.ctx_period, self.ctx_recon_type, fingerprint,
                 self.edit_side, self.edit_field, self.edit_value,
                 reason=self.edit_reason.strip(), actor=self.username,
             )
@@ -2503,7 +2531,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             return
         try:
             queries.clear_field_override(
-                self.ctx_client, self.ctx_period, self.ctx_recon_type,
+                self.ctx_client_id, self.ctx_period, self.ctx_recon_type,
                 item["fingerprint"], side, field,
             )
             self.flash = f"Reverted {field.replace('_', ' ')} to the engine's value."
@@ -2579,33 +2607,17 @@ class ReconcileState(PeriodPickerMixin, AuthState):
 # ---------------------------------------------------------------------------
 
 
-def _list_files(client: str, period: str, source_type: str) -> list[str]:
-    directory = source_data_path(client, period, source_type)
+def _list_files(client_id, period: str, source_type: str) -> list[str]:
+    try:
+        directory = data_dir(client_id, period, source_type)
+    except ValueError:
+        return []
     if not directory.exists():
         return []
     files: list[str] = []
     for pattern in ("*.csv", "*.xlsx", "*.xls"):
         files.extend(sorted(m.name for m in directory.glob(pattern)))
     return sorted(set(files))
-
-
-def _client_id_for_folder(folder: str) -> int | None:
-    def norm(name: str) -> str:
-        return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-    try:
-        candidates = clients.list_clients(include_inactive=True)
-    except Exception:  # noqa: BLE001
-        return None
-    target = norm(folder)
-    for c in candidates:
-        if norm(c["legal_name"]) == target:
-            return c["client_id"]
-    for c in candidates:
-        n = norm(c["legal_name"])
-        if target and (n.startswith(target) or target.startswith(n)):
-            return c["client_id"]
-    return None
 
 
 def _record_sync_health(client_id, selected_files: dict, *, succeeded: bool) -> None:

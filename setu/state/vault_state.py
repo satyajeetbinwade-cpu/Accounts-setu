@@ -242,8 +242,11 @@ class VaultState(AuthState):
     def set_add_scoped(self, v: bool):
         self.add_scoped = v
 
-    def set_add_client_id(self, v: int):
-        self.add_client_id = v
+    def set_add_client_id(self, v):
+        try:
+            self.add_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.add_client_id = 0
 
     def set_add_secret(self, v: str):
         self.add_secret = v
@@ -294,8 +297,11 @@ class VaultState(AuthState):
     # ------------------------------------------------------------------
     # DPDP
     # ------------------------------------------------------------------
-    def set_dpdp_client_id(self, v: int):
-        self.dpdp_client_id = v
+    def set_dpdp_client_id(self, v):
+        try:
+            self.dpdp_client_id = int(v or 0)
+        except (TypeError, ValueError):
+            self.dpdp_client_id = 0
 
     def set_dpdp_scope(self, v: str):
         self.dpdp_scope = v

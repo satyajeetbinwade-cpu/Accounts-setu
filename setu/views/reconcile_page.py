@@ -98,7 +98,7 @@ def _context_stage() -> rx.Component:
                     rx.hstack(
                         c.client_picker(
                             ReconcileState.clients,
-                            value=ReconcileState.ctx_client,
+                            value=ReconcileState.ctx_client_id,
                             on_change=ReconcileState.set_ctx_client,
                             placeholder="Select a client",
                             width="220px",
@@ -143,7 +143,7 @@ def _context_stage() -> rx.Component:
                 rx.cond(
                     ReconcileState.context_complete,
                     c.info_banner(
-                        f"Context: {ReconcileState.ctx_client} · {ReconcileState.ctx_period} · "
+                        f"Context: {ReconcileState.ctx_client_name} · {ReconcileState.ctx_period} · "
                         f"{ReconcileState.ctx_recon_type}. You won't be asked for this again during this run."
                     ),
                     rx.fragment(),
@@ -749,7 +749,7 @@ def _export_stage() -> rx.Component:
                     rx.vstack(
                         c.section_title("What goes into this report"),
                         rx.text(
-                            f"Run: {ReconcileState.run_id} · Context: {ReconcileState.ctx_client} · "
+                            f"Run: {ReconcileState.run_id} · Context: {ReconcileState.ctx_client_name} · "
                             f"{ReconcileState.ctx_period} · {ReconcileState.ctx_recon_type}",
                             style=t.TEXT["body"],
                         ),

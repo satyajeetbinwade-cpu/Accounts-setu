@@ -55,13 +55,6 @@ CREATE TABLE IF NOT EXISTS end_clients (
     origin                   TEXT    NOT NULL DEFAULT 'created'
 );
 
--- A GSTIN, when present, identifies exactly one active registration. Partial
--- (non-null, non-blank) UNIQUE: many clients may have no GSTIN at all. PAN and
--- TAN are deliberately NOT unique — one PAN can have many GST registrations.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_end_clients_gstin_unique
-    ON end_clients(gstin)
- WHERE gstin IS NOT NULL AND gstin <> '';
-
 -- Internal reference only \u2014 never linked to a login row.
 CREATE TABLE IF NOT EXISTS contact_directory (
     contact_id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,3 +200,14 @@ def init_clients_schema(conn: sqlite3.Connection) -> None:
     branch-based database onto the flat model. Idempotent."""
     conn.executescript(CLIENTS_SCHEMA)
     _migrate(conn)
+    # Created AFTER the fold: a pre-revision DB has no `gstin` column on
+    # end_clients until _migrate() adds and fills it, so the partial UNIQUE
+    # index (one GSTIN = one active registration) can only be built here.
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_end_clients_gstin_unique
+            ON end_clients(gstin)
+         WHERE gstin IS NOT NULL AND gstin <> ''
+        """
+    )
+    conn.commit()

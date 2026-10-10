@@ -369,9 +369,12 @@ def test_normalize_source_file_routes_credit_notes_to_the_note_parser(workbook, 
 
     db = tmp_path / "note_smoke.db"
     bootstrap.init_all(str(db))
+    from conftest import seed_client
+
+    client_id = seed_client(db, "Test Client")
 
     result = normalizer.normalize_source_file(
-        str(workbook), "credit_notes", "Test Client", "2025-04",
+        str(workbook), "credit_notes", client_id, "2025-04",
         actor="test", filename="Credit Note.xlsx", db_path=str(db),
     )
 
@@ -397,9 +400,12 @@ def test_normalize_source_file_leaves_the_note_register_alone_for_other_slots(wo
 
     db = tmp_path / "books_smoke.db"
     bootstrap.init_all(str(db))
+    from conftest import seed_client
+
+    client_id = seed_client(db, "Test Client")
 
     result = normalizer.normalize_source_file(
-        str(workbook), "tally", "Test Client", "2025-04",
+        str(workbook), "tally", client_id, "2025-04",
         actor="test", filename="Credit Note.xlsx", db_path=str(db),
     )
     assert result.source_type == "tally"

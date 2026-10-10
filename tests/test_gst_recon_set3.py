@@ -37,6 +37,7 @@ GSTR2B = FIXTURES / "092026_09AAFFK7654G1ZS_GSTR2B_TESTSET3.xlsx"
 IMS = FIXTURES / "IMS_09AAFFK7654G1ZS_TESTSET3.xlsx"
 BOOKS = FIXTURES / "PurchaseRegister_TESTSET3_KavyaApparels.xlsx"
 CLIENT = "Test Client"
+CLIENT_ID = 1
 PERIOD = "2026-08"
 SELECTED = {"tally": BOOKS.name, "gstr2b": GSTR2B.name, "ims": IMS.name}
 
@@ -56,7 +57,7 @@ def data_root(tmp_path_factory):
     """Point the engine's DATA_ROOT at a private copy of the three files."""
     root = tmp_path_factory.mktemp("set3_data")
     for source_type, src in (("gstr2b", GSTR2B), ("ims", IMS), ("tally", BOOKS)):
-        dest = root / CLIENT / PERIOD / source_type
+        dest = root / str(CLIENT_ID) / PERIOD / source_type
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dest / src.name)
 
@@ -76,13 +77,16 @@ def db_path(tmp_path_factory):
     replayed in place of a fresh parse."""
     path = tmp_path_factory.mktemp("set3_db") / "poc.db"
     bootstrap.init_all(path)
+    from conftest import seed_client
+
+    seed_client(path, CLIENT)
     return path
 
 
 @pytest.fixture(scope="module")
 def loaded(data_root, db_path):
     return load_canonical_pair(
-        CLIENT, PERIOD, "GST", SELECTED, client_id=None, db_path=db_path,
+        CLIENT_ID, PERIOD, "GST", SELECTED, db_path=db_path,
     )
 
 
@@ -222,7 +226,7 @@ def test_without_a_note_register_the_note_pass_does_not_run(data_root, db_path):
     from src import queries, runner
 
     rid = runner.execute_run(
-        CLIENT, PERIOD, "GST", None, load_config(),
+        CLIENT_ID, CLIENT, PERIOD, "GST", None, load_config(),
         db_path=db_path, selected_files=SELECTED, actor="test",
     )
     assert len(queries.get_note_results(rid, db_path=db_path)) == 0
@@ -286,7 +290,7 @@ def test_report_headline_and_difference_type_render(data_root, db_path):
     from src.reconciliation import report_export as ex
 
     rid = runner.execute_run(
-        CLIENT, PERIOD, "GST", None, load_config(),
+        CLIENT_ID, CLIENT, PERIOD, "GST", None, load_config(),
         db_path=db_path, selected_files=SELECTED, actor="test",
     )
     data = ex.build_export_data(rid, db_path=db_path)

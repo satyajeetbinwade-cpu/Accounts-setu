@@ -66,61 +66,41 @@ class ReportError(Exception):
 
 
 def list_report_runs(
-    *, client: Optional[str] = None, period: Optional[str] = None, recon_type: Optional[str] = None,
+    *, client_id: Optional[int] = None, period: Optional[str] = None, recon_type: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Every completed run the report can be built for, newest first."""
-    df = queries.list_runs(client=client, period=period, recon_type=recon_type)
+    df = queries.list_runs(client_id=client_id, period=period, recon_type=recon_type)
     runs: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         rt = row.get("recon_type")
+        cid = row.get("client_id")
+        cid = int(cid) if cid is not None else None
+        name = row.get("client_name_at_run") or _client_display_name(cid)
         runs.append({
             "run_id": int(row["run_id"]),
-            "client": row.get("client") or "",
+            "client_id": cid,
+            "client_name": name,
             "period": row.get("period") or "",
             "recon_type": rt,
-            "label": f"{row.get('client')} · {row.get('period')} · {rt}",
+            "label": f"{name} · {row.get('period')} · {rt}",
         })
     return runs
 
 
 # ---------------------------------------------------------------------------
-# Client resolution (folder key → F2 client)
+# Client display name (identity is always client_id)
 # ---------------------------------------------------------------------------
 
 
-def _normalize_name(name: str) -> str:
-    return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-
-def resolve_client_id(folder: str) -> Optional[int]:
-    """Map a run's `client` folder key (e.g. "AcmeTextiles") onto F2's
-    end_clients row (exact, then normalized prefix). Best-effort."""
-    if not folder:
-        return None
-    try:
-        rows = clients.list_clients(include_inactive=True)
-    except Exception:  # noqa: BLE001
-        return None
-    target = _normalize_name(folder)
-    for c in rows:
-        if _normalize_name(c["legal_name"]) == target:
-            return int(c["client_id"])
-    for c in rows:
-        norm = _normalize_name(c["legal_name"])
-        if norm and (norm.startswith(target) or target.startswith(norm)):
-            return int(c["client_id"])
-    return None
-
-
-def _client_display_name(client_id: Optional[int], folder: str) -> str:
+def _client_display_name(client_id: Optional[int]) -> str:
     if client_id is not None:
         try:
-            row = clients.get_client(client_id)
+            row = clients.get_client(int(client_id))
             if row and row.get("legal_name"):
                 return row["legal_name"]
         except Exception:  # noqa: BLE001
             pass
-    return folder
+    return f"#{client_id}" if client_id else ""
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +219,11 @@ def build_report(run_id: int, *, allow_ai: bool = False, db_path=None) -> dict[s
     if run is None:
         raise ReportError(f"Run {run_id} not found.")
     recon_type = run["recon_type"]
-    folder = run["client"]
     period = run["period"]
 
-    client_id = resolve_client_id(folder)
-    client_name = _client_display_name(client_id, folder)
+    client_id = run.get("client_id")
+    client_id = int(client_id) if client_id is not None else None
+    client_name = _client_display_name(client_id)
 
     df = queries.get_results(run_id, db_path=db_path)
     records: list[dict[str, Any]] = []
@@ -383,14 +363,13 @@ def build_report(run_id: int, *, allow_ai: bool = False, db_path=None) -> dict[s
     trend = _trend(run_id, folder, period, recon_type, match_rate, sql_path=db_path)
 
     # Data quality & scope notes.
-    data_quality = _data_quality(run, folder, client_name, recon_type, df, records)
+    data_quality = _data_quality(run, client_name, recon_type, df, records)
 
     # Integrity strip (F5 gate + independent verification).
     integrity = _integrity(run_id, client_id, records, bucket_stat, db_path=db_path)
 
     return {
         "run_id": run_id,
-        "client_folder": folder,
         "client_name": client_name,
         "client_id": client_id,
         "period": period,
@@ -429,17 +408,18 @@ def list_report_periods() -> list[dict[str, Any]]:
     period first. This is the report's unit of selection — a period report
     shows GST and TDS together."""
     df = queries.list_runs()
-    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    seen: dict[tuple[Any, str], dict[str, Any]] = {}
     for _, row in df.iterrows():
-        folder = row.get("client") or ""
+        cid = row.get("client_id")
+        cid = int(cid) if cid is not None else None
         period = row.get("period") or ""
-        key = (folder, period)
-        entry = seen.setdefault(key, {"client_folder": folder, "period": period, "recon_types": set()})
+        key = (cid, period)
+        entry = seen.setdefault(key, {"client_id": cid, "period": period, "recon_types": set()})
         entry["recon_types"].add(row.get("recon_type"))
     out = []
     for entry in seen.values():
         entry["recon_types"] = sorted(entry["recon_types"])
-        entry["client_name"] = _client_display_name(resolve_client_id(entry["client_folder"]), entry["client_folder"])
+        entry["client_name"] = _client_display_name(entry["client_id"])
         entry["label"] = f"{entry['client_name']} · {entry['period']}"
         out.append(entry)
     # Real calendar periods (YYYY-MM) first, newest first; demo-session keys
@@ -452,31 +432,31 @@ def _is_calendar_period(period: str) -> bool:
     return bool(re.fullmatch(r"\d{4}-\d{2}", period or ""))
 
 
-def _latest_run(folder: str, period: str, recon_type: str) -> Optional[int]:
+def _latest_run(client_id: int, period: str, recon_type: str) -> Optional[int]:
     conn = recon_db.get_connection()
     try:
         row = conn.execute(
-            "SELECT run_id FROM runs WHERE client = ? AND period = ? AND recon_type = ? "
+            "SELECT run_id FROM runs WHERE client_id = ? AND period = ? AND recon_type = ? "
             "ORDER BY run_id DESC LIMIT 1",
-            (folder, period, recon_type),
+            (int(client_id), period, recon_type),
         ).fetchone()
     finally:
         conn.close()
     return int(row[0]) if row else None
 
 
-def build_period_report(folder: str, period: str, *, allow_ai: bool = False) -> dict[str, Any]:
+def build_period_report(client_id: int, period: str, *, allow_ai: bool = False) -> dict[str, Any]:
     """Compose the GST and TDS reports for one client+period into the single
     report the screen renders. Either side may be absent — the view renders a
     clear, actionable empty state rather than a blank card."""
-    gst_run = _latest_run(folder, period, "GST")
-    tds_run = _latest_run(folder, period, "TDS")
+    gst_run = _latest_run(client_id, period, "GST")
+    tds_run = _latest_run(client_id, period, "TDS")
 
     gst = build_report(gst_run) if gst_run else None
     tds = build_report(tds_run) if tds_run else None
 
     if gst is None and tds is None:
-        raise ReportError(f"No reconciliation run exists for {folder} · {period}.")
+        raise ReportError(f"No reconciliation run exists for client_id={client_id} · {period}.")
 
     primary = gst or tds
     client_id = primary["client_id"]
@@ -540,7 +520,6 @@ def build_period_report(folder: str, period: str, *, allow_ai: bool = False) -> 
     integrity = (gst or tds)["integrity"]
 
     report = {
-        "client_folder": folder,
         "client_name": client_name,
         "client_id": client_id,
         "period": period,
@@ -617,7 +596,7 @@ def _trend(run_id, folder, period, recon_type, this_rate, *, sql_path=None) -> d
     }
 
 
-def _data_quality(run, folder, client_name, recon_type, df, records) -> dict[str, Any]:
+def _data_quality(run, client_name, recon_type, df, records) -> dict[str, Any]:
     """Specific, run-derived notes — never generic boilerplate."""
     notes: list[dict[str, str]] = []
 
@@ -629,16 +608,9 @@ def _data_quality(run, folder, client_name, recon_type, df, records) -> dict[str
             "kind": "caveat",
         })
 
-    # 2. The client label in the run vs F2's legal name.
-    if client_name and _normalize_name(client_name) != _normalize_name(folder):
-        notes.append({
-            "title": "Run label differs from the client master",
-            "detail": (
-                f"This run is filed under \u201c{folder}\u201d, matched to client master "
-                f"\u201c{client_name}\u201d. Confirmed by name matching, not by an explicit link."
-            ),
-            "kind": "note",
-        })
+    # 2. (removed) The old name-drift note compared the run's folder label to
+    # F2's legal name. Identity is client_id now, so drift is impossible and
+    # the note is gone.
 
     # 3. Missing portal/books side.
     if records:

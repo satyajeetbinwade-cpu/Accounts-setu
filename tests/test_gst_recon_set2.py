@@ -34,6 +34,7 @@ GSTR2B = FIXTURES / "092026_07AAECM4521F1Z8_GSTR2B_TESTSET2.xlsx"
 IMS = FIXTURES / "IMS_07AAECM4521F1Z8_TESTSET2.xlsx"
 BOOKS = FIXTURES / "PurchaseRegister_TESTSET2_MeridianTextiles.xlsx"
 CLIENT = "Test Client"
+CLIENT_ID = 1
 PERIOD = "2026-08"
 SELECTED = {"tally": BOOKS.name, "gstr2b": GSTR2B.name, "ims": IMS.name}
 
@@ -49,7 +50,7 @@ def data_root(tmp_path_factory):
     """Point the engine's DATA_ROOT at a private copy of the three files."""
     root = tmp_path_factory.mktemp("set2_data")
     for source_type, src in (("gstr2b", GSTR2B), ("ims", IMS), ("tally", BOOKS)):
-        dest = root / CLIENT / PERIOD / source_type
+        dest = root / str(CLIENT_ID) / PERIOD / source_type
         dest.mkdir(parents=True, exist_ok=True)
         shutil.copy(src, dest / src.name)
 
@@ -66,7 +67,7 @@ def data_root(tmp_path_factory):
 @pytest.fixture(scope="module")
 def results(data_root):
     books, portal, _files, _caveats, _notes = load_canonical_pair(
-        CLIENT, PERIOD, "GST", SELECTED, client_id=None,
+        CLIENT_ID, PERIOD, "GST", SELECTED,
     )
     return match_gst(books, portal, load_config()["gst"])
 
@@ -79,6 +80,9 @@ def db_path(tmp_path_factory):
 
     path = tmp_path_factory.mktemp("set2_db") / "poc.db"
     bootstrap.init_all(path)
+    from conftest import seed_client
+
+    seed_client(path, CLIENT)
     return path
 
 
@@ -141,7 +145,7 @@ def test_credit_notes_are_reported_in_the_dedicated_section(data_root, db_path):
     from src.reconciliation import report_export as ex
 
     rid = runner.execute_run(
-        CLIENT, PERIOD, "GST", None, load_config(),
+        CLIENT_ID, CLIENT, PERIOD, "GST", None, load_config(),
         db_path=db_path, selected_files=SELECTED, actor="test",
     )
     data = ex.build_export_data(rid, db_path=db_path)
@@ -164,7 +168,7 @@ def test_without_a_note_register_the_note_pass_does_not_run(data_root, db_path):
     from src.reconciliation import report_export as ex
 
     rid = runner.execute_run(
-        CLIENT, PERIOD, "GST", None, load_config(),
+        CLIENT_ID, CLIENT, PERIOD, "GST", None, load_config(),
         db_path=db_path, selected_files=SELECTED, actor="test",
     )
     assert len(queries.get_note_results(rid, db_path=db_path)) == 0
@@ -238,12 +242,16 @@ def test_confidence_is_independent_of_value_gap(model):
 def test_report_row_value_single_side_and_difference_type(
     data_root, tmp_path
 ):
-    from src import db, runner
+    from src import bootstrap, db, runner
     from src.reconciliation import report_export as ex
 
     db_path = tmp_path / "poc.db"
+    bootstrap.init_all(db_path)
+    from conftest import seed_client
+
+    seed_client(db_path, CLIENT)
     rid = runner.execute_run(
-        CLIENT, PERIOD, "GST", None, load_config(),
+        CLIENT_ID, CLIENT, PERIOD, "GST", None, load_config(),
         db_path=db_path, selected_files=SELECTED, actor="test",
     )
     data = ex.build_export_data(rid, db_path=db_path)
