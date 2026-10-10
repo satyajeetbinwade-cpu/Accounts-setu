@@ -1,0 +1,87 @@
+{
+  "mode": "apply",
+  "backup": "/tmp/mig_rep/backups/poc_pre_clientid_20261010T135057Z.db",
+  "applied_migrations": [
+    1
+  ],
+  "mapping": {
+    "exact": [
+      "Meridian Fabrics",
+      "Test Client"
+    ],
+    "normalized": [],
+    "fuzzy": [],
+    "ambiguous": [],
+    "created": [],
+    "name_to_id": {
+      "Meridian Fabrics": 2,
+      "Test Client": 1
+    }
+  },
+  "folder_moves": {
+    "manifest_path": "/tmp/mig_rep/data/_migration_manifest.json",
+    "moved": 2,
+    "would_move": 0,
+    "skipped_existing": {},
+    "moves": [
+      {
+        "old_path": "/tmp/mig_rep/data/Meridian Fabrics",
+        "old_name": "Meridian Fabrics",
+        "client_id": 2,
+        "new_path": "/tmp/mig_rep/data/2",
+        "status": "moved"
+      },
+      {
+        "old_path": "/tmp/mig_rep/data/Test Client",
+        "old_name": "Test Client",
+        "client_id": 1,
+        "new_path": "/tmp/mig_rep/data/1",
+        "status": "moved"
+      }
+    ]
+  },
+  "row_counts_before": {
+    "end_clients": 2,
+    "runs": 17,
+    "match_results": 659,
+    "review_state": 1,
+    "result_field_overrides": 0,
+    "ingestion_results": 13,
+    "ingestion_shape_cache": 1,
+    "column_mapping_profiles": 3,
+    "raw_uploads": 4,
+    "per_client_team_assignments": 0,
+    "users": 3,
+    "documents": 8,
+    "document_versions": 8,
+    "invoice_uploads": 10,
+    "edit_history_entries": 838,
+    "reconciliation_exceptions": 294,
+    "eligible_credit_figures": 10,
+    "sync_health_status": 27,
+    "recon_of_recon_results": 10,
+    "tally_export_batches": 1
+  },
+  "row_counts_after": {
+    "end_clients": 2,
+    "runs": 17,
+    "match_results": 659,
+    "review_state": 1,
+    "result_field_overrides": 0,
+    "ingestion_results": 13,
+    "ingestion_shape_cache": 1,
+    "column_mapping_profiles": 3,
+    "raw_uploads": 4,
+    "per_client_team_assignments": 0,
+    "users": 3,
+    "documents": 8,
+    "document_versions": 8,
+    "invoice_uploads": 10,
+    "edit_history_entries": 838,
+    "reconciliation_exceptions": 294,
+    "eligible_credit_figures": 10,
+    "sync_health_status": 27,
+    "recon_of_recon_results": 10,
+    "tally_export_batches": 1
+  }
+}
