@@ -593,3 +593,45 @@ def test_sandboxed_data_root_seeds_sources_and_isolates_exports(tmp_path, monkey
 
     assert _fingerprint(real) == before, "the real data root was modified"
 
+
+def test_duplicate_gstin_in_the_roster_blocks_the_migration_with_a_named_error(tmp_path):
+    """A legacy roster holding one GSTIN twice cannot satisfy
+    "one GST registration = one client". The migration must stop, and the error
+    must NAME the offending rows — a raw
+    `IntegrityError: UNIQUE constraint failed: end_clients.gstin` tells the
+    operator nothing about what to fix.
+
+    This mirrors the live production roster, where "KMAP Capital Limited" exists
+    twice with the same PAN and GSTIN.
+    """
+    from src import bootstrap
+    from src.clients import schema as clients_schema
+
+    db = _legacy_db(tmp_path)
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE end_clients SET legal_name=?, pan=?, gstin=? WHERE client_id=1",
+        ("KMAP Capital Limited", "AAECK9054D", "07AAECK9054D1ZK"),
+    )
+    con.execute(
+        "INSERT INTO end_clients (legal_name, pan, gstin, is_active, created_at) "
+        "VALUES (?,?,?,1,?)",
+        ("KMAP Capital Limited", "AAECK9054D", "07AAECK9054D1ZK", "2026-01-01"),
+    )
+    con.commit()
+    con.row_factory = sqlite3.Row
+    dupes = clients_schema.duplicate_gstins(con)
+    con.close()
+    assert len(dupes) == 1
+    assert dupes[0][0] == "07AAECK9054D1ZK"
+    assert sorted(dupes[0][1]) == [1, 2]
+
+    with pytest.raises(RuntimeError) as exc:
+        bootstrap.run_migrations(db, data_root=tmp_path / "data")
+
+    message = str(exc.value)
+    assert "the same GST registration more than once" in message
+    assert "07AAECK9054D1ZK" in message
+    assert "client_id=1" in message and "client_id=2" in message
+    assert "UNIQUE constraint failed" not in message
+

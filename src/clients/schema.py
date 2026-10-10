@@ -195,6 +195,55 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def duplicate_gstins(conn: sqlite3.Connection) -> list[tuple[str, list[int], list[str]]]:
+    """Client rows that share one GSTIN, as ``(gstin, client_ids, names)``.
+
+    One GST registration is one EndClient, so a GSTIN appearing twice means the
+    roster holds the same registration twice — normally the same company added
+    through the UI a second time.
+    """
+    rows = conn.execute(
+        """
+        SELECT gstin, GROUP_CONCAT(client_id), GROUP_CONCAT(legal_name, ' | ')
+          FROM end_clients
+         WHERE gstin IS NOT NULL AND TRIM(gstin) <> ''
+         GROUP BY gstin
+        HAVING COUNT(*) > 1
+         ORDER BY gstin
+        """
+    ).fetchall()
+    return [
+        (str(gstin), [int(i) for i in str(ids).split(",")], [n for n in str(names).split(" | ")])
+        for gstin, ids, names in rows
+    ]
+
+
+class DuplicateClientGstin(RuntimeError):
+    """Two or more ``end_clients`` rows share one GSTIN.
+
+    Raised before the partial UNIQUE index can be built, so every caller (app
+    boot, the migration CLI, a verification harness) gets an actionable message
+    naming the offending rows instead of a raw
+    ``IntegrityError: UNIQUE constraint failed: end_clients.gstin``.
+    """
+
+    def __init__(self, duplicates) -> None:
+        self.duplicates = list(duplicates)
+        lines = [
+            "The client master holds the same GST registration more than once, "
+            "so the one-GSTIN-one-client constraint cannot be enforced.",
+            "",
+            "A GSTIN is a registration; one registration is one client. Fix the "
+            "roster first — keep the row that OWNS the data and remove the "
+            "other (or blank its GSTIN) from the F2 client screen:",
+            "",
+        ]
+        for gstin, ids, names in self.duplicates:
+            joined = ", ".join(f"client_id={i} ({n})" for i, n in zip(ids, names))
+            lines.append(f"  - {gstin}: {joined}")
+        super().__init__("\n".join(lines))
+
+
 def init_clients_schema(conn: sqlite3.Connection) -> None:
     """Create F2 client tables if missing, then fold a pre-revision
     branch-based database onto the flat model. Idempotent."""
@@ -203,6 +252,13 @@ def init_clients_schema(conn: sqlite3.Connection) -> None:
     # Created AFTER the fold: a pre-revision DB has no `gstin` column on
     # end_clients until _migrate() adds and fills it, so the partial UNIQUE
     # index (one GSTIN = one active registration) can only be built here.
+    #
+    # Check for duplicates first so the failure names the rows. Creating the
+    # index directly raises `UNIQUE constraint failed: end_clients.gstin`,
+    # which says nothing about WHICH client to fix.
+    dupes = duplicate_gstins(conn)
+    if dupes:
+        raise DuplicateClientGstin(dupes)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_end_clients_gstin_unique
