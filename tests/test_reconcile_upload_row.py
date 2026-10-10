@@ -28,8 +28,6 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from setu.state import reconcile_state as rs
 
 
@@ -320,3 +318,32 @@ def test_removing_a_row_keeps_the_users_file_on_disk(tmp_path, monkeypatch):
 
     assert "gstr2b" not in st.selections
     assert saved.exists()
+
+
+def test_the_page_rows_and_the_state_rows_agree(monkeypatch):
+    """Stage 2 indexes `slot_rows[source_type]` with a LITERAL per recon type
+    (it cannot iterate, because `rx.upload` is memoized). If a literal names a
+    document the state never built, the browser reads `undefined` and the page
+    dies — and no component-build test can see that, because indexing a dict
+    Var is only evaluated at render time.
+
+    So: the literals must be exactly `slot_types_for()` for every recon type,
+    and `_load_slots` must fill a row for each of them.
+    """
+    from src.shared import discovery
+    from setu.views.reconcile_page import _ROWS_BY_RECON_TYPE
+
+    assert dict(_ROWS_BY_RECON_TYPE) == {
+        recon_type: tuple(discovery.slot_types_for(recon_type))
+        for recon_type in discovery.RECON_TYPES
+    }, "the page's literal rows drifted from what the state offers"
+
+    monkeypatch.setattr(rs, "_list_files", lambda *a, **k: [])
+    for recon_type, source_types in _ROWS_BY_RECON_TYPE:
+        state = _slot_state(ctx_recon_type=recon_type)
+        rs.ReconcileState._load_slots(state)
+        for source_type in source_types:
+            assert source_type in state.slot_rows, (
+                f"{recon_type} renders a row for {source_type!r} "
+                "but the state has no such row"
+            )
