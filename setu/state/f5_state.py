@@ -278,13 +278,15 @@ class F5State(AuthState):
         self._load_all()
 
     @rx.event
-    def set_sync_client(self, client_id: int):
-        self.sync_client_id = client_id
+    def set_sync_client(self, value: str):
+        """The picker hands the client_id as a STRING (``rx.select.root`` is
+        string-typed); store the integer."""
+        self.sync_client_id = int(value or 0)
         self._load_sync()
 
     @rx.event
-    def set_ror_client(self, client_id: int):
-        self.ror_client_id = client_id
+    def set_ror_client(self, value: str):
+        self.ror_client_id = int(value or 0)
         self._load_ror()
 
     def _option_name(self, client_id: int) -> str:

@@ -248,7 +248,7 @@ def _sync_health() -> rx.Component:
     return rx.vstack(
         c.client_picker(
             F5State.client_options,
-            value=F5State.sync_client_id,
+            value=F5State.sync_client_id.to_string(),
             on_change=F5State.set_sync_client,
             placeholder="Select a client",
             width="280px",
@@ -315,7 +315,7 @@ def _recon_of_recon() -> rx.Component:
     return rx.vstack(
         c.client_picker(
             F5State.client_options,
-            value=F5State.ror_client_id,
+            value=F5State.ror_client_id.to_string(),
             on_change=F5State.set_ror_client,
             placeholder="Select a client",
             width="280px",

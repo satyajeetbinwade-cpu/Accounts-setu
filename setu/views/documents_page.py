@@ -470,7 +470,7 @@ def _document_detail() -> rx.Component:
                     rx.vstack(
                         c.client_picker(
                             DocumentsState.client_options,
-                            value=DocumentsState.reassign_client_id,
+                            value=DocumentsState.reassign_client_id.to_string(),
                             on_change=DocumentsState.set_reassign_client,
                             width="280px",
                         ),

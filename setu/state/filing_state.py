@@ -280,8 +280,10 @@ class FilingState(AuthState):
         self.error = ""
 
     @rx.event
-    def set_build_client(self, client_id: int):
-        self.build_client_id = client_id
+    def set_build_client(self, value: str):
+        """The picker hands the client_id as a STRING (``rx.select.root`` is
+        string-typed); store the integer."""
+        self.build_client_id = int(value or 0)
 
     def set_build_period(self, v: str):
         self.build_period = v
@@ -308,8 +310,8 @@ class FilingState(AuthState):
         self._load_calendar()
 
     @rx.event
-    def set_new_client(self, client_id: int):
-        self.new_client_id = client_id
+    def set_new_client(self, value: str):
+        self.new_client_id = int(value or 0)
 
     @rx.event
     def set_new_obligation(self, v: str):
@@ -319,8 +321,8 @@ class FilingState(AuthState):
         self.new_period = v
 
     @rx.event
-    def set_source_client(self, client_id: int):
-        self.source_client_id = client_id
+    def set_source_client(self, value: str):
+        self.source_client_id = int(value or 0)
         self._load_sources()
 
     @rx.event

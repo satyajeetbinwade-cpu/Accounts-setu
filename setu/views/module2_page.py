@@ -36,7 +36,7 @@ def _hub_button(label: str) -> rx.Component:
 def _client_select() -> rx.Component:
     return c.client_picker(
         Module2State.client_options,
-        value=Module2State.client_id,
+        value=Module2State.client_id.to_string(),
         on_change=Module2State.set_client,
         width="260px",
     )

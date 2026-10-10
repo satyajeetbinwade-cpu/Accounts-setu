@@ -358,8 +358,10 @@ class Module2State(AuthState):
         self.error = ""
 
     @rx.event
-    def set_client(self, client_id: int):
-        self.client_id = client_id
+    def set_client(self, value: str):
+        """The picker hands the client_id as a STRING (``rx.select.root`` is
+        string-typed); store the integer."""
+        self.client_id = int(value or 0)
         self.selected_exception_id = 0
         self._load_all()
 

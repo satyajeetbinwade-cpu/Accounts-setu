@@ -176,7 +176,7 @@ def _upload_section() -> rx.Component:
                 rx.text("Client", style=t.TEXT["label"]),
                 c.client_picker(
                     F6State.client_options,
-                    value=F6State.upload_client_id,
+                    value=F6State.upload_client_id.to_string(),
                     on_change=F6State.set_upload_client,
                     placeholder="Select a client",
                     width="240px",

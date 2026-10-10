@@ -112,6 +112,7 @@ def _rule_row(rule) -> rx.Component:
                 RulesState.scope[key] == "client",
                 c.client_picker(
                     RulesState.client_options,
+                    value=RulesState.client_for_rule_options[key],
                     on_change=lambda v: RulesState.set_client_for_rule_value(key, v),
                     placeholder="Select a client",
                     width="280px",

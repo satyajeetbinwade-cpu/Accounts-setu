@@ -117,7 +117,7 @@ def _calendar() -> rx.Component:
                 rx.hstack(
                     c.client_picker(
                         FilingState.client_options,
-                        value=FilingState.build_client_id,
+                        value=FilingState.build_client_id.to_string(),
                         on_change=FilingState.set_build_client,
                         width="240px",
                     ),
@@ -198,7 +198,7 @@ def _new_filing_form() -> rx.Component:
             rx.hstack(
                 c.client_picker(
                     FilingState.client_options,
-                    value=FilingState.new_client_id,
+                    value=FilingState.new_client_id.to_string(),
                     on_change=FilingState.set_new_client,
                     width="240px",
                 ),
@@ -681,7 +681,7 @@ def _sources() -> rx.Component:
             ),
             c.client_picker(
                 FilingState.client_options,
-                value=FilingState.source_client_id,
+                value=FilingState.source_client_id.to_string(),
                 on_change=FilingState.set_source_client,
                 width="240px",
             ),

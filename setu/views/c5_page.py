@@ -259,7 +259,7 @@ def _instruction_form() -> rx.Component:
                 C5State.form_scope == "client",
                 c.client_picker(
                     C5State.client_options,
-                    value=C5State.form_client_id,
+                    value=C5State.form_client_id.to_string(),
                     on_change=C5State.set_form_client_id,
                     placeholder="Select a client",
                     width="280px",

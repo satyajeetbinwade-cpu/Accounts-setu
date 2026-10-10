@@ -20,7 +20,7 @@ def _context_bar() -> rx.Component:
         rx.hstack(
             c.client_picker(
                 Phase1State.clients,
-                value=Phase1State.ctx_client_id,
+                value=Phase1State.ctx_client_id.to_string(),
                 on_change=Phase1State.set_ctx_client,
                 width="200px",
             ),

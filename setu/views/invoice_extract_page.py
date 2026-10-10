@@ -130,7 +130,7 @@ def _upload_section() -> rx.Component:
                 rx.hstack(
                     c.client_picker(
                         InvoiceExtractState.client_options,
-                        value=InvoiceExtractState.upload_client_id,
+                        value=InvoiceExtractState.upload_client_id.to_string(),
                         on_change=InvoiceExtractState.set_upload_client,
                         width="240px",
                     ),
@@ -939,7 +939,7 @@ def _export_section() -> rx.Component:
                 ),
                 c.client_picker(
                     InvoiceExtractState.client_options,
-                    value=InvoiceExtractState.export_client_id,
+                    value=InvoiceExtractState.export_client_id.to_string(),
                     on_change=InvoiceExtractState.set_export_client,
                     width="240px",
                 ),

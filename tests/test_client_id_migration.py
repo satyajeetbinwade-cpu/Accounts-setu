@@ -449,6 +449,26 @@ import runpy
 runpy.run_path({main!r}, run_name="__main__")
 """
 
+# Build EVERY page component. `reflex run` does exactly this before it serves
+# anything, and a page that cannot build is a page that cannot render — but
+# pytest never compiles a page, so this is the only place the failure shows up.
+# NOTE: no braces in this snippet — it goes through `str.format()`.
+_BUILD_PAGES_CHILD = _CHILD_PREAMBLE + """
+from setu.views import pages as p
+from setu.views.login import login_page
+
+builders = [("login", login_page), ("dashboard", p.dashboard_page)] + list(p.all_routes())
+failed = []
+for name, builder in builders:
+    try:
+        builder()
+    except Exception as exc:
+        failed.append(name + ": " + type(exc).__name__ + ": " + str(exc))
+if failed:
+    raise SystemExit("PAGE COMPONENT BUILD FAILED\\n  - " + "\\n  - ".join(failed))
+print("BUILT " + str(len(builders)) + " PAGE COMPONENTS")
+"""
+
 
 def _run_child(body: str, tmp_path, db: Path, data: Path) -> "subprocess.CompletedProcess":
     src = body.format(repo=str(_REPO_ROOT), db=str(db), data=str(data),
@@ -634,4 +654,26 @@ def test_duplicate_gstin_in_the_roster_blocks_the_migration_with_a_named_error(t
     assert "07AAECK9054D1ZK" in message
     assert "client_id=1" in message and "client_id=2" in message
     assert "UNIQUE constraint failed" not in message
+
+
+def test_every_page_component_builds(tmp_path):
+    """Every route's component tree must construct.
+
+    `reflex run` builds them before serving, so a failure here is a page that
+    cannot render at all — and it is invisible to pytest otherwise. The
+    client-id refactor broke this three ways, all found only by running the app:
+      * `client_picker(value=<int var>)` — `rx.select.root.value` is
+        string-typed, so every call site needs `.to_string()`;
+      * `on_change=<handler annotated client_id: int>` — the picker hands the id
+        back as a STRING, so Reflex rejects the handler signature;
+      * a picker called without `value=` at all.
+    """
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client"])
+    migrate.run(db_path=db, data_root=data)
+
+    proc = _run_child(_BUILD_PAGES_CHILD, tmp_path, db, data)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "BUILT " in proc.stdout and "PAGE COMPONENTS" in proc.stdout
 

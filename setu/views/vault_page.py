@@ -300,7 +300,7 @@ def _credential_vault() -> rx.Component:
                         VaultState.add_scoped,
                         c.client_picker(
                             VaultState.client_options,
-                            value=VaultState.add_client_id,
+                            value=VaultState.add_client_id.to_string(),
                             on_change=VaultState.set_add_client_id,
                             placeholder="Select a client",
                             width="280px",
@@ -469,7 +469,7 @@ def _dpdp_workflow() -> rx.Component:
                     rx.text("Submit a DPDP deletion request", style=t.TEXT["card_title"]),
                     c.client_picker(
                         VaultState.client_options,
-                        value=VaultState.dpdp_client_id,
+                        value=VaultState.dpdp_client_id.to_string(),
                         on_change=VaultState.set_dpdp_client_id,
                         placeholder="Select a client",
                         width="320px",

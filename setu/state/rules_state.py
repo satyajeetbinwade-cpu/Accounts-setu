@@ -255,6 +255,17 @@ class RulesState(AuthState):
         versions = rules.rule_versions(key, scope="client", client_id=cid)
         self.value[key] = versions[0]["value"] if versions else ""
 
+    @rx.var
+    def client_for_rule_options(self) -> dict[str, str]:
+        """Per-rule selected client_id as a STRING, one entry per rule.
+
+        ``rx.select.root``'s ``value`` must be a string while the stored id is
+        an int, and the picker needs a defined value for EVERY rule (a missing
+        key would render as ``undefined`` instead of the placeholder), hence
+        the 0 default.
+        """
+        return {r.key: str(self.client_for_rule.get(r.key, 0)) for r in self.rules}
+
     def set_client_for_rule(self, key: str, client_id: int):
         self.client_for_rule[key] = client_id
         self._load_client_value(key)

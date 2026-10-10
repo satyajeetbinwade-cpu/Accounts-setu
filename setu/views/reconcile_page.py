@@ -98,7 +98,7 @@ def _context_stage() -> rx.Component:
                     rx.hstack(
                         c.client_picker(
                             ReconcileState.clients,
-                            value=ReconcileState.ctx_client_id,
+                            value=ReconcileState.ctx_client_id.to_string(),
                             on_change=ReconcileState.set_ctx_client,
                             placeholder="Select a client",
                             width="220px",
