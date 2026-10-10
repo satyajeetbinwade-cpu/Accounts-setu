@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Setu · Upload page (design B) — every state, with upload &amp; normalize on choose</title>
+<style>
+  :root{
+    --page:#EEF0F2; --surface:#FFFFFF; --text:#16181D; --text2:#6B7280; --muted:#9CA3AF;
+    --border:#E7E9EC; --rule:#6FA84B; --rule-on:#2E4A1E; --ai:#E8A33D; --ai-on:#8A5A12;
+    --danger:#E2574C; --accent:#3B6FDB; --neutral-bg:#F1F2F4;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--text);
+       font:400 13.5px/1.5 Inter,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}
+  h1{font-size:25px;margin:0 0 4px;letter-spacing:-.02em}
+  h2{font-size:16px;margin:0 0 3px}
+  .sub{color:var(--text2);margin:0}
+  .wrap{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+  .banner{background:#fff;border:1px solid var(--border);border-left:3px solid var(--accent);
+          border-radius:8px;padding:11px 14px;margin:16px 0 20px;font-size:12.5px;color:var(--text2)}
+  .banner b{color:var(--text)}
+  .sect{margin-top:22px}
+  .sect > .hd{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .sect > .hd .micro{font-size:12px;color:var(--text2)}
+  .panel{background:var(--neutral-bg);border:1px solid var(--border);border-radius:12px;padding:14px}
+  .frame{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px}
+  .frame-title{font-size:15px;font-weight:700;margin:0 0 3px}
+  .frame-sub{font-size:11px;color:var(--text2);margin:0 0 12px}
+  .micro{font-size:11px;color:var(--text2)}
+  .btn{font:inherit;font-size:12.5px;font-weight:600;border-radius:9px;padding:7px 12px;
+       border:1px solid var(--border);background:#fff;color:var(--text2);cursor:pointer}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{filter:brightness(1.06);color:#fff}
+  .btn:disabled{opacity:.5;cursor:not-allowed;border-color:var(--border);color:var(--text2)}
+  .btn:disabled.primary{background:var(--neutral-bg);color:var(--muted);border-color:var(--border)}
+  .btn.tiny{padding:4px 9px;font-size:11.5px}
+  .pill{display:inline-block;font-size:10.5px;font-weight:600;border-radius:999px;
+        padding:1px 7px;border:1px solid var(--border);background:#fff;color:var(--text2);white-space:nowrap}
+  .pill.acc{color:var(--ai-on);border-color:#E8A33D88;background:#E8A33D1A}
+  .pill.ok{color:var(--rule-on);border-color:#6FA84B66;background:#6FA84B1A}
+  .pill.no{color:var(--danger);border-color:#E2574C66;background:#E2574C1A}
+
+  .uprow{display:flex;align-items:center;gap:10px;border:1px dashed var(--border);border-radius:10px;
+         background:#fff;padding:10px 12px;margin-bottom:8px;flex-wrap:wrap;transition:.15s}
+  .uprow .grow{flex:1;min-width:180px}
+  .uprow .nm{font-weight:600;font-size:12.5px}
+  .uprow .lead{width:17px;flex:none;display:grid;place-items:center}
+  .uprow .actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .uprow.done{border-style:solid;border-color:#6FA84B55;background:#6FA84B0D}
+  .uprow.busy{border-style:solid;border-color:#3B6FDB88;background:#3B6FDB0A}
+  .uprow.warn{border-style:solid;border-color:#E8A33D88;background:#E8A33D0D}
+  .uprow.err{border-style:solid;border-color:#E2574C55;background:#E2574C0A}
+  .uprow.mute{background:var(--neutral-bg)}
+  .tick{width:16px;height:16px;border-radius:50%;background:var(--rule);color:#fff;display:grid;
+        place-items:center;font-size:10px;font-weight:700}
+  .tick.b{background:var(--accent)}
+  .bang{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--ai);color:var(--ai-on);
+        display:grid;place-items:center;font-size:11px;font-weight:700;background:#fff}
+  .cross{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--danger);color:var(--danger);
+         display:grid;place-items:center;font-size:10px;font-weight:700;background:#fff}
+  .spin{width:14px;height:14px;border-radius:50%;border:2px solid #3B6FDB33;border-top-color:var(--accent);
+        animation:spin .7s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .bar{height:4px;border-radius:99px;background:#3B6FDB22;overflow:hidden;margin-top:6px;max-width:230px}
+  .bar > i{display:block;height:100%;background:var(--accent);width:0;transition:width .35s linear}
+  .cap{font-size:11px;font-weight:600;color:var(--text2);margin:0 0 6px;letter-spacing:.01em}
+  .gallery{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:900px){.gallery{grid-template-columns:1fr}}
+  .gcard{background:#fff;border:1px solid var(--border);border-radius:10px;padding:11px}
+  .gcard .why{font-size:11px;color:var(--text2);margin:0}
+  .scen{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
+  .status{margin-top:10px;font-size:12px;color:var(--text2)}
+  .status b{color:var(--text)}
+  .missing{font-size:11.5px;color:var(--ai-on);margin-top:8px}
+  table.map{width:100%;border-collapse:collapse;font-size:12px;background:#fff;border:1px solid var(--border);
+            border-radius:10px;overflow:hidden}
+  table.map th,table.map td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+  table.map th{font-size:11px;color:var(--text2);background:var(--neutral-bg);font-weight:600}
+  table.map tr:last-child td{border-bottom:none}
+  .yes{color:var(--rule-on);font-weight:600}
+  .no{color:var(--danger);font-weight:600}
+  code{background:#fff;border:1px solid var(--border);border-radius:4px;padding:0 3px;font-size:11px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Design B — the upload page: every state, and what triggers what</h1>
+  <p class="sub">A row per file. Choosing a file does the same job the old <b>Upload &amp; normalize</b> button did, in one action.</p>
+
+  <div class="banner">
+    <b>Choosing a file = upload + normalize.</b> Every path that picks a file — a row's <b>Choose file</b>, <b>Replace</b>,
+    <b>Try again</b>, <b>Add it anyway</b>, or a row's <b>Normalize it now</b> — does the whole pipeline in one go:
+    save it to <code>&lt;client&gt;/&lt;period&gt;/&lt;document&gt;</code>, detect the layout, classify it, map the columns and cache the
+    result. Then the row reports the verdict. There is no separate upload button anywhere.
+    <br><br>
+    <b>Mockup, not the live app.</b> Wording matches the real verdicts in
+    <code>setu/state/reconcile_state.py</code> (<code>not_ingested</code>, <code>wrong</code>, <code>partial</code>,
+    <code>review</code>, <code>ok</code>); the 70% bar is <code>AUTO_FILE_CONFIDENCE_THRESHOLD</code>.
+  </div>
+
+  <!-- ================= LIVE PAGE ================= -->
+  <div class="sect">
+    <div class="hd">
+      <h2>The page, driven through each case</h2>
+      <span class="micro">pick a scenario — one file per row, always</span>
+    </div>
+
+    <div class="panel">
+      <div class="frame">
+        <p class="frame-title">2. Upload</p>
+        <p class="frame-sub">Every file this run needs gets its own row. Choose the file and it's uploaded and normalized straight away — the row then tells you what it found.</p>
+
+        <div class="scen">
+          <button class="btn" id="sHappy">Happy path</button>
+          <button class="btn" id="sReview">Needs review</button>
+          <button class="btn" id="sPartial">Partial report</button>
+          <button class="btn" id="sReuse">Shape already known</button>
+          <button class="btn" id="sConfirm">Below 70%</button>
+          <button class="btn" id="sWrong">Wrong file in a row</button>
+          <button class="btn" id="sUnknown">Can't identify</button>
+          <button class="btn" id="sFail">Unreadable</button>
+          <button class="btn" id="sNotIngested">On disk, never normalized</button>
+          <button class="btn" id="sExisting">From the last run</button>
+          <button class="btn" id="sReset">Reset</button>
+        </div>
+
+        <div id="rows"></div>
+
+        <p class="missing" id="missing">Still needed: the books row and the portal row.</p>
+        <button class="btn primary" id="go" disabled>Continue to reconcile →</button>
+        <p class="status" id="status">Nothing chosen yet. Each row takes one file, and choosing it uploads and normalizes in one step.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= GALLERY ================= -->
+  <div class="sect">
+    <div class="hd">
+      <h2>Every state the row can be in</h2>
+      <span class="micro">the exact row, one case per card</span>
+    </div>
+    <div class="gallery" id="gallery"></div>
+  </div>
+
+  <!-- ================= MAP ================= -->
+  <div class="sect">
+    <div class="hd"><h2>What triggered it, and what it means for the run</h2></div>
+    <table class="map">
+      <tr><th>State</th><th>Triggered by</th><th>What normalize did</th><th>User's options</th><th>Blocks the run?</th><th>Counts as supplied?</th></tr>
+      <tr><td>Waiting</td><td>—</td><td>Nothing yet</td><td>Choose file <i>(= upload &amp; normalize)</i></td><td class="yes">—</td><td class="no">No</td></tr>
+      <tr><td>Uploading</td><td>Choose file / Replace / Try again / Add it anyway / Normalize it now</td><td>In progress: saving, layout detect, model classify, column mapping</td><td>Cancel — the row is locked so the same row can't be started twice</td><td>Pending</td><td class="no">No</td></tr>
+      <tr><td>Fully mapped <span class="pill ok">ok</span></td><td>same</td><td>Rows in, every required column mapped, result cached</td><td>Replace <i>(re-runs the whole thing)</i> · Remove</td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Needs review <span class="pill acc">review</span></td><td>same</td><td>Normalized, but some mapped fields came in under the confidence bar</td><td>Check the fields · Replace · <b>or run anyway</b></td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Partial report <span class="pill acc">partial</span></td><td>same</td><td>Normalized, but required columns could not be mapped</td><td>See what's missing · Replace · <b>or run anyway</b></td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Shape reused</td><td>same</td><td>Recognised an identical file shape — reused the trusted mapping, skipping the model call</td><td>Replace</td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Below 70%</td><td>same</td><td>Classified, but under the confidence bar, so it is not filed yet</td><td>Confirm it's the right document · Choose a different file</td><td>Until answered</td><td class="no">Not yet</td></tr>
+      <tr><td>Wrong file type <span class="pill no">wrong</span></td><td>same</td><td>Classification disagreed with the row — nothing was filed</td><td>Move it to the named row <i>(normalizes again there)</i> · Keep it here anyway · Choose another file</td><td class="no">Yes</td><td class="no">No</td></tr>
+      <tr><td>Not identifiable</td><td>same</td><td>No usable answer from the model, and this build never guesses silently</td><td>Pick its type · Send to the unfiled tray</td><td class="no">Yes</td><td class="no">No</td></tr>
+      <tr><td>Unreadable <span class="pill no">failed</span></td><td>same</td><td>Parse or model call failed — corrupt, protected or unmappable</td><td>Try again <i>(re-runs the whole thing)</i> · Remove</td><td class="no">Yes</td><td class="no">No</td></tr>
+      <tr><td>Not ingested yet <span class="pill acc">not_ingested</span></td><td>Found on disk for this client/period/document with no stored result</td><td>Nothing — the file is there but was never normalized</td><td>Normalize it now · Remove</td><td class="no">Yes</td><td class="no">No</td></tr>
+      <tr><td>From last run</td><td>Found on disk, already normalized</td><td>Reused as-is</td><td>Replace · Keep</td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Two candidates</td><td>More than one file on disk for the document</td><td>The chosen one is reused (newest preselected)</td><td>Pick which · Remove one</td><td class="no">No</td><td class="yes">Yes</td></tr>
+      <tr><td>Optional, empty</td><td>—</td><td>Nothing — the note register is outside readiness</td><td>Nothing needed · Add it anyway</td><td class="no">No</td><td>Not required</td></tr>
+    </table>
+  </div>
+</div>
+
+<script>
+  // ---------------------------------------------------------------- row renderer
+  function rowHTML (state, o, key) {
+    o = o || {};
+    const title = o.title || 'Books / Purchase Register';
+    const desc  = o.desc  || 'Your purchases as booked — Tally, ERP or a prepared register';
+    const pill  = o.pill  ? ' <span class="pill ' + (o.pillCls || '') + '">' + o.pill + '</span>' : '';
+    const file  = o.file  || 'Purchase Register Aug 2026.xlsx';
+    const dr    = key ? ' data-row="' + key + '"' : '';
+
+    if (state === 'waiting') return '' +
+      '<div class="uprow"' + dr + '><span class="grow"><span class="nm">' + title + '</span>' + pill + '<br>' +
+      '<span class="micro">' + desc + ' · choosing a file uploads &amp; normalizes it</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="pick">Choose file</button></span></div>';
+
+    if (state === 'uploading') return '' +
+      '<div class="uprow busy"' + dr + '><span class="lead"><span class="spin"></span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Uploading &amp; normalizing — saving, detecting the layout, then checking it with the model… ' + (o.pct || 62) + '%</span>' +
+      '<span class="bar"><i style="width:' + (o.pct || 62) + '%"></i></span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="cancel">Cancel</button></span></div>';
+
+    if (state === 'ok') return '' +
+      '<div class="uprow done"' + dr + '><span class="lead"><span class="tick">✓</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">' + title + ' · identified ' + (o.conf || 97) + '% · normalized: ' +
+      (o.rows || '4,182') + ' rows, fully mapped</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="replace">Replace</button>' +
+      '<button class="btn tiny" data-act="remove">Remove</button></span></div>';
+
+    if (state === 'review') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Normalized: ' + (o.rows || '1,204') + ' rows · ' + (o.review || 3) +
+      ' field(s) need review. This doesn\'t block the run — the report carries the caveat.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="open">Check the ' + (o.review || 3) + ' fields</button>' +
+      '<button class="btn tiny" data-act="replace">Replace</button></span></div>';
+
+    if (state === 'partial') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Normalized: ' + (o.rows || '1,204') + ' rows · ' + (o.missing || 2) +
+      ' required field(s) unmapped — the report will be marked partial. It still runs.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="open">See what\'s missing</button>' +
+      '<button class="btn tiny" data-act="replace">Replace</button></span></div>';
+
+    if (state === 'shapeReused') return '' +
+      '<div class="uprow done"' + dr + '><span class="lead"><span class="tick b">✓</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Normalized: ' + (o.rows || '1,204') + ' rows, fully mapped — mapping reused from the same file shape, so no model call was needed.</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="replace">Replace</button></span></div>';
+
+    if (state === 'confirm') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Identified with only ' + (o.conf || 68) + '% confidence — under the 70% bar we auto-file at, so it isn\'t filed yet.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="confirm">Yes, it\'s the ' + (o.short || 'books') + '</button>' +
+      '<button class="btn tiny" data-act="pick">Choose a different file</button></span></div>';
+
+    if (state === 'wrong') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">This looks like a <b>GSTR-2B</b> export, not your purchase register. Nothing was filed.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="move">Move it to the GSTR-2B row</button>' +
+      '<button class="btn tiny" data-act="keep">Keep it here anyway</button>' +
+      '<button class="btn tiny" data-act="pick">Choose a different file</button></span></div>';
+
+    if (state === 'unknown') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Couldn\'t identify it (' + (o.conf || 41) + '% sure). The file is kept — nothing is guessed — and this row stays unsorted.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="type">Pick its type</button>' +
+      '<button class="btn tiny" data-act="tray">Send to unfiled tray</button></span></div>';
+
+    if (state === 'failed') return '' +
+      '<div class="uprow err"' + dr + '><span class="lead"><span class="cross">✕</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Couldn\'t read it — corrupt, password-protected, or a layout we can\'t map. Your original file is untouched.</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="retry">Try again</button>' +
+      '<button class="btn tiny" data-act="remove">Remove</button></span></div>';
+
+    if (state === 'notIngested') return '' +
+      '<div class="uprow warn"' + dr + '><span class="lead"><span class="bang">!</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">On disk for this period, but never normalized — so it can\'t be reconciled yet.</span></span>' +
+      '<span class="actions"><button class="btn tiny primary" data-act="normalize">Normalize it now</button>' +
+      '<button class="btn tiny" data-act="remove">Remove</button></span></div>';
+
+    if (state === 'existing') return '' +
+      '<div class="uprow mute"' + dr + '><span class="lead"><span class="tick">✓</span></span>' +
+      '<span class="grow"><span class="nm">' + file + '</span><br>' +
+      '<span class="micro">Already on the volume for this client and period, already normalized — using it. Nothing to upload.</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="replace">Replace</button></span></div>';
+
+    if (state === 'multiple') return '' +
+      '<div class="uprow done"' + dr + '><span class="lead"><span class="tick">✓</span></span>' +
+      '<span class="grow"><span class="nm">' + title + '</span><br>' +
+      '<span class="micro">2 files on disk for this document — the newest is selected.</span></span>' +
+      '<span class="actions"><select style="font:inherit;font-size:11.5px;border:1px solid var(--border);' +
+      'border-radius:8px;padding:4px 6px"><option>GSTR2B_082026.xlsx (newest)</option>' +
+      '<option>GSTR2B_082026_v1.xlsx</option></select></span></div>';
+
+    if (state === 'skipped') return '' +
+      '<div class="uprow"' + dr + '><span class="grow"><span class="nm">' + title + '</span> <span class="pill acc">optional</span><br>' +
+      '<span class="micro">Skipped — a run without it still reconciles invoices, and the report says so.</span></span>' +
+      '<span class="actions"><button class="btn tiny" data-act="pick">Add it anyway</button></span></div>';
+
+    return '';
+  }
+
+  const BOOKS  = { key:'books',  title:'Books / Purchase Register', desc:'Your purchases as booked — Tally, ERP or a prepared register',
+                   file:'Purchase Register Aug 2026.xlsx' };
+  const PORTAL = { key:'portal', title:'GSTR-2B', pill:'or IMS', desc:'The portal download for this period',
+                   file:'GSTR2B_082026.xlsx' };
+  const NOTE   = { key:'note',   title:'Credit / Debit Note Register', pill:'optional', pillCls:'acc',
+                   desc:'Notes you received from suppliers', file:'Credit Note.xlsx' };
+
+  // ---------------------------------------------------------------- gallery
+  const gallery = [
+    ['waiting',    '1 · Waiting — nothing chosen yet',        BOOKS, 'The row states exactly what it wants; choosing a file uploads & normalizes it.'],
+    ['uploading',  '2 · While uploading & normalizing',       { file:'GSTR2B_082026.xlsx', pct:62 }, 'One action, several jobs: save → layout detect → model classify → column mapping.'],
+    ['ok',         '3 · After upload — fully mapped',         { title:'Books / Purchase Register', file:'Purchase Register Aug 2026.xlsx', conf:97, rows:'4,182' }, 'Every required column mapped; the result is cached against this file.'],
+    ['review',     '4 · Normalized — needs review',           { file:'GSTR2B_082026.xlsx', rows:'1,204', review:3 }, 'Does not block the run — the report carries the caveat.'],
+    ['partial',    '5 · Normalized — partial report',         { file:'GSTR2B_082026.xlsx', rows:'1,204', missing:2 }, 'Still runs; the report is marked partial so nothing is silently missing.'],
+    ['shapeReused','6 · Same file shape as before',           { file:'GSTR2B_072026.xlsx', rows:'1,118' }, 'A trusted mapping is reused — the model call is skipped, so repeat months are fast.'],
+    ['confirm',    '7 · Identified, but below 70%',           { file:'GSTR2B_082026.xlsx', conf:68, short:'GSTR-2B' }, 'The same confidence bar the documents module auto-files at.'],
+    ['wrong',      '8 · The wrong file in this row',          { file:'GSTR2B_082026.xlsx' }, 'Classification disagreed with the row and can name the right one.'],
+    ['unknown',    '9 · Couldn\'t identify it',               { file:'scan_0012.pdf', conf:41 }, 'No silent guess in this build — the file is kept, not discarded.'],
+    ['failed',     '10 · Couldn\'t read it',                  { file:'GSTR2B_082026.xlsx' }, 'Corrupt, protected or unmappable. The original stays untouched.'],
+    ['notIngested','11 · On disk, but never normalized',      { file:'GSTR2B_082026.xlsx' }, 'Found for this client and period with no stored result — the one case that needs a nudge.'],
+    ['existing',   '12 · Already there from the last run',    { file:'GSTR2B_082026.xlsx' }, 'A usable, normalized file is already on the volume.'],
+    ['multiple',   '13 · Two files for one document',         'multi', 'The row collapses to a picker instead of guessing.'],
+    ['skipped',    '14 · Optional row left empty',            { title:'Credit / Debit Note Register', pill:'optional', pillCls:'acc' }, 'Never blocks the run — it is outside readiness.']
+  ];
+
+  function paintGallery () {
+    document.getElementById('gallery').innerHTML = gallery.map(g => {
+      const [state, cap, o, why] = g;
+      const opts = (o === 'multi') ? { title:'GSTR-2B' } : o;
+      return '<div class="gcard"><p class="cap">' + cap + '</p>' + rowHTML(state, opts) +
+             '<p class="why">' + why + '</p></div>';
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------- live page
+  const state = {};
+  const rowsHost = document.getElementById('rows');
+  const missingEl = document.getElementById('missing');
+  const statusEl = document.getElementById('status');
+  const goBtn = document.getElementById('go');
+  let busy = false;
+
+  const SUPPLIED = ['ok','review','partial','shapeReused','existing','multiple'];
+
+  function paint () {
+    rowsHost.innerHTML =
+      rowHTML(state.books.state,  Object.assign({}, BOOKS,  state.books.opts),  'books') +
+      rowHTML(state.portal.state, Object.assign({}, PORTAL, state.portal.opts), 'portal') +
+      rowHTML(state.note.state,   Object.assign({}, NOTE,   state.note.opts),   'note');
+    refreshFoot();
+  }
+
+  function refreshFoot () {
+    const booksOk = SUPPLIED.includes(state.books.state);
+    const portalOk = SUPPLIED.includes(state.portal.state);
+    const need = [];
+    if (!booksOk)  need.push('the books row');
+    if (!portalOk) need.push('the portal row');
+    if (need.length) {
+      missingEl.style.color = 'var(--ai-on)';
+      missingEl.textContent = 'Still needed: ' + need.join(' and ') + '.';
+      goBtn.disabled = true;
+    } else {
+      missingEl.style.color = 'var(--rule-on)';
+      missingEl.textContent = 'Ready: books side and portal side both present. The note register is optional.';
+      goBtn.disabled = false;
+    }
+  }
+
+  const setStatus = t => { statusEl.innerHTML = t; };
+
+  function reset () {
+    state.books  = { state:'waiting', opts:null };
+    state.portal = { state:'waiting', opts:null };
+    state.note   = { state:'waiting', opts:null };
+    busy = false;
+    paint();
+    setStatus('Nothing chosen yet. Each row takes one file, and choosing it uploads and normalizes in one step.');
+  }
+
+  // one action: choose -> (busy) -> verdict
+  function choose (which, file, verdict, opts, note) {
+    busy = true;
+    state[which] = { state:'uploading', opts:{ file:file, pct:40 } };
+    paint();
+    setStatus('Uploading &amp; normalizing <b>' + file + '</b> — saved to this client and period, then read and mapped.');
+
+    let p = 40;
+    const iv = setInterval(() => {
+      p = Math.min(p + 11, 96);
+      const b = rowsHost.querySelector('.uprow.busy .bar > i');
+      if (b) b.style.width = p + '%';
+    }, 200);
+
+    setTimeout(() => {
+      clearInterval(iv);
+      state[which] = { state:verdict, opts:Object.assign({ file:file }, opts || {}) };
+      busy = false;
+      paint();
+      setStatus(note);
+    }, 1500);
+  }
+
+  const titleOf = k => ({ books:'Books / Purchase Register', portal:'GSTR-2B', note:'Credit / Debit Note Register' })[k];
+
+  document.getElementById('sHappy').addEventListener('click', () => {
+    reset();
+    choose('books', 'Purchase Register Aug 2026.xlsx', 'ok', { title:'Books / Purchase Register', conf:97, rows:'4,182' },
+      '<b>Purchase Register Aug 2026.xlsx</b> filed to the books row — 4,182 rows, fully mapped.');
+    setTimeout(() => choose('portal', 'GSTR2B_082026.xlsx', 'ok', { title:'GSTR-2B', conf:99, rows:'1,204' },
+      '<b>GSTR2B_082026.xlsx</b> filed to the portal row — 1,204 rows, fully mapped. Both sides in.'), 2100);
+  });
+
+  document.getElementById('sReview').addEventListener('click', () => {
+    reset();
+    choose('portal', 'GSTR2B_082026.xlsx', 'review', { title:'GSTR-2B', rows:'1,204', review:3 },
+      '<b>GSTR2B_082026.xlsx</b> normalized, but 3 field(s) need review. You can run anyway — the report will carry the caveat.');
+  });
+
+  document.getElementById('sPartial').addEventListener('click', () => {
+    reset();
+    choose('books', 'Purchase Register Aug 2026.xlsx', 'partial', { title:'Books / Purchase Register', rows:'4,182', missing:2 },
+      '<b>Purchase Register Aug 2026.xlsx</b> normalized, but 2 required fields are unmapped — the report will be marked partial. It still runs.');
+  });
+
+  document.getElementById('sReuse').addEventListener('click', () => {
+    reset();
+    choose('portal', 'GSTR2B_072026.xlsx', 'shapeReused', { title:'GSTR-2B', rows:'1,118' },
+      '<b>GSTR2B_072026.xlsx</b> matched a file shape we already trust — the mapping was reused and no model call was needed.');
+  });
+
+  document.getElementById('sConfirm').addEventListener('click', () => {
+    reset();
+    choose('portal', 'GSTR2B_082026.xlsx', 'confirm', { title:'GSTR-2B', conf:68, short:'GSTR-2B' },
+      '<b>GSTR2B_082026.xlsx</b> was identified with only 68% confidence, so it is <b>not</b> filed yet.');
+  });
+
+  document.getElementById('sWrong').addEventListener('click', () => {
+    reset();
+    choose('books', 'GSTR2B_082026.xlsx', 'wrong', { title:'Books / Purchase Register' },
+      '<b>GSTR2B_082026.xlsx</b> was <b>not</b> filed — it looks like a GSTR-2B. Move it, keep it, or choose another file.');
+  });
+
+  document.getElementById('sUnknown').addEventListener('click', () => {
+    reset();
+    choose('note', 'scan_0012.pdf', 'unknown', { title:'Credit / Debit Note Register', conf:41 },
+      '<b>scan_0012.pdf</b> couldn\'t be identified. It is kept; nothing was guessed.');
+  });
+
+  document.getElementById('sFail').addEventListener('click', () => {
+    reset();
+    choose('portal', 'GSTR2B_082026.xlsx', 'failed', { title:'GSTR-2B' },
+      '<b>GSTR2B_082026.xlsx</b> couldn\'t be read. Your original file is untouched.');
+  });
+
+  document.getElementById('sNotIngested').addEventListener('click', () => {
+    reset();
+    state.portal = { state:'notIngested', opts:{ file:'GSTR2B_082026.xlsx' } };
+    paint();
+    setStatus('Found <b>GSTR2B_082026.xlsx</b> on disk for this period, but it has no stored result — normalize it to use it.');
+  });
+
+  document.getElementById('sExisting').addEventListener('click', () => {
+    reset();
+    state.portal = { state:'existing', opts:{ file:'GSTR2B_082026.xlsx' } };
+    paint();
+    setStatus('Found <b>GSTR2B_082026.xlsx</b> already normalized for this client and period — reusing it, nothing to upload.');
+  });
+
+  document.getElementById('sReset').addEventListener('click', reset);
+
+  // row actions — every file-picking one re-runs upload & normalize
+  rowsHost.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn || busy) return;
+    const act = btn.dataset.act;
+    const row = btn.closest('.uprow');
+    const which = row && row.dataset.row;
+    const kind = which === 'portal' ? 'portal' : which === 'note' ? 'note' : 'books';
+
+    if (act === 'cancel') { reset(); return; }
+
+    if (act === 'pick' || act === 'replace' || act === 'retry' || act === 'normalize') {
+      const label = act === 'retry' ? 'Trying again' : act === 'normalize' ? 'Normalizing' : 'Replacing';
+      const f = (state[kind].opts && state[kind].opts.file) || ({ books:BOOKS, portal:PORTAL, note:NOTE })[kind].file;
+      choose(kind, f, 'ok', { title:titleOf(kind), conf:97, rows: kind === 'note' ? '36' : '1,204' },
+        label + ' <b>' + f + '</b> — the whole pipeline ran again: saved, normalizing, mapped.');
+      return;
+    }
+
+    if (act === 'move') {
+      state.books = { state:'waiting', opts:null };
+      state.portal = { state:'ok', opts:{ file:'GSTR2B_082026.xlsx', title:'GSTR-2B', conf:99, rows:'1,204' } };
+      paint();
+      setStatus('Moved <b>GSTR2B_082026.xlsx</b> to the GSTR-2B row — it normalizes again under that document, since mappings are per document.');
+      return;
+    }
+
+    if (act === 'keep') {
+      state.books = { state:'partial', opts:{ file:'GSTR2B_082026.xlsx', title:'Books / Purchase Register', rows:'1,204', missing:2 } };
+      paint();
+      setStatus('Kept it in the books row. The run will flag it: the report comes out <b>partial</b> rather than silently wrong.');
+      return;
+    }
+
+    if (act === 'confirm') {
+      const f = (state[kind].opts && state[kind].opts.file) || ({ books:BOOKS, portal:PORTAL, note:NOTE })[kind].file;
+      state[kind] = { state:'ok', opts:{ file:f, title:titleOf(kind), conf:68, rows: kind === 'books' ? '900' : '1,204' } };
+      paint();
+      setStatus('Confirmed. It\'ll be used for this run.');
+      return;
+    }
+
+    if (act === 'tray') {
+      state.note = { state:'waiting', opts:null };
+      paint();
+      setStatus('Moved <b>scan_0012.pdf</b> to the unfiled tray — file it whenever you like; the note row is optional so nothing is blocked.');
+      return;
+    }
+
+    if (act === 'remove') {
+      state[kind] = { state:'waiting', opts:null };
+      paint();
+      setStatus('Removed. That row is empty again — choose a file and it uploads &amp; normalizes in one step.');
+      return;
+    }
+
+    if (act === 'open') { setStatus('Opening the field review for this file — you can fix just the flagged fields.'); return; }
+    if (act === 'type') { setStatus('Choose the document type for this file — the same list the rows use.'); return; }
+  });
+
+  paintGallery();
+  reset();
+</script>
+</body>
+</html>
