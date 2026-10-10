@@ -29,18 +29,13 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-# The sentinel folder used when a file was filed without a period. Kept as a
-# named constant so the UI, the discovery layer and the repair action all
-# agree on the exact string.
-PERIOD_UNFILED = "-"
-
-# Human label for the sentinel, shown in period pickers instead of a bare
-# "-" so an unfiled file is visibly unusable rather than mysteriously absent.
-UNFILED_LABEL = "Unfiled (not reconcilable)"
-
-# A real, reconcilable period. Deliberately strict: the engine's folder
-# contract is exactly YYYY-MM.
-_PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+from src.shared.periods import (
+    PERIOD_UNFILED,
+    UNFILED_LABEL,
+    is_unfiled,
+    is_valid_period,
+    period_label,
+)
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -65,21 +60,6 @@ _FN_ISO = re.compile(r"(?<!\d)(?P<y>20\d{2})[-_](?P<m>0[1-9]|1[0-2])(?!\d)")
 _FN_YYYYMM = re.compile(r"(?<!\d)(?P<y>20\d{2})(?P<m>0[1-9]|1[0-2])(?!\d)")
 _FN_MMYYYY = re.compile(r"(?<!\d)(?P<m>0[1-9]|1[0-2])(?P<y>20\d{2})(?!\d)")
 _FN_MON_YY = re.compile(r"(?<![A-Za-z])(?P<mon>[A-Za-z]{3,9})[\s'\-_/]*(?P<y>\d{2,4})(?!\d)")
-
-
-def is_valid_period(period: Optional[str]) -> bool:
-    """Whether a string is a real, reconcilable ``YYYY-MM`` period."""
-    return bool(period) and bool(_PERIOD_RE.match(str(period).strip()))
-
-
-def is_unfiled(period: Optional[str]) -> bool:
-    """Whether a period is the unfiled sentinel (or absent)."""
-    return not period or str(period).strip() in ("", PERIOD_UNFILED)
-
-
-def period_label(period: Optional[str]) -> str:
-    """Human label for a period value — the sentinel reads as unfiled."""
-    return UNFILED_LABEL if is_unfiled(period) else str(period)
 
 
 def _fmt(year: int, month: int) -> Optional[str]:

@@ -327,19 +327,19 @@ def create_user(
     password: str,
     role_id: int,
     is_end_client: bool = False,
-    end_client_ref: Optional[str] = None,
+    end_client_id: Optional[int] = None,
 ) -> int:
     salt, pw_hash = security.hash_password(password)
     cur = conn.execute(
         """
         INSERT INTO users
             (username, display_name, email, password_salt, password_hash,
-             role_id, is_active, is_end_client, end_client_ref, created_at)
+             role_id, is_active, is_end_client, end_client_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
         """,
         (
             username, display_name, email, salt, pw_hash,
-            role_id, int(is_end_client), end_client_ref, _now(),
+            role_id, int(is_end_client), end_client_id, _now(),
         ),
     )
     conn.commit()
@@ -445,44 +445,44 @@ def extend_session(conn: sqlite3.Connection, token: str) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-def assign_user_to_client(conn: sqlite3.Connection, user_id: int, client: str, assigned_by: str) -> None:
+def assign_user_to_client(conn: sqlite3.Connection, user_id: int, client_id: int, assigned_by: str) -> None:
     conn.execute(
         """
-        INSERT OR IGNORE INTO per_client_team_assignments (user_id, client, assigned_by, created_at)
+        INSERT OR IGNORE INTO per_client_team_assignments (user_id, client_id, assigned_by, created_at)
         VALUES (?, ?, ?, ?)
         """,
-        (user_id, client, assigned_by, _now()),
+        (user_id, int(client_id), assigned_by, _now()),
     )
     conn.commit()
 
 
-def unassign_user_from_client(conn: sqlite3.Connection, user_id: int, client: str) -> None:
+def unassign_user_from_client(conn: sqlite3.Connection, user_id: int, client_id: int) -> None:
     conn.execute(
-        "DELETE FROM per_client_team_assignments WHERE user_id = ? AND client = ?",
-        (user_id, client),
+        "DELETE FROM per_client_team_assignments WHERE user_id = ? AND client_id = ?",
+        (user_id, int(client_id)),
     )
     conn.commit()
 
 
-def clients_for_user(conn: sqlite3.Connection, user_id: int) -> list[str]:
+def clients_for_user(conn: sqlite3.Connection, user_id: int) -> list[int]:
     rows = conn.execute(
-        "SELECT client FROM per_client_team_assignments WHERE user_id = ? ORDER BY client",
+        "SELECT client_id FROM per_client_team_assignments WHERE user_id = ? ORDER BY client_id",
         (user_id,),
     ).fetchall()
-    return [r[0] for r in rows]
+    return [int(r[0]) for r in rows]
 
 
-def team_for_client(conn: sqlite3.Connection, client: str) -> list[dict[str, Any]]:
+def team_for_client(conn: sqlite3.Connection, client_id: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT u.user_id, u.username, u.display_name, r.name AS role_name
         FROM per_client_team_assignments pcta
         JOIN users u ON u.user_id = pcta.user_id
         JOIN roles r ON r.role_id = u.role_id
-        WHERE pcta.client = ?
+        WHERE pcta.client_id = ?
         ORDER BY u.username
         """,
-        (client,),
+        (int(client_id),),
     ).fetchall()
     cols = ["user_id", "username", "display_name", "role_name"]
     return [dict(zip(cols, r)) for r in rows]
@@ -491,13 +491,13 @@ def team_for_client(conn: sqlite3.Connection, client: str) -> list[dict[str, Any
 def all_assignments(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT pcta.id, u.username, pcta.client, pcta.assigned_by, pcta.created_at
+        SELECT pcta.id, u.username, pcta.client_id, pcta.assigned_by, pcta.created_at
         FROM per_client_team_assignments pcta
         JOIN users u ON u.user_id = pcta.user_id
-        ORDER BY pcta.client, u.username
+        ORDER BY pcta.client_id, u.username
         """
     ).fetchall()
-    cols = ["id", "username", "client", "assigned_by", "created_at"]
+    cols = ["id", "username", "client_id", "assigned_by", "created_at"]
     return [dict(zip(cols, r)) for r in rows]
 
 

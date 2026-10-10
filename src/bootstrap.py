@@ -70,6 +70,25 @@ def init_all(db_path: Path | str | None = None) -> None:
         except Exception as exc:  # noqa: BLE001 — aggregate, then fail loudly
             failures.append(f"{label}: {type(exc).__name__}: {exc}")
 
+    # Client-id identity migration. Runs AFTER every module's init_* so all
+    # tables exist in their born shape, then upgrades any pre-existing
+    # name-keyed DB (runs/review_state/ingestion_*/users/team assignments) to
+    # client_id, moves data/<name>/ folders to data/<client_id>/, and backs up
+    # poc.db first. Idempotent and safe on every boot; a second run is a no-op.
+    try:
+        from src.migrations import migrate as _migrate
+
+        # Scope the data/ root to the DB being migrated: the real app
+        # (db_path=None) uses the repo's data/, while an explicit db_path
+        # (tests, tooling) uses a sibling data/ so a temp DB can NEVER move
+        # the real client folders.
+        _data_root = None if db_path is None else (Path(db_path).parent / "data")
+        report = _migrate.run(db_path=db_path, data_root=_data_root)
+        if report.get("mode") == "apply":
+            _migrate.write_report(report)
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"client-id migration: {type(exc).__name__}: {exc}")
+
     if failures:
         raise RuntimeError(
             "Database initialisation failed for "

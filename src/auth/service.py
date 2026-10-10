@@ -361,7 +361,7 @@ def create_user(
     role_id: int,
     actor: str,
     is_end_client: bool = False,
-    end_client_ref: Optional[str] = None,
+    end_client_id: Optional[int] = None,
     db_path=None,
 ) -> int:
     weak = security.validate_password_strength(password)
@@ -375,7 +375,7 @@ def create_user(
             conn,
             username=username, display_name=display_name, email=email,
             password=password, role_id=role_id,
-            is_end_client=is_end_client, end_client_ref=end_client_ref,
+            is_end_client=is_end_client, end_client_id=end_client_id,
         )
         adb.log_change(conn, "user", username, field="created", changed_by=actor)
         return user_id
@@ -487,23 +487,23 @@ def clear_user_override(user_id: int, permission_id: int, *, actor: str, db_path
 # ---------------------------------------------------------------------------
 
 
-def assign_user_to_client(user_id: int, client: str, *, actor: str, db_path=None) -> None:
+def assign_user_to_client(user_id: int, client_id: int, *, actor: str, db_path=None) -> None:
     conn = _connect(db_path)
     try:
-        adb.assign_user_to_client(conn, user_id, client, actor)
+        adb.assign_user_to_client(conn, user_id, int(client_id), actor)
     finally:
         conn.close()
 
 
-def unassign_user_from_client(user_id: int, client: str, *, db_path=None) -> None:
+def unassign_user_from_client(user_id: int, client_id: int, *, db_path=None) -> None:
     conn = _connect(db_path)
     try:
-        adb.unassign_user_from_client(conn, user_id, client)
+        adb.unassign_user_from_client(conn, user_id, int(client_id))
     finally:
         conn.close()
 
 
-def clients_for_user(user_id: int, *, db_path=None) -> list[str]:
+def clients_for_user(user_id: int, *, db_path=None) -> list[int]:
     conn = _connect(db_path)
     try:
         return adb.clients_for_user(conn, user_id)
@@ -511,10 +511,10 @@ def clients_for_user(user_id: int, *, db_path=None) -> list[str]:
         conn.close()
 
 
-def team_for_client(client: str, *, db_path=None) -> list[dict[str, Any]]:
+def team_for_client(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
-        return adb.team_for_client(conn, client)
+        return adb.team_for_client(conn, int(client_id))
     finally:
         conn.close()
 
@@ -527,23 +527,29 @@ def all_assignments(*, db_path=None) -> list[dict[str, Any]]:
         conn.close()
 
 
-def visible_clients(user: dict[str, Any], all_clients: list[str], *, db_path=None) -> list[str]:
+def visible_clients(user: dict[str, Any], all_clients: list, *, db_path=None) -> list:
     """Scope a client list down to what this user should see.
 
-    Admin and Partner see everything firm-wide (Partner-level access is
-    an explicit, single-Admin-action grant per the PRD — visibility
-    follows from role, not a separate flag in this PoC). Everyone else
-    is scoped to their PerClientTeamAssignment rows; if a user has no
-    assignments at all, fall back to showing everything rather than
-    silently hiding all clients (avoids a confusing empty PoC for
-    freshly-seeded roles with no assignments yet).
+    ``all_clients`` is a list of client OPTIONS (dicts with ``client_id``) or
+    ids. Admin and Partner see everything firm-wide; everyone else is scoped
+    to their PerClientTeamAssignment ids; a user with no assignments sees
+    everything (avoids a confusingly empty PoC for freshly-seeded roles).
     """
     if user.get("role_name") in ("Admin", "Partner"):
         return all_clients
     assigned = set(clients_for_user(user["user_id"], db_path=db_path))
     if not assigned:
         return all_clients
-    return [c for c in all_clients if c in assigned]
+    return [c for c in all_clients if _client_id_of(c) in assigned]
+
+
+def _client_id_of(option: Any) -> int:
+    if isinstance(option, dict):
+        return int(option.get("client_id") or 0)
+    try:
+        return int(option)
+    except (TypeError, ValueError):
+        return 0
 
 
 # ---------------------------------------------------------------------------

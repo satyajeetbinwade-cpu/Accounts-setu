@@ -1,44 +1,51 @@
 """Filesystem + DB discovery helpers for populating sidebar selectors.
 
-No matching/query logic — this only looks at what's on disk under data/
-and what's already in the DB via queries.list_runs, so the sidebar never
-hardcodes client/period/recon_type values.
+Identity is ALWAYS ``end_clients.client_id``. No function here matches a
+client by name — the only name → id resolution left in the codebase lives in
+``src.migrations.identity`` and runs once, at migration time.
+
+Client options come from the F2 client table (active clients for context
+pickers; inactive clients too, labelled "(inactive)", for history/"existing
+data" screens). Periods and source-file status come from the
+``data/<client_id>/<period>/<source_type>/`` layout via ``src.data_paths``,
+plus the runs already in the DB.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from src.data_paths import DATA_ROOT
+from src.data_paths import DATA_ROOT, client_data_root, data_dir
 from src import queries
-from src.ingestion_ai.periods import (
+from src.shared.periods import (
     PERIOD_UNFILED,
     UNFILED_LABEL,
+    EARLIEST_YEAR,
+    available_years,
     is_unfiled,
     is_valid_period,
     period_label,
 )
+from src.shared.vocab import (
+    BOOKS_SOURCE_TYPES,
+    NOTE_SOURCE_TYPES,
+    RECON_SOURCE_TYPES,
+    RECON_TYPES,
+    is_valid_source_type,
+)
 
-# Which source_type directories are relevant to each recon type. "tally"
-# feeds both (books side); portal sources are recon-type specific.
-RECON_SOURCE_TYPES = {
-    "GST": ["tally", "gstr2b", "ims"],
-    "TDS": ["tally", "form26as", "tds"],
-    # 2C "Other" — the six sources layered onto the same shared engine.
-    "OTHER": ["tally", "bank", "vendor_ledger", "form26as", "opening_balances", "loan_sheet", "salary"],
-}
+# Re-exported for the many callers that import these from discovery.
+__all__ = [
+    "RECON_TYPES", "RECON_SOURCE_TYPES", "BOOKS_SOURCE_TYPES", "NOTE_SOURCE_TYPES",
+    "PERIOD_UNFILED", "UNFILED_LABEL", "is_unfiled", "is_valid_period", "period_label",
+    "available_years", "SOURCE_TYPE_LABELS", "SOURCE_TYPE_HINTS",
+    "source_type_label", "source_type_hint", "portal_source_types", "note_slot_types",
+    "slot_types_for", "list_clients", "client_option", "list_periods",
+    "reconcilable_periods", "period_has_source_data", "list_recon_types",
+    "source_file_status", "books_side_ready", "portal_side_ready", "run_is_executable",
+]
 
-# Books-side source types (always required for a run).
-BOOKS_SOURCE_TYPES = ["tally"]
-
-# Books-side NOTE register. A separate document class from the Purchase
-# Register, reconciled by its own pass — deliberately NOT in RECON_SOURCE_TYPES
-# above, so it can never be picked as the books or portal side of an INVOICE run.
-NOTE_SOURCE_TYPES = ["credit_notes"]
-
-RECON_TYPES = ["GST", "TDS", "OTHER"]
 
 
 def note_slot_types(recon_type: str) -> list[str]:
@@ -114,25 +121,64 @@ def portal_source_types(recon_type: str) -> list[str]:
     return [s for s in RECON_SOURCE_TYPES[recon_type] if s not in BOOKS_SOURCE_TYPES]
 
 
-def list_clients() -> list[str]:
-    """Clients with a data/ folder, plus any client already in the DB
-    (in case a run exists for a client whose source files were removed)."""
-    on_disk = set()
-    if DATA_ROOT.exists():
-        on_disk = {p.name for p in DATA_ROOT.iterdir() if p.is_dir()}
-
-    in_db = set()
-    try:
-        df = queries.list_runs()
-        if not df.empty:
-            in_db = set(df["client"].unique())
-    except Exception:
-        pass
-
-    return sorted(on_disk | in_db)
+def _display_name(row: dict, all_rows: list[dict]) -> str:
+    """end_clients.legal_name, disambiguated with PAN (or last-4 GSTIN) when
+    two clients share the same legal name."""
+    name = str(row.get("legal_name") or "")
+    peers = [r for r in all_rows if str(r.get("legal_name") or "") == name]
+    if len(peers) <= 1:
+        return name
+    pan = str(row.get("pan") or "").strip()
+    if pan:
+        return f"{name} · {pan}"
+    gstin = str(row.get("gstin") or "").strip()
+    if gstin:
+        return f"{name} · {gstin[-4:]}"
+    return f"{name} · #{row.get('client_id')}"
 
 
-def list_periods(client: str) -> list[str]:
+def list_clients(include_inactive: bool = False, *, db_path=None) -> list[dict]:
+    """F2 clients as option rows, alphabetical by display name.
+
+    Each row: ``{client_id, legal_name, display_name, is_active, pan, gstin}``.
+    Options come from the F2 client table (the single source of truth) — NOT
+    from data/ folders. ``include_inactive=True`` (history / "existing data"
+    screens) keeps deactivated clients and marks their display name
+    "(inactive)"; context pickers use the default (active only).
+    """
+    from src.clients import service as clients_service
+
+    rows = clients_service.list_clients(include_inactive=include_inactive, db_path=db_path)
+    out = []
+    for r in rows:
+        display = _display_name(r, rows)
+        if not r.get("is_active", 1):
+            display = f"{display} (inactive)"
+        out.append(
+            {
+                "client_id": int(r["client_id"]),
+                "legal_name": r.get("legal_name") or "",
+                "display_name": display,
+                "is_active": bool(r.get("is_active", 1)),
+                "pan": r.get("pan"),
+                "gstin": r.get("gstin"),
+            }
+        )
+    out.sort(key=lambda o: o["display_name"].lower())
+    return out
+
+
+def client_option(client_id) -> Optional[dict]:
+    """A single client option row by id, or None."""
+    if not client_id:
+        return None
+    for c in list_clients(include_inactive=True):
+        if c["client_id"] == int(client_id):
+            return c
+    return None
+
+
+def list_periods(client_id) -> list[str]:
     """Periods (newest first, lexicographic desc works for YYYY-MM) for a
     client, from disk and DB.
 
@@ -141,14 +187,15 @@ def list_periods(client: str) -> list[str]:
     via ``period_label()`` and explains why it cannot be reconciled.
     """
     on_disk = set()
-    client_dir = DATA_ROOT / client
-    if client_dir.exists():
-        on_disk = {p.name for p in client_dir.iterdir() if p.is_dir()}
+    if client_id:
+        client_dir = client_data_root(client_id)
+        if client_dir.exists():
+            on_disk = {p.name for p in client_dir.iterdir() if p.is_dir()}
 
     in_db = set()
     try:
-        df = queries.list_runs(client=client)
-        if not df.empty:
+        df = queries.list_runs(client_id=int(client_id)) if client_id else None
+        if df is not None and not df.empty:
             in_db = set(df["period"].unique())
     except Exception:
         pass
@@ -156,42 +203,22 @@ def list_periods(client: str) -> list[str]:
     return sorted(on_disk | in_db, reverse=True)
 
 
-def reconcilable_periods(client: str) -> list[str]:
+def reconcilable_periods(client_id) -> list[str]:
     """Periods that can actually be reconciled — the unfiled sentinel
     excluded. Use this wherever a period is chosen to RUN against."""
-    return [p for p in list_periods(client) if is_valid_period(p)]
+    return [p for p in list_periods(client_id) if is_valid_period(p)]
 
 
-# The floor of the Year dropdown. Deliberately ONE constant rather than a scan
-# of what data exists: the picker offers every year from the current one down
-# to here, so a period can be chosen before any folder or run exists for it.
-# Widening the list is a one-line change to this value.
-EARLIEST_YEAR = 1980
-
-
-def available_years(current_year: Optional[int] = None) -> list[int]:
-    """Years for the Year dropdown: the current year down to ``EARLIEST_YEAR``,
-    descending.
-
-    Independent of what data exists — every year is offered, so choosing a
-    period never depends on a folder already being present. Never offers a
-    future year, since the list always starts at the current one.
-    """
-    now_year = int(current_year) if current_year else datetime.now().year
-    floor = min(EARLIEST_YEAR, now_year)
-    return list(range(now_year, floor - 1, -1))
-
-
-def period_has_source_data(client: str, period: str) -> bool:
-    """Whether ``data/<client>/<period>/<source_type>/`` holds any files.
+def period_has_source_data(client_id, period: str) -> bool:
+    """Whether ``data/<client_id>/<period>/<source_type>/`` holds any files.
 
     Used by read-only screens to show the "no data uploaded for this period
     yet" empty state instead of erroring when the period itself is valid but
     nothing has been filed against it.
     """
-    if not (client and period):
+    if not (client_id and period):
         return False
-    period_dir = DATA_ROOT / client / period
+    period_dir = client_data_root(client_id) / period
     if not period_dir.is_dir():
         return False
     for source_dir in period_dir.iterdir():
@@ -200,27 +227,27 @@ def period_has_source_data(client: str, period: str) -> bool:
     return False
 
 
-def list_recon_types(client: str, period: str) -> list[str]:
+def list_recon_types(client_id, period: str) -> list[str]:
     """Recon types that have either a run in the DB or at least one
     relevant source directory present for this client/period."""
     available = []
-    period_dir = DATA_ROOT / client / period
+    period_dir = client_data_root(client_id) / period if client_id else None
     for recon_type in RECON_TYPES:
         has_run = False
         try:
-            df = queries.list_runs(client=client, period=period, recon_type=recon_type)
+            df = queries.list_runs(client_id=int(client_id), period=period, recon_type=recon_type)
             has_run = not df.empty
         except Exception:
             pass
         has_source_dir = False
-        if period_dir.exists():
+        if period_dir and period_dir.exists():
             for source_type in RECON_SOURCE_TYPES[recon_type]:
                 if (period_dir / source_type).exists():
                     has_source_dir = True
                     break
         if has_run or has_source_dir:
             available.append(recon_type)
-    return available or RECON_TYPES  # fall back to both if nothing found yet
+    return available or list(RECON_TYPES)  # fall back to all if nothing found yet
 
 
 def _find_source_files(directory: Path) -> list[str]:
@@ -232,14 +259,17 @@ def _find_source_files(directory: Path) -> list[str]:
     return sorted(m.name for m in matches)
 
 
-def source_file_status(client: str, period: str, recon_type: str) -> dict[str, dict]:
+def source_file_status(client_id, period: str, recon_type: str) -> dict[str, dict]:
     """For each source_type relevant to recon_type, report what's on disk.
 
     Returns {source_type: {"path": str, "files": [str, ...], "present": bool}}
     """
+    from src.shared.vocab import require_valid_recon_type
+
+    require_valid_recon_type(recon_type)
     status: dict[str, dict] = {}
     for source_type in RECON_SOURCE_TYPES[recon_type]:
-        directory = DATA_ROOT / client / period / source_type
+        directory = data_dir(client_id, period, source_type)
         files = _find_source_files(directory)
         status[source_type] = {
             "path": str(directory),
@@ -247,6 +277,7 @@ def source_file_status(client: str, period: str, recon_type: str) -> dict[str, d
             "present": len(files) > 0,
         }
     return status
+
 
 
 def books_side_ready(status: dict[str, dict]) -> bool:

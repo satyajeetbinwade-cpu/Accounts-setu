@@ -1,8 +1,11 @@
 """SQLite state persistence for the PoC. Minimal schema, disposable.
 
 Runs are immutable: every execution creates a new run row and its own set
-of match_results. Review status lives in a separate `review_state` table
-keyed by (client, period, recon_type, fingerprint) so it survives re-runs
+of match_results. Identity is `client_id` (end_clients.client_id) everywhere;
+`runs.client_name_at_run` is an immutable display-only snapshot of the legal
+name at run time and is NEVER used for lookup. Review status lives in a
+separate `review_state` table keyed by
+(client_id, period, recon_type, fingerprint) so it survives re-runs
 (see src/runner.py and src/queries.py for the orchestration that relies on
 this separation).
 """
@@ -16,17 +19,21 @@ DB_PATH = Path(__file__).resolve().parent.parent / "db" / "poc.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    run_id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    client            TEXT    NOT NULL,
-    period            TEXT    NOT NULL,
-    recon_type        TEXT    NOT NULL,  -- 'GST' or 'TDS'
-    run_timestamp     TEXT    NOT NULL,
-    config_snapshot   TEXT    NOT NULL,  -- YAML text as produced the config
-    source_file_names TEXT,              -- JSON array of source file names
+    run_id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id          INTEGER NOT NULL REFERENCES end_clients(client_id),
+    -- Immutable snapshot of the client's legal name at run time. DISPLAY
+    -- ONLY — never used for lookup or joins (that is client_id's job).
+    client_name_at_run TEXT    NOT NULL,
+    period             TEXT    NOT NULL,
+    recon_type         TEXT    NOT NULL,  -- 'GST' | 'TDS' | 'OTHER'
+    run_timestamp      TEXT    NOT NULL,
+    config_snapshot    TEXT    NOT NULL,  -- YAML text as produced the config
+    source_file_names  TEXT,              -- JSON array of source file names
     -- JSON array of caveats: what this run could NOT check because a field
     -- or whole source was unmapped. A run with caveats is a PARTIAL report —
     -- it still produces results, but the report says plainly what is missing.
-    caveats           TEXT
+    caveats            TEXT,
+    run_notes          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS match_results (
@@ -90,18 +97,18 @@ CREATE INDEX IF NOT EXISTS idx_note_match_results_run_id
 -- at review time, so a later run whose verdict changed for the same
 -- fingerprint can be detected as "review stale" rather than reviewed.
 CREATE TABLE IF NOT EXISTS review_state (
-    client                  TEXT    NOT NULL,
-    period                  TEXT    NOT NULL,
-    recon_type              TEXT    NOT NULL,
-    fingerprint             TEXT    NOT NULL,
-    reviewed                INTEGER NOT NULL DEFAULT 0,
-    reviewer_note           TEXT,
-    reviewed_at             TEXT,
-    reviewed_in_run_id      INTEGER,
-    reviewed_classification TEXT,
-    reviewed_difference_type TEXT,
-    reviewed_confidence_band TEXT,
-    PRIMARY KEY (client, period, recon_type, fingerprint)
+    client_id                 INTEGER NOT NULL REFERENCES end_clients(client_id),
+    period                    TEXT    NOT NULL,
+    recon_type                TEXT    NOT NULL,
+    fingerprint               TEXT    NOT NULL,
+    reviewed                  INTEGER NOT NULL DEFAULT 0,
+    reviewer_note             TEXT,
+    reviewed_at               TEXT,
+    reviewed_in_run_id        INTEGER,
+    reviewed_classification   TEXT,
+    reviewed_difference_type  TEXT,
+    reviewed_confidence_band  TEXT,
+    PRIMARY KEY (client_id, period, recon_type, fingerprint)
 );
 
 -- AI analysis layer (post-matching). Immutable like runs: never UPDATE or
@@ -143,7 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_result      ON ai_analysis(result_id);
 -- re-run and is re-applied to the same underlying record. Every write also
 -- goes to F4's edit history (see src/queries.py).
 CREATE TABLE IF NOT EXISTS result_field_overrides (
-    client        TEXT    NOT NULL,
+    client_id     INTEGER NOT NULL REFERENCES end_clients(client_id),
     period        TEXT    NOT NULL,
     recon_type    TEXT    NOT NULL,
     fingerprint   TEXT    NOT NULL,
@@ -153,7 +160,7 @@ CREATE TABLE IF NOT EXISTS result_field_overrides (
     reason        TEXT,
     changed_by    TEXT,
     changed_at    TEXT,
-    PRIMARY KEY (client, period, recon_type, fingerprint, side, field)
+    PRIMARY KEY (client_id, period, recon_type, fingerprint, side, field)
 );
 """
 
@@ -218,7 +225,8 @@ def init_db(db_path: Path | str | None = None) -> None:
 
 def insert_run(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
+    client_name_at_run: str,
     period: str,
     recon_type: str,
     run_timestamp: str,
@@ -227,14 +235,19 @@ def insert_run(
     caveats: Optional[list[dict[str, Any]]] = None,
     run_notes: Optional[list[dict[str, Any]]] = None,
 ) -> int:
+    from src.shared.vocab import require_valid_recon_type
+
+    require_valid_recon_type(recon_type)
     cur = conn.execute(
         """
         INSERT INTO runs
-            (client, period, recon_type, run_timestamp, config_snapshot, source_file_names, caveats, run_notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (client_id, client_name_at_run, period, recon_type, run_timestamp,
+             config_snapshot, source_file_names, caveats, run_notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            client,
+            int(client_id),
+            client_name_at_run,
             period,
             recon_type,
             run_timestamp,
@@ -369,7 +382,7 @@ def query_results(
 
 def mark_reviewed(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -390,11 +403,11 @@ def mark_reviewed(
     conn.execute(
         """
         INSERT INTO review_state
-            (client, period, recon_type, fingerprint, reviewed, reviewer_note,
+            (client_id, period, recon_type, fingerprint, reviewed, reviewer_note,
              reviewed_at, reviewed_in_run_id,
              reviewed_classification, reviewed_difference_type, reviewed_confidence_band)
         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (client, period, recon_type, fingerprint) DO UPDATE SET
+        ON CONFLICT (client_id, period, recon_type, fingerprint) DO UPDATE SET
             reviewed = 1,
             reviewer_note = excluded.reviewer_note,
             reviewed_at = excluded.reviewed_at,
@@ -404,7 +417,7 @@ def mark_reviewed(
             reviewed_confidence_band = excluded.reviewed_confidence_band
         """,
         (
-            client, period, recon_type, fingerprint, note,
+            int(client_id), period, recon_type, fingerprint, note,
             reviewed_at, reviewed_in_run_id,
             classification, difference_type, confidence_band,
         ),
@@ -414,7 +427,7 @@ def mark_reviewed(
 
 def clear_review(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -426,16 +439,16 @@ def clear_review(
         SET reviewed = 0, reviewer_note = NULL, reviewed_at = NULL,
             reviewed_in_run_id = NULL, reviewed_classification = NULL,
             reviewed_difference_type = NULL, reviewed_confidence_band = NULL
-        WHERE client = ? AND period = ? AND recon_type = ? AND fingerprint = ?
+        WHERE client_id = ? AND period = ? AND recon_type = ? AND fingerprint = ?
         """,
-        (client, period, recon_type, fingerprint),
+        (int(client_id), period, recon_type, fingerprint),
     )
     conn.commit()
 
 
 def get_review_state(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
 ) -> dict[str, dict[str, Any]]:
@@ -445,9 +458,9 @@ def get_review_state(
         SELECT fingerprint, reviewed, reviewer_note, reviewed_at, reviewed_in_run_id,
                reviewed_classification, reviewed_difference_type, reviewed_confidence_band
         FROM review_state
-        WHERE client = ? AND period = ? AND recon_type = ?
+        WHERE client_id = ? AND period = ? AND recon_type = ?
         """,
-        (client, period, recon_type),
+        (int(client_id), period, recon_type),
     ).fetchall()
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -471,7 +484,7 @@ def get_review_state(
 
 def set_field_override(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -492,22 +505,22 @@ def set_field_override(
     conn.execute(
         """
         INSERT INTO result_field_overrides
-            (client, period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at)
+            (client_id, period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (client, period, recon_type, fingerprint, side, field) DO UPDATE SET
+        ON CONFLICT (client_id, period, recon_type, fingerprint, side, field) DO UPDATE SET
             value = excluded.value,
             reason = excluded.reason,
             changed_by = excluded.changed_by,
             changed_at = excluded.changed_at
         """,
-        (client, period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at),
+        (int(client_id), period, recon_type, fingerprint, side, field, value, reason, changed_by, changed_at),
     )
     conn.commit()
 
 
 def clear_field_override(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -518,17 +531,17 @@ def clear_field_override(
     conn.execute(
         """
         DELETE FROM result_field_overrides
-        WHERE client = ? AND period = ? AND recon_type = ? AND fingerprint = ?
+        WHERE client_id = ? AND period = ? AND recon_type = ? AND fingerprint = ?
           AND side = ? AND field = ?
         """,
-        (client, period, recon_type, fingerprint, side, field),
+        (int(client_id), period, recon_type, fingerprint, side, field),
     )
     conn.commit()
 
 
 def get_field_overrides(
     conn: sqlite3.Connection,
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
 ) -> dict[str, dict[str, dict[str, Any]]]:
@@ -537,9 +550,9 @@ def get_field_overrides(
         """
         SELECT fingerprint, side, field, value, reason, changed_by, changed_at
         FROM result_field_overrides
-        WHERE client = ? AND period = ? AND recon_type = ?
+        WHERE client_id = ? AND period = ? AND recon_type = ?
         """,
-        (client, period, recon_type),
+        (int(client_id), period, recon_type),
     ).fetchall()
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for fp, side, field, value, reason, changed_by, changed_at in rows:

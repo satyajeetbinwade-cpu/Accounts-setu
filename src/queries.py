@@ -27,7 +27,7 @@ _RESULT_COLUMNS = [
 
 
 def mark_reviewed(
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -44,7 +44,7 @@ def mark_reviewed(
     conn = db.get_connection(db_path)
     try:
         db.mark_reviewed(
-            conn, client, period, recon_type, fingerprint,
+            conn, int(client_id), period, recon_type, fingerprint,
             note=note,
             reviewed_at=datetime.now(timezone.utc).isoformat(),
             reviewed_in_run_id=result.get("run_id") if result else None,
@@ -57,21 +57,21 @@ def mark_reviewed(
 
 
 def clear_review(
-    client: str, period: str, recon_type: str, fingerprint: str, *, db_path=None
+    client_id: int, period: str, recon_type: str, fingerprint: str, *, db_path=None
 ) -> None:
     conn = db.get_connection(db_path)
     try:
-        db.clear_review(conn, client, period, recon_type, fingerprint)
+        db.clear_review(conn, int(client_id), period, recon_type, fingerprint)
     finally:
         conn.close()
 
 
 def get_review_state(
-    client: str, period: str, recon_type: str, *, db_path=None
+    client_id: int, period: str, recon_type: str, *, db_path=None
 ) -> dict[str, dict[str, Any]]:
     conn = db.get_connection(db_path)
     try:
-        return db.get_review_state(conn, client, period, recon_type)
+        return db.get_review_state(conn, int(client_id), period, recon_type)
     finally:
         conn.close()
 
@@ -82,7 +82,7 @@ def get_review_state(
 
 
 def set_field_override(
-    client: str,
+    client_id: int,
     period: str,
     recon_type: str,
     fingerprint: str,
@@ -106,7 +106,7 @@ def set_field_override(
     conn = db.get_connection(db_path)
     try:
         db.set_field_override(
-            conn, client, period, recon_type, fingerprint, side, field, value,
+            conn, int(client_id), period, recon_type, fingerprint, side, field, value,
             reason=reason, changed_by=actor, changed_at=now,
         )
     finally:
@@ -136,59 +136,40 @@ def set_field_override(
     try:
         from src.module2 import service as m2
 
-        for run_id in run_ids_for_fingerprint(client, period, recon_type, fingerprint, db_path=db_path):
+        for run_id in run_ids_for_fingerprint(client_id, period, recon_type, fingerprint, db_path=db_path):
             m2.generate_exceptions_for_run(run_id, client_id=_client_id_for_run(run_id, db_path=db_path), actor=actor, db_path=db_path)
     except Exception:  # noqa: BLE001
         pass
 
 
 def _client_id_for_run(run_id: int, *, db_path=None) -> int:
-    """Resolve the F2 client_id for a run via its client folder name."""
+    """The run's ``client_id`` (identity is stored directly now — no name
+    matching)."""
     conn = db.get_connection(db_path)
     try:
-        row = conn.execute("SELECT client FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+        row = conn.execute("SELECT client_id FROM runs WHERE run_id = ?", (run_id,)).fetchone()
     finally:
         conn.close()
-    if row is None:
-        return 0
-    folder = row[0]
-
-    def norm(name: str) -> str:
-        return "".join(ch for ch in str(name).lower() if ch.isalnum())
-
-    try:
-        from src.clients import service as clients
-
-        target = norm(folder)
-        for c in clients.list_clients(include_inactive=True):
-            if norm(c["legal_name"]) == target:
-                return int(c["client_id"])
-        for c in clients.list_clients(include_inactive=True):
-            n = norm(c["legal_name"])
-            if target and (n.startswith(target) or target.startswith(n)):
-                return int(c["client_id"])
-    except Exception:  # noqa: BLE001
-        pass
-    return 0
+    return int(row[0]) if row is not None and row[0] is not None else 0
 
 
 def clear_field_override(
-    client: str, period: str, recon_type: str, fingerprint: str, side: str, field: str,
+    client_id: int, period: str, recon_type: str, fingerprint: str, side: str, field: str,
     *, db_path=None,
 ) -> None:
     conn = db.get_connection(db_path)
     try:
-        db.clear_field_override(conn, client, period, recon_type, fingerprint, side, field)
+        db.clear_field_override(conn, int(client_id), period, recon_type, fingerprint, side, field)
     finally:
         conn.close()
 
 
 def get_field_overrides(
-    client: str, period: str, recon_type: str, *, db_path=None
+    client_id: int, period: str, recon_type: str, *, db_path=None
 ) -> dict[str, dict[str, dict[str, Any]]]:
     conn = db.get_connection(db_path)
     try:
-        return db.get_field_overrides(conn, client, period, recon_type)
+        return db.get_field_overrides(conn, int(client_id), period, recon_type)
     finally:
         conn.close()
 
@@ -215,7 +196,7 @@ def _apply_field_overrides(
 
 
 def apply_record_overrides(
-    client: str, period: str, recon_type: str, fingerprint: Optional[str],
+    client_id: int, period: str, recon_type: str, fingerprint: Optional[str],
     books: Optional[dict[str, Any]], portal: Optional[dict[str, Any]], *, db_path=None,
 ) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]]]:
     """Apply a fingerprint's stored field overrides to a books/portal record
@@ -227,7 +208,7 @@ def apply_record_overrides(
     """
     if not fingerprint:
         return books, portal
-    overrides = get_field_overrides(client, period, recon_type, db_path=db_path)
+    overrides = get_field_overrides(client_id, period, recon_type, db_path=db_path)
     by_side = overrides.get(fingerprint)
     if not by_side:
         return books, portal
@@ -243,7 +224,7 @@ def apply_record_overrides(
 
 
 def run_ids_for_fingerprint(
-    client: str, period: str, recon_type: str, fingerprint: str, *, db_path=None,
+    client_id: int, period: str, recon_type: str, fingerprint: str, *, db_path=None,
 ) -> list[int]:
     """Every run that contains this fingerprint — used to regenerate the
     downstream exceptions after a reviewer corrects a record."""
@@ -254,9 +235,9 @@ def run_ids_for_fingerprint(
             SELECT DISTINCT mr.run_id
             FROM match_results mr
             JOIN runs r ON r.run_id = mr.run_id
-            WHERE mr.fingerprint = ? AND r.client = ? AND r.period = ? AND r.recon_type = ?
+            WHERE mr.fingerprint = ? AND r.client_id = ? AND r.period = ? AND r.recon_type = ?
             """,
-            (fingerprint, client, period, recon_type),
+            (fingerprint, int(client_id), period, recon_type),
         ).fetchall()
         return [int(r[0]) for r in rows]
     finally:
@@ -301,7 +282,7 @@ def get_run(run_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
 
 
 def list_runs(
-    client: Optional[str] = None,
+    client_id: Optional[int] = None,
     period: Optional[str] = None,
     recon_type: Optional[str] = None,
     *,
@@ -312,9 +293,9 @@ def list_runs(
     try:
         sql = "SELECT * FROM runs WHERE 1=1"
         params: list[Any] = []
-        if client is not None:
-            sql += " AND client = ?"
-            params.append(client)
+        if client_id is not None:
+            sql += " AND client_id = ?"
+            params.append(int(client_id))
         if period is not None:
             sql += " AND period = ?"
             params.append(period)
@@ -378,14 +359,14 @@ def get_results(
 
         rows = conn.execute(sql, params).fetchall()
         run_row = conn.execute(
-            "SELECT client, period, recon_type FROM runs WHERE run_id = ?", (run_id,)
+            "SELECT client_id, period, recon_type FROM runs WHERE run_id = ?", (run_id,)
         ).fetchone()
         if run_row is None:
             raise ValueError(f"Run {run_id} not found")
-        client, period, recon_type = run_row
+        client_id, period, recon_type = run_row
 
-        review_map = db.get_review_state(conn, client, period, recon_type)
-        override_map = db.get_field_overrides(conn, client, period, recon_type)
+        review_map = db.get_review_state(conn, int(client_id), period, recon_type)
+        override_map = db.get_field_overrides(conn, int(client_id), period, recon_type)
     finally:
         conn.close()
 

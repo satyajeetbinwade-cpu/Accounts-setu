@@ -48,8 +48,19 @@ CREATE TABLE IF NOT EXISTS end_clients (
     primary_contact_address  TEXT,                        -- includes the state (free text this phase)
     is_active                INTEGER NOT NULL DEFAULT 1,  -- soft-delete only, never hard-deleted
     created_at               TEXT    NOT NULL,
-    created_by               TEXT
+    created_by               TEXT,
+    -- 'created' (onboarded through F2) or 'migrated' (auto-registered by the
+    -- client-id migration for a name with no matching client). Migrated rows
+    -- may lack PAN/TAN/GSTIN — the roster flags them "details incomplete".
+    origin                   TEXT    NOT NULL DEFAULT 'created'
 );
+
+-- A GSTIN, when present, identifies exactly one active registration. Partial
+-- (non-null, non-blank) UNIQUE: many clients may have no GSTIN at all. PAN and
+-- TAN are deliberately NOT unique — one PAN can have many GST registrations.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_end_clients_gstin_unique
+    ON end_clients(gstin)
+ WHERE gstin IS NOT NULL AND gstin <> '';
 
 -- Internal reference only \u2014 never linked to a login row.
 CREATE TABLE IF NOT EXISTS contact_directory (

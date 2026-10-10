@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS users (
     role_id        INTEGER NOT NULL REFERENCES roles(role_id),
     is_active      INTEGER NOT NULL DEFAULT 1,
     is_end_client  INTEGER NOT NULL DEFAULT 0,  -- shared End-Client login flag (F2 retrofit target)
-    end_client_ref TEXT,                        -- which client this shared login belongs to, once F2 exists
+    end_client_id  INTEGER,  -- which client (end_clients.client_id) this shared login belongs to
     created_at     TEXT    NOT NULL,
     last_login_at  TEXT
 );
@@ -88,13 +88,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE TABLE IF NOT EXISTS per_client_team_assignments (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id      INTEGER NOT NULL REFERENCES users(user_id),
-    client       TEXT    NOT NULL,
+    client_id    INTEGER NOT NULL,  -- end_clients.client_id (no FK: auth boots before F2)
     assigned_by  TEXT,
     created_at   TEXT    NOT NULL,
-    UNIQUE (user_id, client)
+    UNIQUE (user_id, client_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_team_client ON per_client_team_assignments(client);
+CREATE INDEX IF NOT EXISTS idx_team_client ON per_client_team_assignments(client_id);
 
 -- SecurityEvent stub. Failed logins and permission escalations only for
 -- this build; retrofit to C4's vault/event sink once C4 exists.

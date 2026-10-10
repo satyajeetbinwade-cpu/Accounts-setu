@@ -288,7 +288,7 @@ def _require_gstin_pan_permission(actor: str, *, db_path=None) -> None:
     if row is None:
         raise ClientError("Could not resolve the current user for a permission check.")
     cols = ["user_id", "username", "display_name", "email", "password_salt", "password_hash",
-            "role_id", "is_active", "is_end_client", "end_client_ref", "created_at",
+            "role_id", "is_active", "is_end_client", "end_client_id", "created_at",
             "last_login_at", "role_name"]
     user = dict(zip(cols, row))
     if not auth.has_permission(user, "clients.gstin_pan.edit", db_path=db_path):
@@ -566,11 +566,11 @@ def provision_end_client_login(
             display_name = f"{client['legal_name']} \u2014 {contact['name']}"
             email = contact.get("email")
 
-    end_client_ref = str(client_id)
+    end_client_id = int(client_id)
     user_id = auth.create_user(
         username=username, display_name=display_name, email=email, password=password,
         role_id=_end_client_role_id(db_path=db_path), actor=actor,
-        is_end_client=True, end_client_ref=end_client_ref, db_path=db_path,
+        is_end_client=True, end_client_id=end_client_id, db_path=db_path,
     )
     return user_id
 

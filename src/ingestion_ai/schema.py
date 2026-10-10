@@ -94,8 +94,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mapping_profiles_client_source
 -- one shape must never be silently applied to a differently-shaped file.
 CREATE TABLE IF NOT EXISTS ingestion_shape_cache (
     shape_id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id           INTEGER,                    -- F2 client_id; NULL = client unknown (folder-only)
-    client_ref          TEXT    NOT NULL,           -- sidebar client folder/name the upload came from
+    client_id           INTEGER NOT NULL REFERENCES end_clients(client_id),
     source_type         TEXT    NOT NULL,
     header_signature    TEXT    NOT NULL,           -- stable hash of the detected header set
     headers_json        TEXT    NOT NULL,           -- JSON list of detected raw headers
@@ -113,16 +112,15 @@ CREATE TABLE IF NOT EXISTS ingestion_shape_cache (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shape_cache_lookup
-    ON ingestion_shape_cache(client_ref, source_type, header_signature);
+    ON ingestion_shape_cache(client_id, source_type, header_signature);
 
 -- Per-upload record of what the unified ingestion layer produced, so the
 -- Run screen and the Smart Ingestion screen read the SAME result object
 -- rather than each re-deriving it.
 CREATE TABLE IF NOT EXISTS ingestion_results (
     result_id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    upload_key          TEXT    NOT NULL,           -- "<client>/<period>/<source_type>/<filename>"
-    client_ref          TEXT    NOT NULL,
-    client_id           INTEGER,
+    upload_key          TEXT    NOT NULL,           -- "<client_id>/<period>/<source_type>/<filename>"
+    client_id           INTEGER NOT NULL REFERENCES end_clients(client_id),
     period              TEXT,
     source_type         TEXT    NOT NULL,
     filename            TEXT    NOT NULL,
