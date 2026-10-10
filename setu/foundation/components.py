@@ -600,6 +600,169 @@ def divider() -> rx.Component:
 
 
 # ---------------------------------------------------------------------------
+# Context selectors — Client / Recon type / Period (Year + Month)
+# ---------------------------------------------------------------------------
+#
+# One implementation for the three context choices every screen shares, so no
+# screen writes its own dropdown. NONE of them pre-select a value: each shows
+# its placeholder until the user chooses. The Period is a Year dropdown plus a
+# Month dropdown side by side, and still yields ONE ``"YYYY-MM"`` value so
+# folder paths, run records and review state are unchanged.
+
+
+def client_picker(
+    options,
+    *,
+    value,
+    on_change,
+    label: str = "Client",
+    placeholder: str = "Select a client",
+    width: str = "220px",
+    size: str | None = None,
+    add_new_label: str | None = None,
+    on_add_new=None,
+    show_add_new=True,
+) -> rx.Component:
+    """Client selector with no default.
+
+    ``add_new_label`` / ``on_add_new`` optionally render the "Add New Client"
+    link beside the label (kept where a screen already offers it).
+    ``show_add_new`` may be a Var so the link hides for users who may not
+    create clients.
+    """
+    props = {"size": size} if size else {}
+    label_row: rx.Component
+    if add_new_label is not None and on_add_new is not None:
+        link = rx.text(
+            add_new_label,
+            on_click=on_add_new,
+            color=t.Color.ACCENT.value,
+            font_size="12px",
+            font_weight="600",
+            text_decoration="underline",
+            cursor="pointer",
+            _hover={"opacity": "0.75"},
+        )
+        if show_add_new is not True:
+            link = rx.cond(show_add_new, link, rx.fragment())
+        label_row = rx.hstack(
+            rx.text(label, style=t.TEXT["label"]),
+            link,
+            spacing="2",
+            align="center",
+        )
+    else:
+        label_row = rx.text(label, style=t.TEXT["label"])
+    return rx.vstack(
+        label_row,
+        rx.select(
+            options,
+            value=value,
+            on_change=on_change,
+            placeholder=placeholder,
+            width=width,
+            **props,
+        ),
+        spacing="1",
+        align="start",
+    )
+
+
+def recon_type_picker(
+    options,
+    *,
+    value,
+    on_change,
+    label: str = "Recon type",
+    placeholder: str = "Select recon type",
+    width: str = "150px",
+    size: str | None = None,
+) -> rx.Component:
+    """Recon-type selector with no default and the same options/order as the
+    screen supplied before."""
+    props = {"size": size} if size else {}
+    return rx.vstack(
+        rx.text(label, style=t.TEXT["label"]),
+        rx.select(
+            options,
+            value=value,
+            on_change=on_change,
+            placeholder=placeholder,
+            width=width,
+            **props,
+        ),
+        spacing="1",
+        align="start",
+    )
+
+
+def period_picker(
+    *,
+    year,
+    month,
+    years,
+    months,
+    on_year_change,
+    on_month_change,
+    label: str = "Period",
+    year_width: str = "110px",
+    month_width: str = "150px",
+    size: str | None = None,
+) -> rx.Component:
+    """Year + Month side by side, yielding ONE ``"YYYY-MM"`` value.
+
+    Nothing is pre-selected (placeholders ``"Year"`` and ``"Month"``). The
+    flow is Year first: the Month dropdown appears only once a Year is chosen.
+    ``months`` is the state's ``month_options`` (a list of objects with
+    ``month`` / ``label`` / ``disabled``), so the current year can grey out
+    future months without the component knowing today's date. Year options
+    come from ``discovery.available_years()`` — every year, current first.
+    """
+    props = {"size": size} if size else {}
+    month_select = rx.select.root(
+        rx.select.trigger(
+            placeholder="Month",
+            width=month_width,
+            **props,
+        ),
+        rx.select.content(
+            rx.select.group(
+                rx.foreach(
+                    months,
+                    lambda option: rx.select.item(
+                        option.label,
+                        value=option.month,
+                        disabled=option.disabled,
+                    ),
+                ),
+            ),
+        ),
+        value=month,
+        on_change=on_month_change,
+    )
+    return rx.vstack(
+        rx.text(label, style=t.TEXT["label"]),
+        rx.hstack(
+            rx.select(
+                years,
+                value=year,
+                on_change=on_year_change,
+                placeholder="Year",
+                width=year_width,
+                **props,
+            ),
+            # Month is revealed only after a Year is picked, so the picker
+            # reads as "choose a year, then choose a month".
+            rx.cond(year == "", rx.fragment(), month_select),
+            spacing="2",
+            align="center",
+        ),
+        spacing="1",
+        align="start",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shared upload / preview / viewer (F3 + F3-B — the one implementation)
 # ---------------------------------------------------------------------------
 

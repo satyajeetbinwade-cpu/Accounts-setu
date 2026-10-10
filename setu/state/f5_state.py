@@ -140,10 +140,7 @@ class F5State(AuthState):
             str(c["client_id"]): c["legal_name"]
             for c in clients.list_clients(include_inactive=True)
         }
-        if not self.sync_client_id and self.client_options:
-            self.sync_client_id = self.client_options[0].client_id
-        if not self.ror_client_id and self.client_options:
-            self.ror_client_id = self.client_options[0].client_id
+        # No default client for either picker: both stay on their placeholder.
         self._load_all()
 
     def _load_all(self) -> None:
@@ -289,3 +286,19 @@ class F5State(AuthState):
     def set_ror_client(self, client_id: int):
         self.ror_client_id = client_id
         self._load_ror()
+
+    def _option_name(self, client_id: int) -> str:
+        for o in self.client_options:
+            if o.client_id == client_id:
+                return o.legal_name
+        return ""
+
+    @rx.var
+    def sync_client_name(self) -> str:
+        """Selected Sync-health client name, or '' while none is chosen."""
+        return self._option_name(self.sync_client_id)
+
+    @rx.var
+    def ror_client_name(self) -> str:
+        """Selected recon-of-recon client name, or '' while none is chosen."""
+        return self._option_name(self.ror_client_id)

@@ -32,6 +32,7 @@ from src.runner import RunExecutionError, execute_run
 from src.shared import discovery
 from setu.foundation import tokens as _t
 from setu.state.auth_state import AuthState
+from setu.state.context_selectors import PeriodPickerMixin
 from setu.state.history import HistoryEntry, load_history
 from setu.state.shared_upload import (
     PendingFile,
@@ -85,15 +86,6 @@ class StageChip:
     label: str
     reachable: bool
     active: bool
-
-
-@dataclass
-class ContextOption:
-    """A select option whose label is human-facing and whose value is the
-    raw period key (so the unfiled sentinel can read as a real sentence)."""
-
-    value: str
-    label: str
 
 
 @dataclass
@@ -291,14 +283,13 @@ class IntegrityRow:
     detail: str
 
 
-class ReconcileState(AuthState):
+class ReconcileState(PeriodPickerMixin, AuthState):
     """The guided five-stage reconciliation flow."""
 
     stage: int = 1
 
     # context
     clients: list[str] = []
-    periods: list[str] = []
     recon_types: list[str] = []
     ctx_client: str = ""
     ctx_period: str = ""
@@ -332,10 +323,12 @@ class ReconcileState(AuthState):
         return "clients.profile.manage" in self._permission_codes()
 
     @rx.var
-    def period_options(self) -> list[ContextOption]:
-        """Periods with human labels — the unfiled sentinel reads as
-        "Unfiled (not reconcilable)" rather than a bare "-"."""
-        return [ContextOption(value=p, label=period_utils.period_label(p)) for p in self.periods]
+    def context_complete(self) -> bool:
+        """True only once Client, Period (Year + Month) and Recon type are all
+        chosen. Drives the banner, the existing-run card and the Continue
+        button, so nothing appears while the context is incomplete."""
+        return bool(self.ctx_client and self.ctx_period and self.ctx_recon_type)
+
     upload_error: str = ""
     # The drop-zone's own state: a staged file (chips above the Upload button)
     # and the per-file upload lifecycle, both shared with F3/F3-B so the
@@ -553,8 +546,9 @@ class ReconcileState(AuthState):
     @rx.event
     def load(self, params: dict | None = None):
         self.clients = discovery.list_clients()
-        if not self.ctx_client and self.clients:
-            self.ctx_client = self.clients[0]
+        self.recon_types = list(discovery.RECON_TYPES)
+        # No default client/period/recon type is chosen here: the pickers show
+        # their placeholders until the user decides.
         self._load_context()
         # Deep-link support: a filtered Review view is linkable
         # (/reconcile?stage=4&cls=…&cause=…). Params are read from the
@@ -588,8 +582,7 @@ class ReconcileState(AuthState):
         "Continue this run" does).
         """
         self.clients = discovery.list_clients()
-        if not self.ctx_client and self.clients:
-            self.ctx_client = self.clients[0]
+        self.recon_types = list(discovery.RECON_TYPES)
         self._load_context()
         try:
             url_params = dict(self.router.page.params or {})
@@ -614,17 +607,13 @@ class ReconcileState(AuthState):
             return False
 
     def _load_context(self) -> None:
-        if not self.ctx_client:
-            return
-        self.periods = discovery.list_periods(self.ctx_client)
-        if self.ctx_period not in self.periods:
-            self.ctx_period = self.periods[0] if self.periods else ""
-        if self.ctx_client and self.ctx_period:
-            self.recon_types = discovery.list_recon_types(self.ctx_client, self.ctx_period)
-        else:
-            self.recon_types = []
-        if self.ctx_recon_type not in self.recon_types:
-            self.ctx_recon_type = self.recon_types[0] if self.recon_types else ""
+        """Reload everything that depends on the current context.
+
+        Deliberately selects NOTHING: an empty client, period or recon type
+        stays empty. The period is whatever the Year/Month picker produced —
+        this never reads it back from the folders that happen to exist, so a
+        period with no data folder yet is still a valid context.
+        """
         self._load_existing_run()
         self._load_run_options()
         self._load_slots()
@@ -685,6 +674,9 @@ class ReconcileState(AuthState):
     def set_ctx_client(self, v: str):
         self.ctx_client = v
         self.rail_return = False
+        # A different client invalidates the period and everything below it.
+        self.reset_period()
+        self._reset_downstream()
         self._load_context()
 
     @rx.event
@@ -697,16 +689,30 @@ class ReconcileState(AuthState):
         return rx.redirect("/clients/new")
 
     @rx.event
-    def set_ctx_period(self, v: str):
-        self.ctx_period = v
-        self.rail_return = False
-        self._load_context()
-
-    @rx.event
     def set_ctx_recon_type(self, v: str):
         self.ctx_recon_type = v
         self.rail_return = False
+        self._reset_downstream()
         self._load_context()
+
+    def _on_period_changed(self, period: str) -> None:
+        """The Year/Month pair produced a new ``YYYY-MM`` (or cleared it)."""
+        self.rail_return = False
+        self._reset_downstream()
+        self._load_context()
+
+    def _reset_downstream(self) -> None:
+        """Discard work started under the previous context.
+
+        A run, the staged selections and the stage position all belong to one
+        context; changing any selector starts the flow again from Stage 1.
+        """
+        self.run_id = 0
+        self.auto_ran = False
+        self.started_fresh = False
+        self.pause_before_run = False
+        self.selections = {}
+        self.stage = 1
 
     @rx.var
     def stage_chips(self) -> list[StageChip]:
@@ -788,7 +794,12 @@ class ReconcileState(AuthState):
     # ==================================================================
     def _load_slots(self) -> None:
         if not (self.ctx_client and self.ctx_period and self.ctx_recon_type):
+            # Context incomplete: nothing is offered and Stage 3 stays locked.
             self.slots = []
+            self.books_ok = False
+            self.portal_ok = False
+            self.ready = False
+            self.blockers = []
             return
         books_types = set(discovery.BOOKS_SOURCE_TYPES)
         note_types = set(discovery.note_slot_types(self.ctx_recon_type))

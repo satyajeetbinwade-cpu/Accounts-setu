@@ -7,6 +7,7 @@ hardcodes client/period/recon_type values.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -159,6 +160,44 @@ def reconcilable_periods(client: str) -> list[str]:
     """Periods that can actually be reconciled — the unfiled sentinel
     excluded. Use this wherever a period is chosen to RUN against."""
     return [p for p in list_periods(client) if is_valid_period(p)]
+
+
+# The floor of the Year dropdown. Deliberately ONE constant rather than a scan
+# of what data exists: the picker offers every year from the current one down
+# to here, so a period can be chosen before any folder or run exists for it.
+# Widening the list is a one-line change to this value.
+EARLIEST_YEAR = 1980
+
+
+def available_years(current_year: Optional[int] = None) -> list[int]:
+    """Years for the Year dropdown: the current year down to ``EARLIEST_YEAR``,
+    descending.
+
+    Independent of what data exists — every year is offered, so choosing a
+    period never depends on a folder already being present. Never offers a
+    future year, since the list always starts at the current one.
+    """
+    now_year = int(current_year) if current_year else datetime.now().year
+    floor = min(EARLIEST_YEAR, now_year)
+    return list(range(now_year, floor - 1, -1))
+
+
+def period_has_source_data(client: str, period: str) -> bool:
+    """Whether ``data/<client>/<period>/<source_type>/`` holds any files.
+
+    Used by read-only screens to show the "no data uploaded for this period
+    yet" empty state instead of erroring when the period itself is valid but
+    nothing has been filed against it.
+    """
+    if not (client and period):
+        return False
+    period_dir = DATA_ROOT / client / period
+    if not period_dir.is_dir():
+        return False
+    for source_dir in period_dir.iterdir():
+        if source_dir.is_dir() and any(f.is_file() for f in source_dir.iterdir()):
+            return True
+    return False
 
 
 def list_recon_types(client: str, period: str) -> list[str]:

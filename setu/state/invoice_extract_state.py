@@ -248,10 +248,7 @@ class InvoiceExtractState(SharedUploadState):
             str(c["client_id"]): c["legal_name"]
             for c in clients.list_clients(include_inactive=True)
         }
-        if not self.upload_client_id and self.client_options:
-            self.upload_client_id = self.client_options[0].client_id
-        if not self.export_client_id and self.client_options:
-            self.export_client_id = self.client_options[0].client_id
+        # No default client for upload or export: both stay unselected.
         self.can_review = "invoice_extract.review" in self._codes()
         self.can_export = "invoice_extract.export" in self._codes()
         self.is_model_admin = "invoice_extract.models.manage" in self._codes()

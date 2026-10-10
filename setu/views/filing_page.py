@@ -115,16 +115,11 @@ def _calendar() -> rx.Component:
             rx.vstack(
                 c.section_title("Build / refresh calendar"),
                 rx.hstack(
-                    rx.vstack(
-                        rx.text("Client", style=t.TEXT["label"]),
-                        rx.select(
-                            FilingState.client_options.map(lambda o: o.legal_name),
-                            value=FilingState.build_client_name,
-                            on_change=FilingState.set_build_client_by_name,
-                            width="240px",
-                        ),
-                        spacing="1",
-                        align="start",
+                    c.client_picker(
+                        FilingState.client_options.map(lambda o: o.legal_name),
+                        value=FilingState.build_client_name,
+                        on_change=FilingState.set_build_client_by_name,
+                        width="240px",
                     ),
                     rx.vstack(
                         rx.text("Period", style=t.TEXT["label"]),
@@ -144,6 +139,7 @@ def _calendar() -> rx.Component:
                 rx.button(
                     "Build calendar",
                     on_click=FilingState.build_calendar,
+                    disabled=~FilingState.build_ready,
                     background=t.Color.ACCENT.value,
                     color="#FFFFFF",
                 ),
@@ -200,16 +196,11 @@ def _new_filing_form() -> rx.Component:
                 "Prepare a filing package (generic manual upload this phase).",
             ),
             rx.hstack(
-                rx.vstack(
-                    rx.text("Client", style=t.TEXT["label"]),
-                    rx.select(
-                        FilingState.client_options.map(lambda o: o.legal_name),
-                        value=FilingState.new_client_name,
-                        on_change=FilingState.set_new_client_by_name,
-                        width="240px",
-                    ),
-                    spacing="1",
-                    align="start",
+                c.client_picker(
+                    FilingState.client_options.map(lambda o: o.legal_name),
+                    value=FilingState.new_client_name,
+                    on_change=FilingState.set_new_client_by_name,
+                    width="240px",
                 ),
                 rx.vstack(
                     rx.text("Return type", style=t.TEXT["label"]),
@@ -258,6 +249,7 @@ def _new_filing_form() -> rx.Component:
                 rx.button(
                     "Prepare filing package",
                     on_click=FilingState.prepare_filing(rx.upload_files(upload_id="c2_package")),
+                    disabled=~FilingState.new_ready,
                     background=t.Color.ACCENT.value,
                     color="#FFFFFF",
                 ),
@@ -687,16 +679,11 @@ def _sources() -> rx.Component:
                 "Per-client, per-source API vs manual mode. API mode is dormant until portal "
                 "credentials are configured in C4; manual upload always remains available.",
             ),
-            rx.vstack(
-                rx.text("Client", style=t.TEXT["label"]),
-                rx.select(
-                    FilingState.client_options.map(lambda o: o.legal_name),
-                    value=FilingState.source_client_name,
-                    on_change=FilingState.set_source_client_by_name,
-                    width="240px",
-                ),
-                spacing="1",
-                align="start",
+            c.client_picker(
+                FilingState.client_options.map(lambda o: o.legal_name),
+                value=FilingState.source_client_name,
+                on_change=FilingState.set_source_client_by_name,
+                width="240px",
             ),
             rx.cond(
                 FilingState.sources.length() > 0,

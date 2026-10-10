@@ -34,15 +34,11 @@ def _hub_button(label: str) -> rx.Component:
 
 
 def _client_select() -> rx.Component:
-    return rx.hstack(
-        rx.text("Client", style=t.TEXT["label"]),
-        rx.select(
-            Module2State.client_options.map(lambda o: o.legal_name),
-            on_change=Module2State.set_client_by_name,
-            width="260px",
-        ),
-        spacing="2",
-        align="center",
+    return c.client_picker(
+        Module2State.client_options.map(lambda o: o.legal_name),
+        value=Module2State.client_name,
+        on_change=Module2State.set_client_by_name,
+        width="260px",
     )
 
 

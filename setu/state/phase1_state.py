@@ -22,15 +22,10 @@ from src.ingestion_ai import periods as period_utils
 from src.runner import RunExecutionError, execute_run
 from src.shared import discovery
 from setu.state.auth_state import AuthState
+from setu.state.context_selectors import PeriodPickerMixin
 
 AT_RISK_CLASSIFICATIONS = ("Amount Difference", "Not in Books", "Not in Portal")
 CLASSIFICATION_ORDER = ["Amount Difference", "Not in Portal", "Not in Books", "Matched"]
-
-
-@dataclass
-class ContextOption:
-    value: str
-    label: str
 
 
 @dataclass
@@ -103,14 +98,13 @@ class MovementRow:
     moved: bool
 
 
-class Phase1State(AuthState):
+class Phase1State(PeriodPickerMixin, AuthState):
     """Shared state for the Phase-1 tools."""
 
     # ------------------------------------------------------------------
     # Context (client / period / recon type / selected run)
     # ------------------------------------------------------------------
     clients: list[str] = []
-    periods: list[str] = []
     recon_types: list[str] = []
     runs: list[RunSummary] = []
 
@@ -193,22 +187,18 @@ class Phase1State(AuthState):
     @rx.event
     def load(self):
         self.clients = discovery.list_clients()
-        if not self.ctx_client and self.clients:
-            self.ctx_client = self.clients[0]
+        self.recon_types = list(discovery.RECON_TYPES)
+        # No default client/period/recon type: the pickers stay on their
+        # placeholders until the user chooses deliberately.
         self._load_context()
 
     def _load_context(self) -> None:
-        if not self.ctx_client:
-            return
-        self.periods = discovery.list_periods(self.ctx_client)
-        if self.ctx_period not in self.periods:
-            self.ctx_period = self.periods[0] if self.periods else ""
-        if self.ctx_client and self.ctx_period:
-            self.recon_types = discovery.list_recon_types(self.ctx_client, self.ctx_period)
-        else:
-            self.recon_types = []
-        if self.ctx_recon_type not in self.recon_types:
-            self.ctx_recon_type = self.recon_types[0] if self.recon_types else ""
+        """Reload everything that depends on the current context.
+
+        Chooses nothing: an empty client/period/recon type stays empty. The
+        period is whatever the Year/Month picker produced, not a value read
+        back from the folders on disk.
+        """
         self._load_runs()
         self._on_context_changed()
 
@@ -230,17 +220,19 @@ class Phase1State(AuthState):
     def set_ctx_client(self, v: str):
         self.ctx_client = v
         self.selected_run_id = 0
-        self._load_context()
-
-    @rx.event
-    def set_ctx_period(self, v: str):
-        self.ctx_period = v
-        self.selected_run_id = 0
+        # A different client invalidates the period and the run selection.
+        self.reset_period()
         self._load_context()
 
     @rx.event
     def set_ctx_recon_type(self, v: str):
         self.ctx_recon_type = v
+        self.selected_run_id = 0
+        self._load_runs()
+        self._on_context_changed()
+
+    def _on_period_changed(self, period: str) -> None:
+        """The Year/Month pair produced a new ``YYYY-MM`` (or cleared it)."""
         self.selected_run_id = 0
         self._load_runs()
         self._on_context_changed()
@@ -276,13 +268,6 @@ class Phase1State(AuthState):
     @rx.var
     def has_context(self) -> bool:
         return bool(self.ctx_client and self.ctx_period and self.ctx_recon_type)
-
-    @rx.var
-    def period_options(self) -> list[ContextOption]:
-        """Periods with human labels — the unfiled sentinel reads as
-        "Unfiled (not reconcilable)" rather than a bare "-", so a file filed
-        without a period is visibly unusable instead of mysteriously absent."""
-        return [ContextOption(value=p, label=period_utils.period_label(p)) for p in self.periods]
 
     @rx.var
     def period_is_unfiled(self) -> bool:

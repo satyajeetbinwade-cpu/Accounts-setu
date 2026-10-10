@@ -177,18 +177,11 @@ class FilingState(AuthState):
             for c in clients.list_clients(include_inactive=True)
         }
         self.obligation_options = [o["obligation"] for o in rules.list_statutory_due_dates()]
-        if not self.build_client_id and self.client_options:
-            self.build_client_id = self.client_options[0].client_id
-        if not self.new_client_id and self.client_options:
-            self.new_client_id = self.client_options[0].client_id
-        if not self.source_client_id and self.client_options:
-            self.source_client_id = self.client_options[0].client_id
+        # No default client or period: client pickers and the period field stay
+        # empty until the user chooses. (The obligation list keeps its default;
+        # it is a return type, not a client/period/recon type.)
         if not self.new_obligation and self.obligation_options:
             self.new_obligation = self.obligation_options[0]
-        if not self.build_period:
-            self.build_period = _default_period()
-        if not self.new_period:
-            self.new_period = _default_period()
         self._load_all()
 
     def _load_all(self) -> None:
@@ -302,6 +295,18 @@ class FilingState(AuthState):
             if o.legal_name == name:
                 return o.client_id
         return self.client_options[0].client_id if self.client_options else 0
+
+    @rx.var
+    def build_ready(self) -> bool:
+        """A client AND a period are required before the calendar can be built."""
+        return bool(self.build_client_id and self.build_period.strip())
+
+    @rx.var
+    def new_ready(self) -> bool:
+        """Client, return type AND period are required before a filing is prepared."""
+        return bool(
+            self.new_client_id and self.new_obligation and self.new_period.strip()
+        )
 
     @rx.event
     def build_calendar(self):

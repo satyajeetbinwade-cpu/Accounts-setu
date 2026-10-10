@@ -128,16 +128,11 @@ def _upload_section() -> rx.Component:
                     wrap="wrap",
                 ),
                 rx.hstack(
-                    rx.vstack(
-                        rx.text("Client", style=t.TEXT["label"]),
-                        rx.select(
-                            InvoiceExtractState.client_names,
-                            value=InvoiceExtractState.upload_client_name,
-                            on_change=InvoiceExtractState.set_upload_client_by_name,
-                            width="240px",
-                        ),
-                        spacing="1",
-                        align="start",
+                    c.client_picker(
+                        InvoiceExtractState.client_names,
+                        value=InvoiceExtractState.upload_client_name,
+                        on_change=InvoiceExtractState.set_upload_client_by_name,
+                        width="240px",
                     ),
                     rx.vstack(
                         rx.text("Batch name (optional)", style=t.TEXT["label"]),
@@ -942,16 +937,11 @@ def _export_section() -> rx.Component:
                     "Only Confirmed uploads can be exported — the hard gate is enforced at the "
                     "data-pipeline level.",
                 ),
-                rx.vstack(
-                    rx.text("Client", style=t.TEXT["label"]),
-                    rx.select(
-                        InvoiceExtractState.client_names,
-                        value=InvoiceExtractState.export_client_name,
-                        on_change=InvoiceExtractState.set_export_client_by_name,
-                        width="240px",
-                    ),
-                    spacing="1",
-                    align="start",
+                c.client_picker(
+                    InvoiceExtractState.client_names,
+                    value=InvoiceExtractState.export_client_name,
+                    on_change=InvoiceExtractState.set_export_client_by_name,
+                    width="240px",
                 ),
                 rx.cond(
                     InvoiceExtractState.confirmed_uploads.length() > 0,

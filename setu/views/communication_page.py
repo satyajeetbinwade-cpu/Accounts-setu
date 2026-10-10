@@ -189,8 +189,7 @@ def _message_composer() -> rx.Component:
                             width="100%",
                         ),
                         rx.vstack(
-                            rx.text("Recon type", style=t.TEXT["label"]),
-                            rx.select(
+                            c.recon_type_picker(
                                 ["GST", "TDS"],
                                 value=CommunicationState.recon_type,
                                 on_change=CommunicationState.set_recon_type,

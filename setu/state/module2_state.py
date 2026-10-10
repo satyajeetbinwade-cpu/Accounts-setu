@@ -184,8 +184,7 @@ class Module2State(AuthState):
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)
         ]
-        if not self.client_id and self.client_options:
-            self.client_id = self.client_options[0].client_id
+        # No default client: the picker stays on its placeholder until chosen.
         self.can_resolve = "module2.exceptions.resolve" in self._codes()
         self._load_all()
 
@@ -372,6 +371,14 @@ class Module2State(AuthState):
                 break
         self.selected_exception_id = 0
         self._load_all()
+
+    @rx.var
+    def client_name(self) -> str:
+        """The selected client's legal name, or '' while none is chosen."""
+        for o in self.client_options:
+            if o.client_id == self.client_id:
+                return o.legal_name
+        return ""
 
     @rx.event
     def set_filter_sub_type(self, v: str):

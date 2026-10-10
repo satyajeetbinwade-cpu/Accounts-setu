@@ -30,7 +30,7 @@ class CommunicationState(AuthState):
     available_templates: list[dict] = []
     selected_template: str = "missing_invoice"
     period: str = ""
-    recon_type: str = "GST"
+    recon_type: str = ""
     missing_count: str = ""
     missing_details: str = ""
     custom_message: str = ""

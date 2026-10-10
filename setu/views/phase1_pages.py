@@ -18,45 +18,24 @@ def _context_bar() -> rx.Component:
     """The shared context strip: client / period / recon type / run."""
     return c.card(
         rx.hstack(
-            rx.vstack(
-                rx.text("Client", style=t.TEXT["label"]),
-                rx.select(
-                    Phase1State.clients,
-                    value=Phase1State.ctx_client,
-                    on_change=Phase1State.set_ctx_client,
-                    width="200px",
-                ),
-                spacing="1",
-                align="start",
+            c.client_picker(
+                Phase1State.clients,
+                value=Phase1State.ctx_client,
+                on_change=Phase1State.set_ctx_client,
+                width="200px",
             ),
-            rx.vstack(
-                rx.text("Period", style=t.TEXT["label"]),
-                rx.select.root(
-                    rx.select.trigger(width="160px", placeholder="No periods yet"),
-                    rx.select.content(
-                        rx.select.group(
-                            rx.foreach(
-                                Phase1State.period_options,
-                                lambda option: rx.select.item(option.label, value=option.value),
-                            ),
-                        ),
-                    ),
-                    value=Phase1State.ctx_period,
-                    on_change=Phase1State.set_ctx_period,
-                ),
-                spacing="1",
-                align="start",
+            c.period_picker(
+                year=Phase1State.ctx_year,
+                month=Phase1State.ctx_month,
+                years=Phase1State.year_options,
+                months=Phase1State.month_options,
+                on_year_change=Phase1State.set_ctx_year,
+                on_month_change=Phase1State.set_ctx_month,
             ),
-            rx.vstack(
-                rx.text("Recon type", style=t.TEXT["label"]),
-                rx.select(
-                    Phase1State.recon_types,
-                    value=Phase1State.ctx_recon_type,
-                    on_change=Phase1State.set_ctx_recon_type,
-                    width="150px",
-                ),
-                spacing="1",
-                align="start",
+            c.recon_type_picker(
+                Phase1State.recon_types,
+                value=Phase1State.ctx_recon_type,
+                on_change=Phase1State.set_ctx_recon_type,
             ),
             rx.vstack(
                 rx.text("Run", style=t.TEXT["label"]),

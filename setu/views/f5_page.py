@@ -246,18 +246,14 @@ def _escalation_row(e) -> rx.Component:
 
 def _sync_health() -> rx.Component:
     return rx.vstack(
-        rx.hstack(
-            rx.text("Client:", style=t.TEXT["micro"]),
-            rx.select(
-                F5State.client_options.map(lambda o: o.legal_name),
-                on_change=lambda v: F5State.set_sync_client(
-                    F5State.client_options.filter(lambda o: o.legal_name == v)[0].client_id
-                ),
-                placeholder="Select a client",
-                width="280px",
+        c.client_picker(
+            F5State.client_options.map(lambda o: o.legal_name),
+            value=F5State.sync_client_name,
+            on_change=lambda v: F5State.set_sync_client(
+                F5State.client_options.filter(lambda o: o.legal_name == v)[0].client_id
             ),
-            spacing="2",
-            align="center",
+            placeholder="Select a client",
+            width="280px",
         ),
         c.card(
             rx.vstack(
@@ -319,18 +315,14 @@ def _ror_row(r) -> rx.Component:
 
 def _recon_of_recon() -> rx.Component:
     return rx.vstack(
-        rx.hstack(
-            rx.text("Client:", style=t.TEXT["micro"]),
-            rx.select(
-                F5State.client_options.map(lambda o: o.legal_name),
-                on_change=lambda v: F5State.set_ror_client(
-                    F5State.client_options.filter(lambda o: o.legal_name == v)[0].client_id
-                ),
-                placeholder="Select a client",
-                width="280px",
+        c.client_picker(
+            F5State.client_options.map(lambda o: o.legal_name),
+            value=F5State.ror_client_name,
+            on_change=lambda v: F5State.set_ror_client(
+                F5State.client_options.filter(lambda o: o.legal_name == v)[0].client_id
             ),
-            spacing="2",
-            align="center",
+            placeholder="Select a client",
+            width="280px",
         ),
         c.card(
             rx.vstack(

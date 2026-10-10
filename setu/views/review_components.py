@@ -94,44 +94,30 @@ def context_bar() -> rx.Component:
              "text_transform": "uppercase", "color": t.Color.TEXT_MUTED.value}
     return c.card(
         rx.hstack(
-            rx.vstack(
-                rx.text("Client", style=label),
-                rx.select(
-                    ReconcileState.clients,
-                    value=ReconcileState.ctx_client,
-                    on_change=ReconcileState.set_ctx_client,
-                    width="190px",
-                    size="1",
-                ),
-                spacing="1", align="start",
+            c.client_picker(
+                ReconcileState.clients,
+                value=ReconcileState.ctx_client,
+                on_change=ReconcileState.set_ctx_client,
+                width="190px",
+                size="1",
             ),
-            rx.vstack(
-                rx.text("Period", style=label),
-                rx.select.root(
-                    rx.select.trigger(width="150px", placeholder="No periods yet", size="1"),
-                    rx.select.content(
-                        rx.select.group(
-                            rx.foreach(
-                                ReconcileState.period_options,
-                                lambda o: rx.select.item(o.label, value=o.value),
-                            ),
-                        ),
-                    ),
-                    value=ReconcileState.ctx_period,
-                    on_change=ReconcileState.set_ctx_period,
-                ),
-                spacing="1", align="start",
+            c.period_picker(
+                year=ReconcileState.ctx_year,
+                month=ReconcileState.ctx_month,
+                years=ReconcileState.year_options,
+                months=ReconcileState.month_options,
+                on_year_change=ReconcileState.set_ctx_year,
+                on_month_change=ReconcileState.set_ctx_month,
+                year_width="100px",
+                month_width="140px",
+                size="1",
             ),
-            rx.vstack(
-                rx.text("Recon type", style=label),
-                rx.select(
-                    ReconcileState.recon_types,
-                    value=ReconcileState.ctx_recon_type,
-                    on_change=ReconcileState.set_ctx_recon_type,
-                    width="130px",
-                    size="1",
-                ),
-                spacing="1", align="start",
+            c.recon_type_picker(
+                ReconcileState.recon_types,
+                value=ReconcileState.ctx_recon_type,
+                on_change=ReconcileState.set_ctx_recon_type,
+                width="130px",
+                size="1",
             ),
             rx.vstack(
                 rx.text("Run", style=label),

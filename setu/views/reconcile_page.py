@@ -96,63 +96,28 @@ def _context_stage() -> rx.Component:
                 rx.cond(
                     ReconcileState.clients.length() > 0,
                     rx.hstack(
-                        rx.vstack(
-                            rx.hstack(
-                                rx.text("Client", style=t.TEXT["label"]),
-                                rx.cond(
-                                    ReconcileState.can_manage_clients,
-                                    rx.text(
-                                        "Add New Client",
-                                        on_click=ReconcileState.add_new_client,
-                                        color=t.Color.ACCENT.value,
-                                        font_size="12px",
-                                        font_weight="600",
-                                        text_decoration="underline",
-                                        cursor="pointer",
-                                        _hover={"opacity": "0.75"},
-                                    ),
-                                    rx.fragment(),
-                                ),
-                                spacing="2",
-                                align="center",
-                            ),
-                            rx.select(
-                                ReconcileState.clients,
-                                value=ReconcileState.ctx_client,
-                                on_change=ReconcileState.set_ctx_client,
-                                width="220px",
-                            ),
-                            spacing="1",
-                            align="start",
+                        c.client_picker(
+                            ReconcileState.clients,
+                            value=ReconcileState.ctx_client,
+                            on_change=ReconcileState.set_ctx_client,
+                            placeholder="Select a client",
+                            width="220px",
+                            add_new_label="Add New Client",
+                            on_add_new=ReconcileState.add_new_client,
+                            show_add_new=ReconcileState.can_manage_clients,
                         ),
-                        rx.vstack(
-                            rx.text("Period", style=t.TEXT["label"]),
-                            rx.select.root(
-                                rx.select.trigger(width="160px", placeholder="No periods yet"),
-                                rx.select.content(
-                                    rx.select.group(
-                                        rx.foreach(
-                                            ReconcileState.period_options,
-                                            lambda option: rx.select.item(option.label, value=option.value),
-                                        ),
-                                    ),
-                                ),
-                                value=ReconcileState.ctx_period,
-                                on_change=ReconcileState.set_ctx_period,
-                            ),
-                            spacing="1",
-                            align="start",
+                        c.period_picker(
+                            year=ReconcileState.ctx_year,
+                            month=ReconcileState.ctx_month,
+                            years=ReconcileState.year_options,
+                            months=ReconcileState.month_options,
+                            on_year_change=ReconcileState.set_ctx_year,
+                            on_month_change=ReconcileState.set_ctx_month,
                         ),
-                        rx.vstack(
-                            rx.text("Recon type", style=t.TEXT["label"]),
-                            rx.select(
-                                ReconcileState.recon_types,
-                                value=ReconcileState.ctx_recon_type,
-                                on_change=ReconcileState.set_ctx_recon_type,
-                                width="150px",
-                            ),
-                            spacing="1",
-                            align="start",
+                        c.recon_type_picker(
+                            ReconcileState.recon_types,
+                            value=ReconcileState.ctx_recon_type,
+                            on_change=ReconcileState.set_ctx_recon_type,
                         ),
                         spacing="4",
                         align="end",
@@ -160,15 +125,14 @@ def _context_stage() -> rx.Component:
                     ),
                     rx.vstack(
                         c.warning_banner(
-                            "No client data folders exist on this server yet, so there is "
-                            "nothing to reconcile. Upload source files in Smart Ingestion, "
+                            "No clients exist on this server yet, so there is nothing to "
+                            "reconcile. Add a client, upload source files in Smart Ingestion, "
                             "or seed the demo data (Meridian Fabrics / Test Client)."
                         ),
                         rx.box(height="6px"),
                         c.empty_state(
-                            "Reconcile reads the folders under "
-                            "data/<client>/<period>/<source_type>/ on the server. "
-                            "None exist yet.",
+                            "Reconcile needs a client to work with. Add one from "
+                            "/clients/new, then pick it above.",
                             icon="folder-open",
                         ),
                         spacing="2",
@@ -177,7 +141,7 @@ def _context_stage() -> rx.Component:
                     ),
                 ),
                 rx.cond(
-                    ReconcileState.ctx_client != "",
+                    ReconcileState.context_complete,
                     c.info_banner(
                         f"Context: {ReconcileState.ctx_client} · {ReconcileState.ctx_period} · "
                         f"{ReconcileState.ctx_recon_type}. You won't be asked for this again during this run."
@@ -255,23 +219,14 @@ def _context_stage() -> rx.Component:
                     width="100%",
                 ),
                 rx.cond(
-                    ReconcileState.ready,
+                    ReconcileState.context_complete,
                     rx.button(
                         "Continue to upload →",
                         on_click=ReconcileState.continue_forward,
                         background=t.Color.ACCENT.value,
                         color="#FFFFFF",
                     ),
-                    rx.cond(
-                        ReconcileState.ctx_client != "",
-                        rx.button(
-                            "Continue to upload →",
-                            on_click=ReconcileState.continue_forward,
-                            background=t.Color.ACCENT.value,
-                            color="#FFFFFF",
-                        ),
-                        rx.fragment(),
-                    ),
+                    rx.fragment(),
                 ),
             ),
         ),
