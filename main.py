@@ -1,4 +1,10 @@
-"""PoC smoke test: init DB + load config, print confirmation, exit."""
+"""Explicit boot entry point: create every schema, seed defaults, migrate.
+
+This is one of only two places allowed to run the client-id migration (the
+other is ``python -m src.migrations --apply``). ``setu/setu.py``—everything on
+the UI import path—only *checks* that this has already happened, so importing
+the app can never rewrite the database or move client folders.
+"""
 
 import sys
 from pathlib import Path
@@ -11,7 +17,7 @@ from src.config_loader import load_config
 
 
 def main() -> None:
-    bootstrap.init_all()
+    bootstrap.run_migrations()
     config = load_config()
 
     # Verify both tables exist.

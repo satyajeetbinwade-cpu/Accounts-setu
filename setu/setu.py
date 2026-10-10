@@ -47,15 +47,14 @@ from setu.views.client_new_page import client_new_page
 from setu.views.login import login_page
 
 # --- Service layer bootstrap ------------------------------------------------
-# ONE list of modules (src/bootstrap.py) creates every table and seeds
-# first-run defaults. Centralising it is what guarantees a fresh database has
-# every table the UI reads — when a module was omitted here, whole pages read
-# missing tables and the failure surfaced as a client-side crash instead of a
-# clear error. Every init_* is idempotent, so this is safe on every start
-# against an existing db/poc.db.
+# The UI import path is READ-ONLY: it asserts the schema is current and fails
+# loudly if it is not. It must never create a table or migrate — that is
+# main.py's job. (Historically this called the single init_all(), so a stray
+# `python -c "import setu.setu"` silently migrated the real db/poc.db AND moved
+# every folder under data/.)
 from src import bootstrap  # noqa: E402
 
-bootstrap.init_all()
+bootstrap.ensure_schema_current()
 
 
 def _boot() -> None:

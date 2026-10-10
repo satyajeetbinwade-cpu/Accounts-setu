@@ -73,7 +73,7 @@ def note_register(tmp_path):
 @pytest.fixture
 def db(tmp_path):
     path = tmp_path / "notes.db"
-    bootstrap.init_all(str(path))
+    bootstrap.run_migrations(str(path))
     from conftest import seed_client
 
     seed_client(path, CLIENT)

@@ -33,7 +33,7 @@ def conn(tmp_path):
     """A fresh, isolated DB per test — eligible_credit_figures accumulates
     rows across calls, so tests must not share state."""
     db_path = tmp_path / "poc.db"
-    bootstrap.init_all(db_path)
+    bootstrap.run_migrations(db_path)
     c = sqlite3.connect(db_path)
     try:
         yield c

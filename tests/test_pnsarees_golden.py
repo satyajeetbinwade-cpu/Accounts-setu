@@ -336,7 +336,7 @@ def test_broken_books_mapping_blocks_the_run(tmp_path, monkeypatch):
     from src import bootstrap
     from conftest import seed_client
 
-    bootstrap.init_all(db_path)
+    bootstrap.run_migrations(db_path)
     seed_client(db_path, "Test Client")
     conn = idb.connect(db_path)
     # A mapping that maps identity + invoice value but NOT the tax buckets —

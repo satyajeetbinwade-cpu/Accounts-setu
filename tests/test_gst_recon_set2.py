@@ -79,7 +79,7 @@ def db_path(tmp_path_factory):
     from src import bootstrap
 
     path = tmp_path_factory.mktemp("set2_db") / "poc.db"
-    bootstrap.init_all(path)
+    bootstrap.run_migrations(path)
     from conftest import seed_client
 
     seed_client(path, CLIENT)
@@ -246,7 +246,7 @@ def test_report_row_value_single_side_and_difference_type(
     from src.reconciliation import report_export as ex
 
     db_path = tmp_path / "poc.db"
-    bootstrap.init_all(db_path)
+    bootstrap.run_migrations(db_path)
     from conftest import seed_client
 
     seed_client(db_path, CLIENT)

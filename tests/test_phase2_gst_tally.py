@@ -31,7 +31,7 @@ GSTIN = "27AABCM1234K1Z9"
 @pytest.fixture(scope="session")
 def _seeded_db(tmp_path_factory):
     path = tmp_path_factory.mktemp("phase2_gst_seed") / "poc.db"
-    bootstrap.init_all(path)
+    bootstrap.run_migrations(path)
     return path
 
 

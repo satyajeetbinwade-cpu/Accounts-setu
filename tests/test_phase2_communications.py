@@ -29,7 +29,7 @@ def _seeded_db(tmp_path_factory):
     """One fully-seeded database per session — booting every module's init_*
     is slow, and every test only needs a pristine copy of the result."""
     path = tmp_path_factory.mktemp("phase2_comms_seed") / "poc.db"
-    bootstrap.init_all(path)
+    bootstrap.run_migrations(path)
     return path
 
 

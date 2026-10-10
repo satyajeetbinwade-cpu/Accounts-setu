@@ -36,7 +36,7 @@ def _seeded_db(tmp_path_factory):
     """One fully-seeded database per session — booting every module's init_*
     is slow, and every test only needs a pristine copy of the result."""
     path = tmp_path_factory.mktemp("clients_seed") / "poc.db"
-    bootstrap.init_all(path)
+    bootstrap.run_migrations(path)
     return path
 
 
@@ -406,8 +406,8 @@ def test_legacy_branch_data_is_folded_into_the_client(tmp_path):
 
 def test_migration_is_idempotent(tmp_path):
     path = tmp_path / "twice.db"
-    bootstrap.init_all(path)
-    bootstrap.init_all(path)  # must not raise
+    bootstrap.run_migrations(path)
+    bootstrap.run_migrations(path)  # must not raise
     assert clients.create_client(**_valid(legal_name="Once Only"), db_path=str(path)) > 0
 
 

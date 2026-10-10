@@ -368,7 +368,7 @@ def test_normalize_source_file_routes_credit_notes_to_the_note_parser(workbook, 
     from src.ingestion_ai import normalizer
 
     db = tmp_path / "note_smoke.db"
-    bootstrap.init_all(str(db))
+    bootstrap.run_migrations(str(db))
     from conftest import seed_client
 
     client_id = seed_client(db, "Test Client")
@@ -399,7 +399,7 @@ def test_normalize_source_file_leaves_the_note_register_alone_for_other_slots(wo
     from src.ingestion_ai import normalizer
 
     db = tmp_path / "books_smoke.db"
-    bootstrap.init_all(str(db))
+    bootstrap.run_migrations(str(db))
     from conftest import seed_client
 
     client_id = seed_client(db, "Test Client")

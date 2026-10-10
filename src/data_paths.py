@@ -28,6 +28,62 @@ DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 VALID_SOURCE_TYPES = set(SOURCE_TYPES)
 
 
+def use_data_root(path) -> Path:
+    """Point every data path at ``path`` instead of the repo's ``data/``.
+
+    For verification harnesses and tests that must never write into the real
+    upload tree. ``src.shared.discovery`` binds ``DATA_ROOT`` at import time,
+    so it is re-pointed too — otherwise a stray read would resolve against the
+    real folder and silently disagree with the writers.
+    """
+    global DATA_ROOT
+    DATA_ROOT = Path(path)
+    try:
+        from src.shared import discovery
+    except ImportError:  # pragma: no cover — discovery always imports cleanly
+        pass
+    else:
+        discovery.DATA_ROOT = DATA_ROOT
+    return DATA_ROOT
+
+
+def use_sandboxed_data_root(source_root=None, *, prefix: str = "setu_sandbox_") -> Path:
+    """Redirect data paths into a temp root pre-seeded with the SOURCE slots.
+
+    A verification harness has to *read* the real uploads (the report is built
+    from the portal workbook on disk) while never *adding* anything to them
+    (regenerating exports is exactly what those harnesses do). So: copy every
+    ``<client_id>/<period>/<source_type>/`` slot into a throwaway root, skip
+    ``exports/``, then point the data root there. Reads keep working and every
+    byte the harness writes lands in the sandbox.
+
+    Returns the new data root. Set ``SETU_VERIFY_DATA_ROOT`` to reuse a root.
+    """
+    import shutil
+    import tempfile
+
+    source = Path(source_root) if source_root else DATA_ROOT
+    sandbox = Path(tempfile.mkdtemp(prefix=prefix))
+    if source.is_dir():
+        for client_dir in source.iterdir():
+            if not client_dir.is_dir():
+                continue
+            for period_dir in client_dir.iterdir():
+                if not period_dir.is_dir():
+                    continue
+                for slot in period_dir.iterdir():
+                    # exports/ is OUTPUT: leaving it out is the whole point.
+                    if not slot.is_dir() or slot.name == "exports":
+                        continue
+                    for src_file in slot.iterdir():
+                        if not src_file.is_file():
+                            continue
+                        dest = sandbox / client_dir.name / period_dir.name / slot.name / src_file.name
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src_file, dest)
+    return use_data_root(sandbox)
+
+
 def require_client_id(client_id) -> int:
     """Coerce and validate a client id. Raises ``ValueError`` otherwise."""
     try:

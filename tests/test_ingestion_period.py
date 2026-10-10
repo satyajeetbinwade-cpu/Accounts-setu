@@ -149,7 +149,7 @@ def scratch(tmp_path, monkeypatch):
     from conftest import seed_client
     from src import bootstrap
 
-    bootstrap.init_all(db_path)
+    bootstrap.run_migrations(db_path)
     seed_client(db_path, "Test Client")
 
     return {"db_path": str(db_path), "data_root": data_root}

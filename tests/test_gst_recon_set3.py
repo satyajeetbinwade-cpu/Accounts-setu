@@ -76,7 +76,7 @@ def db_path(tmp_path_factory):
     """An isolated DB so a stored result from another test/run can never be
     replayed in place of a fresh parse."""
     path = tmp_path_factory.mktemp("set3_db") / "poc.db"
-    bootstrap.init_all(path)
+    bootstrap.run_migrations(path)
     from conftest import seed_client
 
     seed_client(path, CLIENT)

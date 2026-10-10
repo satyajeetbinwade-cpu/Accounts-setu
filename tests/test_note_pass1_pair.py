@@ -171,7 +171,7 @@ def pair_factory(tmp_path):
         _write_portal(portal, cdnr_data)
 
         db = tmp_path / f"pair{counter['n']}.db"
-        bootstrap.init_all(str(db))
+        bootstrap.run_migrations(str(db))
         from conftest import seed_client
 
         seed_client(db, CLIENT)
@@ -290,7 +290,7 @@ def test_the_note_matches_on_the_primary_reference_key(filed, tmp_path):
     from src.matching.note_matcher import match_notes
 
     db = tmp_path / "pair.db"
-    bootstrap.init_all(str(db))
+    bootstrap.run_migrations(str(db))
     from conftest import seed_client
 
     seed_client(db, CLIENT)
@@ -334,7 +334,7 @@ def test_the_matched_note_is_not_an_invoice_row(filed, tmp_path):
     from src.matching.note_matcher import match_notes
 
     db = tmp_path / "pair2.db"
-    bootstrap.init_all(str(db))
+    bootstrap.run_migrations(str(db))
     from conftest import seed_client
 
     seed_client(db, CLIENT)

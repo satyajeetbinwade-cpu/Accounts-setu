@@ -109,6 +109,19 @@ def _unique_upload_key(
     return candidate
 
 
+def _is_legacy(conn: sqlite3.Connection, table: str, final_column: str) -> bool:
+    """True when ``table`` exists and is still in its pre-migration shape.
+
+    The existence half matters: the boot sequence migrates *before* the module
+    ``init_*`` steps create their tables, so a section that tests only "does the
+    final column exist?" would try to rebuild a table that is not there yet on a
+    brand-new database. A missing table is simply "nothing to migrate".
+    """
+    return framework.table_exists(conn, table) and final_column not in framework.columns(
+        conn, table
+    )
+
+
 def apply(conn: sqlite3.Connection) -> None:
     # -- 0. origin column must exist before resolve_mapping inserts rows -----
     framework.ensure_column(
@@ -163,7 +176,7 @@ def apply(conn: sqlite3.Connection) -> None:
         )
 
     # -- 3. review_state ---------------------------------------------------
-    if "client_id" not in framework.columns(conn, "review_state"):
+    if _is_legacy(conn, "review_state", "client_id"):
         _rebuild(
             conn,
             "review_state",
@@ -200,7 +213,7 @@ def apply(conn: sqlite3.Connection) -> None:
         )
 
     # -- 4. result_field_overrides ----------------------------------------
-    if "client_id" not in framework.columns(conn, "result_field_overrides"):
+    if _is_legacy(conn, "result_field_overrides", "client_id"):
         _rebuild(
             conn,
             "result_field_overrides",
@@ -376,7 +389,7 @@ def apply(conn: sqlite3.Connection) -> None:
         )
 
     # -- 7. per_client_team_assignments -----------------------------------
-    if "client_id" not in framework.columns(conn, "per_client_team_assignments"):
+    if _is_legacy(conn, "per_client_team_assignments", "client_id"):
         _rebuild(
             conn,
             "per_client_team_assignments",

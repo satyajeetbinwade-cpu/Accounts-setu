@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -397,10 +398,10 @@ def test_migration_failure_midway_restores_db_and_folders(tmp_path, monkeypatch)
         assert not numeric.exists() or not any(numeric.iterdir())
 
 
-def test_bootstrap_init_all_never_touches_the_global_data_root(tmp_path, monkeypatch):
-    """`bootstrap.init_all(explicit_db)` must scope its data root to that DB,
-    never the process-wide DATA_ROOT — the guard against the accident where a
-    temp-DB boot moved the repo's real client folders."""
+def test_bootstrap_run_migrations_never_touches_the_global_data_root(tmp_path, monkeypatch):
+    """`bootstrap.run_migrations(explicit_db)` must scope its data root to that
+    DB, never the process-wide DATA_ROOT — the guard against the accident where
+    a temp-DB boot moved the repo's real client folders."""
     sentinel = tmp_path / "global_data"
     legacy = sentinel / "Legacy Client" / "2026-08" / "tally"
     legacy.mkdir(parents=True)
@@ -410,8 +411,185 @@ def test_bootstrap_init_all_never_touches_the_global_data_root(tmp_path, monkeyp
 
     from src import bootstrap
 
-    bootstrap.init_all(tmp_path / "app.db")
+    bootstrap.run_migrations(tmp_path / "app.db")
 
     assert (sentinel / "Legacy Client").is_dir(), "the global data root was moved!"
     assert not (sentinel / "Legacy Client").is_symlink()
+
+
+# ---------------------------------------------------------------------------
+# The UI import path is READ-ONLY
+#
+# These run in a SUBPROCESS because module import is cached per interpreter:
+# the only way to observe "what does `import setu.setu` do" is to start a fresh
+# Python that has not imported it yet. Each child redirects db.DB_PATH and both
+# DATA_ROOT globals to throwaway paths BEFORE importing, so it can never touch
+# the real db/ and data/ even if the guarantee regressed.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+_CHILD_PREAMBLE = """
+import sys
+from pathlib import Path
+sys.path.insert(0, {repo!r})
+import src.db as db, src.data_paths as dp, src.shared.discovery as disc
+db.DB_PATH = Path({db!r})
+dp.DATA_ROOT = Path({data!r})
+disc.DATA_ROOT = dp.DATA_ROOT
+"""
+
+_IMPORT_APP_CHILD = _CHILD_PREAMBLE + """
+import setu.setu
+print("APP_IMPORT_OK")
+"""
+
+_RUN_MAIN_CHILD = _CHILD_PREAMBLE + """
+import runpy
+runpy.run_path({main!r}, run_name="__main__")
+"""
+
+
+def _run_child(body: str, tmp_path, db: Path, data: Path) -> "subprocess.CompletedProcess":
+    src = body.format(repo=str(_REPO_ROOT), db=str(db), data=str(data),
+                      main=str(_REPO_ROOT / "main.py"))
+    return subprocess.run(
+        [sys.executable, "-c", src],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def _fingerprint(root: Path) -> dict:
+    """Content hash of every file under ``root`` (path → sha256, or 'dir')."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for p in sorted(root.rglob("*")):
+        rel = str(p.relative_to(root))
+        out[rel] = "dir" if p.is_dir() else hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def _file_hash(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_importing_the_app_before_migration_raises_and_changes_nothing(tmp_path):
+    """`import setu.setu` against a pre-migration DB must fail with the hint to
+    run main.py — and leave the database file and every folder byte-identical.
+
+    This is the regression guard for the accident that motivated the split: a
+    bare import used to migrate db/poc.db and move data/<name>/ → data/<id>/.
+    """
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client", "Meridian Fabrics"])
+    db_before, data_before = _file_hash(db), _fingerprint(data)
+
+    proc = _run_child(_IMPORT_APP_CHILD, tmp_path, db, data)
+
+    assert proc.returncode != 0, "importing the app against a stale DB must fail"
+    assert "SchemaMigrationPending" in proc.stderr
+    assert "Run python main.py (or python -m src.migrations --apply) first" in proc.stderr
+    assert "APP_IMPORT_OK" not in proc.stdout
+
+    assert _file_hash(db) == db_before, "the import altered the database file"
+    assert _fingerprint(data) == data_before, "the import moved files under data/"
+    # And specifically: no data/<client_id>/ folder appeared.
+    assert not (data / "1").exists() and not (data / "2").exists()
+
+
+def test_main_migrates_then_importing_the_app_works(tmp_path):
+    """main.py migrates; the same import that failed before now succeeds."""
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client", "Meridian Fabrics"])
+
+    assert _run_child(_IMPORT_APP_CHILD, tmp_path, db, data).returncode != 0
+
+    boot = _run_child(_RUN_MAIN_CHILD, tmp_path, db, data)
+    assert boot.returncode == 0, boot.stderr
+    assert "Database initialized at:" in boot.stdout
+
+    # main.py migrated the DB and moved the folders.
+    con = sqlite3.connect(db)
+    assert "client_id" in {c[1] for c in con.execute("PRAGMA table_info(runs)")}
+    con.close()
+    assert (data / "1" / "2026-08" / "tally" / "books.xlsx").exists()
+    assert not (data / "Test Client").exists()
+
+    after = _run_child(_IMPORT_APP_CHILD, tmp_path, db, data)
+    assert after.returncode == 0, after.stderr
+    assert "APP_IMPORT_OK" in after.stdout
+
+
+def test_ensure_schema_current_is_read_only(tmp_path):
+    """The gate itself never writes: same DB bytes, no data/<id>/ folders, and
+    a fresh empty DB is refused rather than created."""
+    from src import bootstrap
+
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client"])
+    db_before, data_before = _file_hash(db), _fingerprint(data)
+
+    with pytest.raises(bootstrap.SchemaMigrationPending) as exc:
+        bootstrap.ensure_schema_current(db)
+    assert str(exc.value) == "Run python main.py (or python -m src.migrations --apply) first"
+    assert exc.value.detail, "the diagnostic detail should be attached as a note"
+
+    assert _file_hash(db) == db_before
+    assert _fingerprint(data) == data_before
+    assert not (data / "1").exists()
+
+    # A brand-new empty DB is "behind" too — and stays non-existent.
+    fresh = tmp_path / "fresh" / "poc.db"
+    fresh.parent.mkdir()
+    with pytest.raises(bootstrap.SchemaMigrationPending):
+        bootstrap.ensure_schema_current(fresh)
+    assert not fresh.exists(), "the gate must not create the database"
+
+    # No import-time alias can bypass the split.
+    assert not hasattr(bootstrap, "init_all")
+
+
+def test_sandboxed_data_root_seeds_sources_and_isolates_exports(tmp_path, monkeypatch):
+    """A verification harness can read the real uploads but its exports land in
+    a throwaway root — so a run can never add files to the real data/ tree.
+
+    ``monkeypatch.setattr`` on the current values is what restores the real
+    data root for the other tests in this process.
+    """
+    from src import data_paths
+    from src.shared import discovery
+
+    monkeypatch.setattr(data_paths, "DATA_ROOT", data_paths.DATA_ROOT)
+    monkeypatch.setattr(discovery, "DATA_ROOT", discovery.DATA_ROOT)
+
+    real = tmp_path / "real"
+    src_slot = real / "1" / "2026-08" / "tally"
+    src_slot.mkdir(parents=True)
+    (src_slot / "books.xlsx").write_bytes(b"source bytes")
+    old_export = real / "1" / "2026-08" / "exports"
+    old_export.mkdir(parents=True)
+    (old_export / "old.html").write_text("stale")
+    before = _fingerprint(real)
+
+    sandbox = data_paths.use_sandboxed_data_root(real)
+
+    assert sandbox != real
+    # Sources are readable through the sandboxed root...
+    assert (sandbox / "1" / "2026-08" / "tally" / "books.xlsx").read_bytes() == b"source bytes"
+    # ...but stale exports are not carried over, they are OUTPUT.
+    assert not (sandbox / "1" / "2026-08" / "exports").exists()
+
+    # A new export goes to the sandbox only.
+    written = data_paths.exports_dir(1, "2026-08") / "new.html"
+    written.write_text("fresh")
+    assert written.is_file()
+    assert sandbox in written.parents
+
+    assert _fingerprint(real) == before, "the real data root was modified"
 

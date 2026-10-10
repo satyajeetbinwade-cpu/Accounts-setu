@@ -4,6 +4,9 @@
     python -m src.migrations --apply      # backup, migrate, move folders, report
 
 Defaults to ``--dry-run`` when neither flag is given (safe default).
+
+The work is delegated to ``src.bootstrap.run_migrations`` — the same explicit
+entry point ``main.py`` uses — so the CLI and the app boot can never drift.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from pathlib import Path
 # Allow `python -m src.migrations` from the repo root without installation.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.migrations import migrate  # noqa: E402
+from src import bootstrap  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,20 +33,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     dry_run = not args.apply  # --dry-run or nothing => dry-run
-    report = migrate.run(
-        db_path=args.db,
-        data_root=args.data_root,
-        dry_run=dry_run,
+
+    # Delegate to the one explicit boot entry point, so the CLI and main.py
+    # cannot drift. `data_root` is passed ONLY when the operator chose one:
+    # omitting it keeps bootstrap's safe scoping (explicit --db ⇒ that DB's
+    # sibling data/), which is what stops a --db run from moving the repo's
+    # real client folders.
+    kwargs: dict = {}
+    if args.data_root:
+        kwargs["data_root"] = args.data_root
+    report = bootstrap.run_migrations(
+        args.db,
         backup=not args.no_backup,
+        dry_run=dry_run,
+        **kwargs,
     )
-    # Write the report NEXT TO the DB that was migrated, not next to the default
-    # DB — otherwise a --db run would clobber the repo's report file.
-    report_path = None
-    if args.db:
-        report_path = Path(args.db).resolve().parent / "client_id_migration_report.json"
-    path = migrate.write_report(report, report_path)
+
     print(json.dumps(report, indent=2, default=str))
-    print(f"\nReport written to {path}")
+    path = report.get("report_path")
+    if path:
+        print(f"\nReport written to {path}")
     if dry_run:
         print("\n(dry-run — nothing was changed; re-run with --apply to migrate)")
     return 0

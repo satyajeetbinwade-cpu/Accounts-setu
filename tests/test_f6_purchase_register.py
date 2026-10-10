@@ -182,7 +182,7 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path, monkeypatch):
     from conftest import seed_client
     from src import bootstrap
 
-    bootstrap.init_all(db)
+    bootstrap.run_migrations(db)
     seed_client(db, "Test Client")
 
     res = s.upload_and_infer(
@@ -235,7 +235,7 @@ def test_t8_provenance_is_truthful(tmp_path, monkeypatch):
     from conftest import seed_client
     from src import bootstrap
 
-    bootstrap.init_all(db)
+    bootstrap.run_migrations(db)
     seed_client(db, "Test Client")
 
     res = s.upload_and_infer(
