@@ -9,6 +9,7 @@ client_id, idempotency, path safety, and that nothing outside
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -108,8 +109,8 @@ def _legacy_db(tmp_path: Path, *, active_client: str = "Test Client") -> Path:
                 (rid, f"fp{i}{j}", "Matched", 0.9, "High"),
             )
     con.execute(
-        "INSERT INTO review_state (client, period, recon_type, fingerprint, reviewed, reviewed_classification) "
-        "VALUES (?,?,?,?,1,?)",
+        "INSERT INTO review_state (client, period, recon_type, fingerprint, reviewed, reviewed_in_run_id, reviewed_classification) "
+        "VALUES (?,?,?,?,1,(SELECT MIN(run_id) FROM runs),?)",
         (active_client, "2026-08", "GST", "fp00", "Matched"),
     )
     con.execute(
@@ -281,3 +282,136 @@ def test_no_data_path_built_outside_data_paths():
                 if rel not in known_remaining:
                     offenders.append(f"{rel}:{i}: {line.strip()}")
     assert not offenders, "data paths built outside src/data_paths.py:\n" + "\n".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# Step-4 scenario coverage
+# ---------------------------------------------------------------------------
+
+
+def test_run_match_results_counts_and_review_link_after_migration(tmp_path):
+    """Every run keeps its OWN match_results, and review state stays linked."""
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client"])
+    before = _counts(db, ["match_results"])
+    migrate.run(db_path=db, data_root=data)
+    assert _counts(db, ["match_results"]) == before
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    # each of the 3 runs still owns its 2 results
+    rows = con.execute("SELECT run_id, COUNT(*) c FROM match_results GROUP BY run_id").fetchall()
+    assert sorted(r["c"] for r in rows) == [2, 2, 2]
+    # the review row still points at a run that exists
+    rv = con.execute(
+        "SELECT client_id, reviewed_in_run_id FROM review_state"
+    ).fetchone()
+    assert rv["client_id"] == 1
+    assert con.execute(
+        "SELECT COUNT(*) FROM runs WHERE run_id = ?", (rv["reviewed_in_run_id"],)
+    ).fetchone()[0] == 1
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+
+def test_duplicate_active_gstin_is_rejected(tmp_path):
+    from src import db as recon_db
+    from src.clients import service as clients
+
+    db = tmp_path / "clients.db"
+    recon_db.init_db(db)
+    clients.init_clients(db)
+    clients.create_client(
+        legal_name="A Co", pan="AAAPL1234C", gstin="07AAACP9472A1ZJ", actor="t", db_path=db,
+    )
+    with pytest.raises(clients.ClientError) as exc:
+        clients.create_client(
+            legal_name="B Co", pan="AABCM1234K", gstin="07AAACP9472A1ZJ", actor="t", db_path=db,
+        )
+    assert "GSTIN 07AAACP9472A1ZJ" in str(exc.value)
+
+
+def test_inactive_clients_excluded_from_picker_and_labelled(tmp_path):
+    """Context pickers show active clients only; history screens keep inactive
+    ones and label them "(inactive)"."""
+    import src.data_paths as dp
+    from src import db as recon_db
+    from src.clients import service as clients
+    from src.shared import discovery
+
+    db = tmp_path / "clients.db"
+    recon_db.init_db(db)
+    clients.init_clients(db)
+    clients.create_client(legal_name="Active Co", pan="AAAPL1234C", actor="t", db_path=db)
+    gone = clients.create_client(legal_name="Gone Co", pan="AABCM1234K", actor="t", db_path=db)
+    clients.set_client_active(gone, False, actor="t", db_path=db)
+
+    active = discovery.list_clients(db_path=db)
+    assert [o["legal_name"] for o in active] == ["Active Co"], "inactive must be hidden by default"
+
+    all_rows = discovery.list_clients(include_inactive=True, db_path=db)
+    labels = {o["legal_name"]: o["display_name"] for o in all_rows}
+    assert labels["Active Co"] == "Active Co"
+    assert labels["Gone Co"] == "Gone Co (inactive)"
+
+
+def test_migration_failure_midway_restores_db_and_folders(tmp_path, monkeypatch):
+    """A failure during the folder move must leave the DB un-migrated AND the
+    folders back in their original names — not a half-applied state."""
+    import os
+
+    from src.migrations import folders as fmod
+
+    db = _legacy_db(tmp_path)
+    data = _legacy_data(tmp_path, ["Test Client", "Meridian Fabrics"])
+
+    def boom(entries, root, **kwargs):
+        moved = []
+        for e in entries:
+            if e["status"] != "planned" or not e["new_path"]:
+                continue
+            old, new = Path(e["old_path"]), Path(e["new_path"])
+            if new.exists():
+                continue
+            new.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(old), str(new))
+            moved.append({**e, "status": "moved"})
+            break  # move ONE, then fail
+        fmod.manifest_path(root).write_text(json.dumps({"moves": moved}))
+        raise RuntimeError("simulated mid-way failure")
+
+    monkeypatch.setattr(fmod, "apply_folder_moves", boom)
+
+    with pytest.raises(RuntimeError):
+        migrate.run(db_path=db, data_root=data)
+
+    # DB rolled back: runs still name-keyed, migration not recorded
+    con = sqlite3.connect(db)
+    assert "client" in {c[1] for c in con.execute("PRAGMA table_info(runs)")}
+    assert con.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 0
+    con.close()
+
+    # Folders restored to their original names, nothing left under data/<id>/
+    assert (data / "Test Client").is_dir()
+    assert (data / "Meridian Fabrics").is_dir()
+    for numeric in (data / "1", data / "2"):
+        assert not numeric.exists() or not any(numeric.iterdir())
+
+
+def test_bootstrap_init_all_never_touches_the_global_data_root(tmp_path, monkeypatch):
+    """`bootstrap.init_all(explicit_db)` must scope its data root to that DB,
+    never the process-wide DATA_ROOT — the guard against the accident where a
+    temp-DB boot moved the repo's real client folders."""
+    sentinel = tmp_path / "global_data"
+    legacy = sentinel / "Legacy Client" / "2026-08" / "tally"
+    legacy.mkdir(parents=True)
+    (legacy / "x.xlsx").write_bytes(b"x")
+    monkeypatch.setattr("src.data_paths.DATA_ROOT", sentinel)
+    monkeypatch.setattr("src.shared.discovery.DATA_ROOT", sentinel, raising=False)
+
+    from src import bootstrap
+
+    bootstrap.init_all(tmp_path / "app.db")
+
+    assert (sentinel / "Legacy Client").is_dir(), "the global data root was moved!"
+    assert not (sentinel / "Legacy Client").is_symlink()
+

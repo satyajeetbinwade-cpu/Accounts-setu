@@ -73,14 +73,22 @@ EXPOSE 8080
 # both live as subdirectories of the single mounted volume at /app/persist,
 # symlinked into place at every boot.
 #
-# SEEDING: the volume starts empty, and the app's Reconcile client/period
-# pickers are driven by the folders under data/ (src/shared/discovery.py), not
-# by the DB — so an unseeded volume leaves the whole reconciliation flow
-# unusable (empty Client dropdown, "No periods yet"). On first boot only, copy
-# the image's pristine demo data into the volume. The `-z "$(ls -A ...)"` guard
-# means this never runs again once the volume has content, so it can never
-# clobber real uploads. `rm -rf /app/data` removes the image's real directory
+# SEEDING: the app's Reconcile client picker is driven by the F2 client
+# master (end_clients), NOT by folders under data/ — so an unseeded volume
+# leaves the flow unusable (empty Client dropdown). On first boot only, the
+# bundled demo folders (stashed at /app/seed_data) are seeded by
+# `python -m src.demo_seed`: it creates the demo clients (with their real
+# PAN/GSTIN) and files each folder under data/<client_id>/... via the shared
+# path builder — so no name-keyed folder is ever created. It is idempotent, so
+# it can never clobber real uploads (existing clients are reused and existing
+# files are skipped). `rm -rf /app/data` removes the image's real directory
 # (or a stale symlink) so `ln -s` always yields a clean symlink.
+#
+# FAIL-LOUD: the CMD is one `&&` chain. `python main.py` runs the boot
+# sequence, which includes the client-id migration; if it raises, the chain
+# stops — Reflex and Caddy are NEVER started — and the container exits
+# non-zero, so Fly keeps the previous release serving instead of bringing up a
+# half-initialised app.
 #
 # REFLEX_HOT_RELOAD_EXCLUDE_PATHS is set explicitly (colon-separated, per
 # Reflex's env var format) rather than relying on rxconfig.py's own
@@ -88,4 +96,4 @@ EXPOSE 8080
 # resolves the db/data symlinks to their real target under persist/, which
 # isn't covered by those excluded names, so every SQLite write to poc.db
 # was being treated as a source change and triggering a restart loop.
-CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && if [ -z \"$(ls -A /app/persist/data 2>/dev/null)\" ] && [ -d /app/seed_data ]; then cp -a /app/seed_data/. /app/persist/data/; fi && rm -rf /app/data && ln -s /app/persist/data /app/data && ln -sfn /app/persist/db /app/db && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && python main.py && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && rm -rf /app/data && ln -s /app/persist/data /app/data && ln -sfn /app/persist/db /app/db && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && python main.py && python -m src.demo_seed && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]

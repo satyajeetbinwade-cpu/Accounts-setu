@@ -599,19 +599,6 @@ class IngestionAiState(SharedUploadState):
         return discovery.source_type_hint(self.source_type)
 
     @rx.var
-    def client_names(self) -> list[str]:
-        return [ALL_CLIENTS] + [o.legal_name for o in self.client_options]
-
-    @rx.var
-    def client_name(self) -> str:
-        if self.client_id == 0:
-            return ALL_CLIENTS
-        for o in self.client_options:
-            if o.client_id == self.client_id:
-                return o.legal_name
-        return ALL_CLIENTS
-
-    @rx.var
     def source_filter_options(self) -> list[str]:
         return ["All sources"] + self.source_type_options_by_label
 
@@ -718,6 +705,8 @@ class IngestionAiState(SharedUploadState):
         if (deny := self._gate("ingestion_ai.upload")):
             return rx.redirect(deny)
         self.client_options = [
+            ClientOption(client_id=0, legal_name=ALL_CLIENTS)
+        ] + [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)
         ]
@@ -852,14 +841,9 @@ class IngestionAiState(SharedUploadState):
         self.error = ""
 
     @rx.event
-    def set_client_by_name(self, name: str):
-        if name == ALL_CLIENTS:
-            self.client_id = 0
-        else:
-            for o in self.client_options:
-                if o.legal_name == name:
-                    self.client_id = o.client_id
-                    break
+    def set_client_by_id(self, value: str):
+        """Filter uploads by ``client_id`` (0 = all clients)."""
+        self.client_id = int(value or 0)
         self.selected_upload_id = 0
         self.selected_upload_ids = []
         self._load_all()

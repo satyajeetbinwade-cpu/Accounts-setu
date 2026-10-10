@@ -36,7 +36,12 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=dry_run,
         backup=not args.no_backup,
     )
-    path = migrate.write_report(report)
+    # Write the report NEXT TO the DB that was migrated, not next to the default
+    # DB — otherwise a --db run would clobber the repo's report file.
+    report_path = None
+    if args.db:
+        report_path = Path(args.db).resolve().parent / "client_id_migration_report.json"
+    path = migrate.write_report(report, report_path)
     print(json.dumps(report, indent=2, default=str))
     print(f"\nReport written to {path}")
     if dry_run:

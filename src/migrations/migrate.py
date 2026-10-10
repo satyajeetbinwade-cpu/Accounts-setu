@@ -153,14 +153,14 @@ def run(
 
             _m1.set_data_root(data_root)
             applied = framework.run_migrations(conn, MIGRATIONS, verbose=True)
+            # The migration performed the folder move INSIDE its transaction,
+            # so a failure there rolls back the DB and reverses the folders
+            # together. We only re-derive the mapping for the report.
             mapping = resolve_mapping(conn, create=True, data_root=data_root)
-            # resolve_mapping already ran inside migration 0001; running it again
-            # here just re-derives the mapping for the folder step + report.
-            moves = folders_mod.plan_folder_moves(mapping, data_root)
-            folder_result = folders_mod.apply_folder_moves(moves, data_root)
+            folder_result = _read_manifest(data_root)
         except Exception:
-            # DB transaction already rolled back by the framework; reverse any
-            # folder moves that completed.
+            # The migration already reversed any completed moves; a second
+            # rollback is a safe no-op (its targets no longer exist).
             folders_mod.rollback(data_root)
             raise
 
@@ -177,6 +177,23 @@ def run(
         return report
     finally:
         conn.close()
+
+
+def _read_manifest(data_root: Path) -> dict:
+    """Summarise the folder-move manifest written by the migration."""
+    mpath = folders_mod.manifest_path(data_root)
+    if not mpath.exists():
+        return {"manifest_path": str(mpath), "moved": 0, "moves": []}
+    try:
+        data = json.loads(mpath.read_text())
+    except (OSError, ValueError):
+        return {"manifest_path": str(mpath), "moved": 0, "moves": []}
+    moves = data.get("moves", [])
+    return {
+        "manifest_path": str(mpath),
+        "moved": sum(1 for m in moves if m.get("status") in ("moved", "merged")),
+        "moves": moves,
+    }
 
 
 def write_report(report: dict, path: Optional[Path] = None) -> Path:

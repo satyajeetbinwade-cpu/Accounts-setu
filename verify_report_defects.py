@@ -58,55 +58,61 @@ def _approx(value, target: float, tol: float = 0.01) -> bool:
         return False
 
 
-def _ensure_second_dataset() -> str | None:
+def _ensure_second_dataset() -> int:
     """Create (idempotently) a second client with its own GSTIN and a copied
-    dataset carrying a DIFFERENT supplier GSTIN; run it. Returns the folder."""
-    folder = "Meridian Fabrics"
+    dataset carrying a DIFFERENT supplier GSTIN; run it. Returns the client_id.
+
+    Identity is ``client_id`` throughout: the source dataset is read from
+    ``data/<src_id>/...`` and the copy written via ``source_data_path(cid,
+    period, source_type)``.
+    """
+    from src.data_paths import data_dir, source_data_path
+
+    legal = "Meridian Fabrics"
     own_gstin = "27AABCM1234K1Z9"
-    existing = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}
-    if folder not in existing:
+    by_name = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}
+    if legal not in by_name:
         clients.create_client(
-            legal_name=folder, pan="AABCM1234K", gstin=own_gstin, assigned_team=None,
+            legal_name=legal, pan="AABCM1234K", gstin=own_gstin, assigned_team=None,
             primary_contact_email="accounts@meridianfabrics.example",
             primary_contact_phone="+91 22 4000 0000",
             primary_contact_address="Mumbai, Maharashtra", actor="admin",
         )
-    cid = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}[folder]
+        by_name = {c["legal_name"]: c["client_id"] for c in clients.list_clients()}
+    cid = int(by_name[legal])
+    src_id = int(by_name.get("Test Client") or 0)
 
-    src_dir = Path("data/Test Client/2026-08")
-    dst_dir = Path("data") / folder / "2026-08"
-    if not dst_dir.exists():
+    gstr2b_name = "082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx"
+    tally_name = "PurchaseRegister(Bill-wise) (1).xlsx"
+
+    def rewrite(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
         import openpyxl
 
-        def rewrite(src: Path, dst: Path) -> None:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            wb = openpyxl.load_workbook(src)
-            for ws in wb.worksheets:
-                for row in ws.iter_rows():
-                    for cell in row:
-                        if isinstance(cell.value, str) and SUPPLIER_GSTIN in cell.value:
-                            cell.value = cell.value.replace(SUPPLIER_GSTIN, "27AAXFS9006M1Z8")
-            wb.save(dst)
+        wb = openpyxl.load_workbook(src)
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str) and SUPPLIER_GSTIN in cell.value:
+                        cell.value = cell.value.replace(SUPPLIER_GSTIN, "27AAXFS9006M1Z8")
+        wb.save(dst)
 
-        rewrite(src_dir / "gstr2b" / "082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx",
-                dst_dir / "gstr2b" / "082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx")
-        rewrite(src_dir / "tally" / "PurchaseRegister(Bill-wise) (1).xlsx",
-                dst_dir / "tally" / "PurchaseRegister(Bill-wise) (1).xlsx")
+    for source_type, name in (("gstr2b", gstr2b_name), ("tally", tally_name)):
+        dst = source_data_path(cid, "2026-08", source_type) / name
+        if not dst.exists() and src_id:
+            rewrite(data_dir(src_id, "2026-08", source_type) / name, dst)
 
     has_run = any(
-        (r.get("client") or "") == folder and (r.get("recon_type") or "") == "GST"
+        int(r.get("client_id") or 0) == cid and (r.get("recon_type") or "") == "GST"
         for r in queries.list_runs().to_dict("records")
     )
     if not has_run:
         runner.execute_run(
-            folder, "2026-08", "GST", None, load_config(),
-            selected_files={
-                "gstr2b": "082026_07AAACP9472A1ZJ_GSTR2B_15092026 (1).xlsx",
-                "tally": "PurchaseRegister(Bill-wise) (1).xlsx",
-            },
-            client_id=cid, actor="admin",
+            cid, legal, "2026-08", "GST", None, load_config(),
+            selected_files={"gstr2b": gstr2b_name, "tally": tally_name},
+            actor="admin",
         )
-    return folder
+    return cid
 
 
 def main() -> int:
@@ -159,9 +165,11 @@ def main() -> int:
 
     # --- 3. Second client/dataset: header changes, never a supplier ---------
     try:
-        second = _ensure_second_dataset()
+        second_id = _ensure_second_dataset()
+        second = "Meridian Fabrics"
         second_runs = [r for r in queries.list_runs().to_dict("records")
-                       if (r.get("client") or "") == second and (r.get("recon_type") or "") == "GST"]
+                       if int(r.get("client_id") or 0) == second_id
+                       and (r.get("recon_type") or "") == "GST"]
         second_run_id = int(max(r["run_id"] for r in second_runs))
         sdata = ex.build_export_data(second_run_id)
         s_suppliers = {i["gstin"] for i in sdata["invoices"] if i["gstin"]}

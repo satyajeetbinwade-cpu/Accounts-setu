@@ -197,12 +197,12 @@ def _vault() -> rx.Component:
                     DocumentsState.embedded,
                     rx.fragment(),
                     rx.hstack(
-                        rx.text("Client:", style=t.TEXT["micro"]),
-                        rx.select(
-                            DocumentsState.vault_client_names,
-                            value=DocumentsState.vault_client_name,
-                            on_change=DocumentsState.set_vault_client_by_name,
-                            placeholder="Select a client",
+                        c.client_picker(
+                            DocumentsState.client_options,
+                            value=DocumentsState.vault_client_id.to_string(),
+                            on_change=DocumentsState.set_vault_client_by_id,
+                            label="Client",
+                            placeholder="All clients",
                             width="320px",
                         ),
                         spacing="2",

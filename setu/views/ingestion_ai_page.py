@@ -597,12 +597,12 @@ def _bulk_confirm_dialog() -> rx.Component:
 def _upload_and_list() -> rx.Component:
     return rx.vstack(
         rx.hstack(
-            rx.text("Client:", style=t.TEXT["micro"]),
-            rx.select(
-                IngestionAiState.client_names,
-                value=IngestionAiState.client_name,
-                on_change=IngestionAiState.set_client_by_name,
-                placeholder="Select a client",
+            c.client_picker(
+                IngestionAiState.client_options,
+                value=IngestionAiState.client_id.to_string(),
+                on_change=IngestionAiState.set_client_by_id,
+                label="Client",
+                placeholder="All clients",
                 width="320px",
             ),
             spacing="2",

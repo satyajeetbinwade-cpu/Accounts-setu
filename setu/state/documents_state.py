@@ -27,6 +27,12 @@ class ClientOption:
     legal_name: str
 
 
+# Sentinel option id used by the vault filter ("every client"). Real client ids
+# are always > 0, so 0 can never collide with one.
+ALL_CLIENTS_ID = 0
+ALL_CLIENTS = "All clients"
+
+
 @dataclass
 class DocumentRow:
     document_id: int
@@ -154,28 +160,10 @@ class DocumentsState(SharedUploadState):
     def can_upload(self) -> bool:
         return "documents.upload" in self._codes()
 
-    @rx.var
-    def vault_client_names(self) -> list[str]:
-        return ["All clients"] + [o.legal_name for o in self.client_options]
-
-    @rx.var
-    def vault_client_name(self) -> str:
-        if self.vault_client_id == 0:
-            return "All clients"
-        for o in self.client_options:
-            if o.client_id == self.vault_client_id:
-                return o.legal_name
-        return "All clients"
-
     @rx.event
-    def set_vault_client_by_name(self, name: str):
-        if name == "All clients":
-            self.vault_client_id = 0
-        else:
-            for o in self.client_options:
-                if o.legal_name == name:
-                    self.vault_client_id = o.client_id
-                    break
+    def set_vault_client_by_id(self, value: str):
+        """Filter the vault by ``client_id`` (0 = all clients)."""
+        self.vault_client_id = int(value or 0)
         self.selected_document_id = 0
         self._load_all()
 
@@ -223,6 +211,8 @@ class DocumentsState(SharedUploadState):
             return rx.redirect(deny)
         self.embedded = False
         self.client_options = [
+            ClientOption(client_id=0, legal_name=ALL_CLIENTS)
+        ] + [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)
         ]
@@ -239,6 +229,8 @@ class DocumentsState(SharedUploadState):
         self.selected_document_id = 0
         self.vault_client_id = int(client_id or 0)
         self.client_options = [
+            ClientOption(client_id=0, legal_name=ALL_CLIENTS)
+        ] + [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
             for c in clients.list_clients(include_inactive=False)
         ]

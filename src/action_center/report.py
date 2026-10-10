@@ -360,7 +360,7 @@ def build_report(run_id: int, *, allow_ai: bool = False, db_path=None) -> dict[s
         }
 
     # Period-over-period trend (this vs prior period, same client + recon type).
-    trend = _trend(run_id, folder, period, recon_type, match_rate, sql_path=db_path)
+    trend = _trend(run_id, client_id, period, recon_type, match_rate, sql_path=db_path)
 
     # Data quality & scope notes.
     data_quality = _data_quality(run, client_name, recon_type, df, records)
@@ -558,14 +558,14 @@ def _record_fields(record: Optional[dict[str, Any]]) -> list[dict[str, str]]:
     return out
 
 
-def _trend(run_id, folder, period, recon_type, this_rate, *, sql_path=None) -> dict[str, Any]:
+def _trend(run_id, client_id, period, recon_type, this_rate, *, sql_path=None) -> dict[str, Any]:
     """Prior-period comparison where data exists. Never a broken/empty chart."""
     conn = recon_db.get_connection(sql_path)
     try:
         prior = conn.execute(
-            "SELECT run_id, period FROM runs WHERE client = ? AND recon_type = ? AND period < ? "
+            "SELECT run_id, period FROM runs WHERE client_id = ? AND recon_type = ? AND period < ? "
             "ORDER BY period DESC LIMIT 1",
-            (folder, recon_type, period),
+            (int(client_id), recon_type, period),
         ).fetchone()
     finally:
         conn.close()

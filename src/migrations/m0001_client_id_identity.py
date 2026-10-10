@@ -410,6 +410,37 @@ def apply(conn: sqlite3.Connection) -> None:
         )
         conn.execute("ALTER TABLE users DROP COLUMN end_client_ref")
 
+    # -- 9. move legacy data/<name>/ folders to data/<client_id>/ ----------
+    _move_folders(mapping)
+
+
+def _move_folders(mapping: Mapping) -> None:
+    """Move ``data/<name>/`` → ``data/<client_id>/`` as part of THIS
+    migration's transaction.
+
+    Running inside the migration (rather than as a separate step afterwards)
+    is what makes a mid-way failure safe: if a move raises, we reverse the
+    moves already recorded in the manifest and re-raise — the framework's
+    transaction then rolls the DB back too, so DB and folders are restored
+    together. ``_DATA_ROOT`` is set by the orchestrator; when unset (a unit
+    call) the folder step is skipped.
+    """
+    if _DATA_ROOT is None:
+        return
+    from pathlib import Path
+
+    from src.migrations import folders
+
+    root = Path(_DATA_ROOT)
+    entries = folders.plan_folder_moves(mapping, root)
+    if not entries:
+        return
+    try:
+        folders.apply_folder_moves(entries, root)
+    except Exception:
+        folders.rollback(root)
+        raise
+
 
 VERSION = 1
 NAME = "client_id_identity"

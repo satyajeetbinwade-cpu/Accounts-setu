@@ -2,23 +2,23 @@
 
 Usage:
   # Single period
-  python verify.py --client X --period YYYY-MM --recon-type GST \
+  python verify.py verify --client-id 1 --period YYYY-MM --recon-type GST \
       --baseline path/to/baseline.xlsx --output path/to/report.xlsx
 
   # With adjudicated disagreement file
-  python verify.py --client X --period YYYY-MM --recon-type GST \
+  python verify.py verify --client-id 1 --period YYYY-MM --recon-type GST \
       --baseline path/to/baseline.xlsx --output path/to/report.xlsx \
       --adjudicated path/to/adjudicated.xlsx
 
   # Multi-period (comma-separated run-ids and baselines)
-  python verify.py --multi \
+  python verify.py multi \
       --run-ids 1,2,3 \
       --baselines path1.xlsx,path2.xlsx,path3.xlsx \
       --output path/to/multi_report.xlsx
 
   # Export disagreements for firm review
-  python verify.py --export-disagreements \
-      --client X --period YYYY-MM --recon-type GST \
+  python verify.py export-disagreements \
+      --client-id 1 --period YYYY-MM --recon-type GST \
       --baseline path/to/baseline.xlsx --output path/to/disagreements.xlsx
 """
 
@@ -37,12 +37,12 @@ from src.verification.alignment import align
 from src.verification.analysis import build_disagreements, export_for_adjudication
 
 
-def _find_run_id(client: str, period: str, recon_type: str) -> int:
+def _find_run_id(client_id: int, period: str, recon_type: str) -> int:
     """Find the most recent run for the given context."""
-    runs_df = queries.list_runs(client=client, period=period, recon_type=recon_type)
+    runs_df = queries.list_runs(client_id=client_id, period=period, recon_type=recon_type)
     if runs_df.empty:
         raise SystemExit(
-            f"No runs found for client={client!r}, period={period!r}, "
+            f"No runs found for client_id={client_id!r}, period={period!r}, "
             f"recon_type={recon_type!r}. Execute a run first."
         )
     return int(runs_df["run_id"].iloc[0])
@@ -55,7 +55,7 @@ def cmd_verify(args: argparse.Namespace) -> None:
     if args.run_id:
         run_id = args.run_id
     else:
-        run_id = _find_run_id(args.client, args.period, args.recon_type)
+        run_id = _find_run_id(args.client_id, args.period, args.recon_type)
 
     print(f"[verify] Running verification for run {run_id}")
     print(f"[verify] Baseline: {args.baseline}")
@@ -101,7 +101,7 @@ def cmd_export_disagreements(args: argparse.Namespace) -> None:
     if args.run_id:
         run_id = args.run_id
     else:
-        run_id = _find_run_id(args.client, args.period, args.recon_type)
+        run_id = _find_run_id(args.client_id, args.period, args.recon_type)
 
     run = queries.get_run(run_id)
     if run is None:
@@ -130,7 +130,8 @@ def main() -> None:
 
     # --- verify ---
     p_verify = sub.add_parser("verify", help="Single-period verification")
-    p_verify.add_argument("--client", type=str, default=None)
+    p_verify.add_argument("--client-id", type=int, default=None,
+                          help="F2 end_clients.client_id")
     p_verify.add_argument("--period", type=str, default=None)
     p_verify.add_argument("--recon-type", type=str, default=None)
     p_verify.add_argument("--run-id", type=int, default=None,
@@ -152,7 +153,8 @@ def main() -> None:
     # --- export-disagreements ---
     p_export = sub.add_parser("export-disagreements",
                               help="Export disagreements for firm review")
-    p_export.add_argument("--client", type=str, default=None)
+    p_export.add_argument("--client-id", type=int, default=None,
+                          help="F2 end_clients.client_id")
     p_export.add_argument("--period", type=str, default=None)
     p_export.add_argument("--recon-type", type=str, default=None)
     p_export.add_argument("--run-id", type=int, default=None)
@@ -162,14 +164,14 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "verify":
-        if not args.run_id and not (args.client and args.period and args.recon_type):
-            parser.error("Either --run-id or all of --client/--period/--recon-type required")
+        if not args.run_id and not (args.client_id and args.period and args.recon_type):
+            parser.error("Either --run-id or all of --client-id/--period/--recon-type required")
         cmd_verify(args)
     elif args.command == "multi":
         cmd_multi(args)
     elif args.command == "export-disagreements":
-        if not args.run_id and not (args.client and args.period and args.recon_type):
-            parser.error("Either --run-id or all of --client/--period/--recon-type required")
+        if not args.run_id and not (args.client_id and args.period and args.recon_type):
+            parser.error("Either --run-id or all of --client-id/--period/--recon-type required")
         cmd_export_disagreements(args)
     else:
         parser.print_help()

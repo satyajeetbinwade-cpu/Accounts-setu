@@ -170,18 +170,30 @@ def create_client(
     validate_client_creation(record)
     conn = _connect(db_path)
     try:
-        return cdb.create_client(
-            conn,
-            legal_name=_clean(legal_name),
-            pan=_clean(pan),
-            tan=_clean(tan),
-            gstin=_clean(gstin),
-            assigned_team=_clean(assigned_team),
-            primary_contact_email=_clean(primary_contact_email),
-            primary_contact_phone=_clean(primary_contact_phone),
-            primary_contact_address=_clean(primary_contact_address),
-            created_by=actor,
-        )
+        try:
+            return cdb.create_client(
+                conn,
+                legal_name=_clean(legal_name),
+                pan=_clean(pan),
+                tan=_clean(tan),
+                gstin=_clean(gstin),
+                assigned_team=_clean(assigned_team),
+                primary_contact_email=_clean(primary_contact_email),
+                primary_contact_phone=_clean(primary_contact_phone),
+                primary_contact_address=_clean(primary_contact_address),
+                created_by=actor,
+            )
+        except sqlite3.IntegrityError as exc:
+            # The partial UNIQUE index (one GSTIN = one active registration)
+            # is the enforcement point; translate it into the module's
+            # plain-language error rather than leaking a raw sqlite message.
+            if "gstin" in str(exc).lower():
+                raise ClientError(
+                    f"A client with GSTIN {_clean(gstin)} already exists. Each GST "
+                    "registration is its own client — use a different GSTIN, or "
+                    "deactivate the existing client first."
+                ) from exc
+            raise
     finally:
         conn.close()
 
