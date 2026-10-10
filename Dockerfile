@@ -9,17 +9,27 @@ WORKDIR /app
 # frontend, 8000 backend) behind one public port, since Fly proxies one
 # internal_port per service by default.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        nodejs npm build-essential curl gnupg unzip \
-        debian-keyring debian-archive-keyring apt-transport-https \
+        nodejs npm build-essential curl unzip \
         libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
         libdbus-1-3 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
         libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
-    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-    && curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        | tee /etc/apt/sources.list.d/caddy-stable.list \
-    && apt-get update && apt-get install -y --no-install-recommends caddy \
     && rm -rf /var/lib/apt/lists/*
+
+# Caddy: installed from the upstream GitHub release tarball rather than APT.
+# The Debian `caddy` package is served by Cloudsmith's APT repo, which now
+# answers 402 Payment Required and fails the build.
+ARG CADDY_VERSION=2.11.7
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) caddy_arch=amd64 ;; \
+        arm64) caddy_arch=arm64 ;; \
+        *) echo "unsupported architecture for caddy: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/caddy.tar.gz \
+        "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${caddy_arch}.tar.gz"; \
+    tar -xzf /tmp/caddy.tar.gz -C /usr/bin caddy; \
+    rm /tmp/caddy.tar.gz; \
+    caddy version
  
 # Python deps first, on their own layer, so code-only edits don't force a
 # slow reinstall of pandas/pymupdf/playwright/etc on every build.
