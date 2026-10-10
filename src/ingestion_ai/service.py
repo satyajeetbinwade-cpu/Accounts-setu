@@ -1509,6 +1509,16 @@ def get_stored_result(*args, **kwargs):
     return normalizer.get_stored_result(*args, **kwargs)
 
 
+def suggested_slot(source_type: str, doc_type: str):
+    """The slot a mis-filed document probably belongs in, or None.
+
+    See src.ingestion_ai.normalizer.suggested_slot. Drives the Reconcile
+    upload row's "move it to the right row" action, from the classification
+    that was stored when the file was normalized.
+    """
+    return normalizer.suggested_slot(source_type, doc_type)
+
+
 def upload_key(*args, **kwargs) -> str:
     return normalizer.upload_key(*args, **kwargs)
 

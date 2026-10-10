@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shutil
 from dataclasses import dataclass, replace
 from urllib.parse import quote
 
@@ -105,6 +106,12 @@ class SlotRow:
     resolved: bool
     is_note: bool = False       # the optional books-side note register
     is_optional: bool = False   # never blocks a run
+    # --- Stage-2 row chrome (design B: one row per document) --------------
+    upload_id: str = ""              # this row's own file input; ids must not collide
+    busy: bool = False               # this row's file is being uploaded + normalized now
+    error: str = ""                  # this row's own save/normalize failure
+    suggested_source_type: str = ""  # the row this file probably belongs in instead
+    suggested_label: str = ""        # its label, for the "move it" action
 
 
 @dataclass
@@ -308,7 +315,13 @@ class ReconcileState(AuthState):
 
     # stage 2
     slots: list[SlotRow] = []
-    upload_slot_label: str = ""
+    # The same rows keyed by source_type, for the static row layout: Stage 2
+    # renders one row per document per recon type from literals, because
+    # `rx.upload` is memoized and its props are hoisted out of the render
+    # scope — so a row's file input can never take a foreach item's Var.
+    slot_rows: dict[str, SlotRow] = {}
+    slot_busy: str = ""                     # source_type whose file is being processed
+    slot_errors: dict[str, str] = {}        # source_type -> this row's own failure
     books_ok: bool = False
     portal_ok: bool = False
     ready: bool = False
@@ -770,18 +783,25 @@ class ReconcileState(AuthState):
             return
         books_types = set(discovery.BOOKS_SOURCE_TYPES)
         note_types = set(discovery.note_slot_types(self.ctx_recon_type))
+        offered = set(discovery.slot_types_for(self.ctx_recon_type))
         out: list[SlotRow] = []
         for source_type in discovery.slot_types_for(self.ctx_recon_type):
             filename = self.selections.get(source_type, "")
             info = self._slot_info(source_type, filename)
+            is_note = source_type in note_types
+            is_books = source_type in books_types
+            # Only offer to move a file to a row this run actually shows.
+            suggested = info.get("suggested_source_type", "")
+            if suggested not in offered:
+                suggested = ""
             out.append(
                 SlotRow(
                     source_type=source_type,
                     label=discovery.source_type_label(source_type),
                     hint=discovery.source_type_hint(source_type),
-                    is_books=source_type in books_types,
-                    is_note=source_type in note_types,
-                    is_optional=source_type in note_types,
+                    is_books=is_books,
+                    is_note=is_note,
+                    is_optional=is_note,
                     files=_list_files(self.ctx_client, self.ctx_period, source_type),
                     selected=filename,
                     code=info["code"],
@@ -793,16 +813,22 @@ class ReconcileState(AuthState):
                     message=info["message"],
                     caveats=info["caveats"],
                     resolved=info["resolved"],
+                    upload_id=f"rc_up_{source_type}",
+                    busy=self.slot_busy == source_type,
+                    error=self.slot_errors.get(source_type, ""),
+                    suggested_source_type=suggested,
+                    suggested_label=discovery.source_type_label(suggested) if suggested else "",
                 )
             )
         self.slots = out
+        self.slot_rows = {row.source_type: row for row in out}
         self._compute_readiness()
 
     def _slot_info(self, source_type: str, filename: str) -> dict:
         empty = {
             "code": "empty", "chip_label": "— no file yet", "chip_variant": "placeholder",
             "rows": 0, "needs_review": 0, "required_missing": 0, "message": "", "caveats": [],
-            "resolved": False,
+            "resolved": False, "suggested_source_type": "",
         }
         if not filename:
             return empty
@@ -851,9 +877,16 @@ class ReconcileState(AuthState):
             for c in (stored.get("caveats") or [])
         ]
         if status in ("wrong_slot", "unrecognized"):
+            # Name the row the file probably belongs in, straight from the
+            # classification stored at normalize time, so the row can offer a
+            # one-click "move it" instead of making the user work it out.
+            classification = stored.get("classification") or {}
             return {
                 **empty, "code": "wrong", "chip_label": "✕ looks like the wrong file type",
                 "chip_variant": "danger", "message": stored.get("message") or "",
+                "suggested_source_type": ingestion_ai.suggested_slot(
+                    source_type, classification.get("document_type", "")
+                ) or "",
             }
         if required_missing:
             return {
@@ -971,50 +1004,126 @@ class ReconcileState(AuthState):
             self.rerun_open = False
             self._load_slots()
 
-    @rx.var
-    def slot_labels(self) -> list[str]:
-        return [s.label for s in self.slots]
+    def _set_slot_error(self, source_type: str, message: str) -> None:
+        """Record (or clear) one row's own failure, reassigning the dict so the
+        change is definitely part of the state that reaches the browser."""
+        errors = dict(self.slot_errors)
+        if message:
+            errors[source_type] = message
+        else:
+            errors.pop(source_type, None)
+        self.slot_errors = errors
 
     @rx.event
-    def set_upload_slot_label(self, v: str):
-        self.upload_slot_label = v
+    async def upload_slot(self, source_type: str, files: list[rx.UploadFile]):
+        """Choosing a file in a row IS the upload.
 
-    @rx.event
-    async def handle_upload(self, files: list[rx.UploadFile]):
+        Saves it to this client and period and then normalizes it — the whole
+        job the old "Upload & normalize" button did, in the one action a row
+        offers. A generator, so the row's "reading it" state reaches the
+        browser before the model call starts (each `yield` flushes state).
+
+        Reflex requires the `list[rx.UploadFile]` annotation here, and the
+        widget must pass `rx.upload_files(...)` explicitly: that keeps the
+        handler an EventSpec, so Reflex does not inject a second upload.
+        """
         self.upload_error = ""
-        self.error = ""
+        self._set_slot_error(source_type, "")
         if not files:
-            self.upload_error = "Choose a file to upload."
+            self._set_slot_error(source_type, "Choose a file to upload.")
+            self._load_slots()
             return
-        source_type = ""
-        for s in self.slots:
-            if s.label == self.upload_slot_label:
-                source_type = s.source_type
-                break
-        if not source_type:
-            self.upload_error = "Pick a slot for this file first."
+
+        if not self.ctx_client:
+            self._set_slot_error(source_type, "Pick a client in Stage 1 first.")
+            self._load_slots()
             return
         # The period is the folder the engine reads. Stage 1 requires it, so
         # this is a defensive backstop against writing an unreachable file.
         if not period_utils.is_valid_period(self.ctx_period):
-            self.upload_error = (
+            self._set_slot_error(
+                source_type,
                 "Choose a real period (YYYY-MM) in Stage 1 before uploading — "
-                "files filed without one cannot be reconciled."
+                "files filed without one cannot be reconciled.",
             )
+            self._load_slots()
             return
+
         f = files[0]
+        filename = (getattr(f, "filename", "") or "upload").split("/")[-1]
         data = await f.read()
-        directory = source_data_path(self.ctx_client, self.ctx_period, source_type)
-        dest = directory / (f.filename or "upload")
+        dest = source_data_path(self.ctx_client, self.ctx_period, source_type) / filename
         try:
             dest.write_bytes(data)
         except Exception as exc:  # noqa: BLE001
-            self.upload_error = f"Couldn't save {f.filename}: {exc}"
+            self._set_slot_error(source_type, f"Couldn't save {filename}: {exc}")
+            self._load_slots()
             return
+
         self.selections[source_type] = dest.name
         self.rail_return = False
-        self._normalize(source_type, dest.name)
-        self.flash = f"Uploaded {dest.name}."
+        self.slot_busy = source_type
+        self._load_slots()
+        yield  # flush: the row now shows it is reading the file
+
+        try:
+            self._normalize(source_type, dest.name)
+            if self.error:
+                self._set_slot_error(source_type, self.error)
+                self.error = ""
+            else:
+                self.flash = f"{dest.name} uploaded and normalized."
+        finally:
+            self.slot_busy = ""
+            self._load_slots()
+
+    @rx.event
+    def normalize_slot(self, source_type: str):
+        """Normalize a file that is on disk for this row but was never
+        ingested — the "not ingested yet" state. Carries the file through the
+        same pipeline an upload would."""
+        filename = self.selections.get(source_type, "")
+        if not filename:
+            return
+        self._normalize(source_type, filename)
+        if self.error:
+            self._set_slot_error(source_type, self.error)
+            self.error = ""
+        self._load_slots()
+
+    @rx.event
+    def remove_slot(self, source_type: str):
+        """Empty this row again. The file stays on disk — the row's own file
+        picker can hand it back — so nothing the user supplied is destroyed."""
+        self.selections.pop(source_type, None)
+        self._set_slot_error(source_type, "")
+        self.rail_return = False
+        self._load_slots()
+
+    @rx.event
+    def move_slot(self, source_type: str, target: str):
+        """Re-file a mis-slotted file into the row it belongs in, then
+        normalize it there — mappings are per document type, so the result
+        from the old slot cannot carry over."""
+        filename = self.selections.get(source_type, "")
+        if not filename or target not in discovery.slot_types_for(self.ctx_recon_type):
+            return
+        problem = _refile(self.ctx_client, self.ctx_period, source_type, target, filename)
+        if problem:
+            self._set_slot_error(source_type, problem)
+            self._load_slots()
+            return
+        self.selections.pop(source_type, None)
+        self.selections[target] = filename
+        self._normalize(target, filename)
+        if self.error:
+            self._set_slot_error(target, self.error)
+            self.error = ""
+        else:
+            self.flash = (
+                f"Moved {filename} to {discovery.source_type_label(target)} "
+                "and normalized it there."
+            )
         self._load_slots()
 
     # ==================================================================
@@ -2420,6 +2529,29 @@ def _list_files(client: str, period: str, source_type: str) -> list[str]:
     for pattern in ("*.csv", "*.xlsx", "*.xls"):
         files.extend(sorted(m.name for m in directory.glob(pattern)))
     return sorted(set(files))
+
+
+def _refile(
+    client: str, period: str, source_type: str, target: str, filename: str
+) -> str:
+    """Move a file out of the slot it was uploaded to and into `target`.
+
+    Returns "" on success, or the message to show on the row. Refuses rather
+    than overwriting when the target already holds a file of that name: the
+    copy already there may be the one the user wants.
+    """
+    src = source_data_path(client, period, source_type) / filename
+    dst = source_data_path(client, period, target) / filename
+    if dst.exists():
+        return (
+            f"{filename} is already in {discovery.source_type_label(target)} — "
+            "choose which copy to use there instead."
+        )
+    try:
+        shutil.move(str(src), str(dst))
+    except Exception as exc:  # noqa: BLE001
+        return f"Couldn't move {filename}: {exc}"
+    return ""
 
 
 def _client_id_for_folder(folder: str) -> int | None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import reflex as rx
 
+from src.shared import discovery
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.reconcile_state import ReconcileState
@@ -286,86 +287,6 @@ def _context_stage() -> rx.Component:
 # ---------------------------------------------------------------------------
 
 
-def _slot_card(s) -> rx.Component:
-    return c.card(
-        rx.vstack(
-            rx.hstack(
-                rx.text(s.label, style=t.TEXT["card_title"]),
-                rx.cond(
-                    s.is_note,
-                    c.pill("Books side · optional", variant="accent"),
-                    rx.cond(
-                        s.is_books,
-                        c.pill("Books side", variant="accent"),
-                        c.pill("Portal side", variant="placeholder"),
-                    ),
-                ),
-                rx.spacer(),
-                rx.match(
-                    s.chip_variant,
-                    ("rule", c.pill(s.chip_label, variant="rule")),
-                    ("ai", c.pill(s.chip_label, variant="ai")),
-                    ("danger", c.pill(s.chip_label, variant="danger")),
-                    c.pill(s.chip_label, variant="placeholder"),
-                ),
-                width="100%",
-                align="center",
-                spacing="3",
-            ),
-            rx.cond(s.hint != "", rx.text(s.hint, style=t.TEXT["micro"]), rx.fragment()),
-            rx.cond(
-                s.files.length() > 0,
-                rx.select(
-                    s.files,
-                    value=s.selected,
-                    on_change=lambda v: ReconcileState.select_slot_file(s.source_type, v),
-                    width="100%",
-                    placeholder="no file selected",
-                ),
-                rx.text("No files on disk for this slot yet — upload one above.", style=t.TEXT["micro"]),
-            ),
-            rx.cond(
-                s.caveats.length() > 0,
-                rx.vstack(
-                    rx.text("This file's gaps — and what they cost the report:", style=t.TEXT["micro"]),
-                    rx.foreach(
-                        s.caveats,
-                        lambda cv: rx.text(f"• {cv}", style=t.TEXT["micro"]),
-                    ),
-                    spacing="1",
-                    align="start",
-                    width="100%",
-                ),
-                rx.fragment(),
-            ),
-            # A note register is parsed DETERMINISTICALLY (never by the model),
-            # so a model re-run is not offered for it.
-            rx.cond(
-                (s.selected != "") & (~s.is_note),
-                rx.hstack(
-                    rx.button(
-                        rx.icon("refresh-cw", size=14),
-                        "Re-run through model",
-                        on_click=ReconcileState.open_rerun(s.source_type, s.selected),
-                        size="1",
-                        variant="soft",
-                        background="transparent",
-                        color=t.Color.TEXT_SECONDARY.value,
-                        border=f"1px solid {t.Color.BORDER.value}",
-                        border_radius="8px",
-                    ),
-                    spacing="2",
-                ),
-                rx.fragment(),
-            ),
-            spacing="2",
-            align="start",
-            width="100%",
-        ),
-        width="100%",
-    )
-
-
 def _rerun_dialog() -> rx.Component:
     """Per-file confirm dialog for a model re-run. A re-run is a live model
     call (~15-25s) and discards the cached mapping, so it is never one-click."""
@@ -414,79 +335,196 @@ def _rerun_dialog() -> rx.Component:
     )
 
 
-def _upload_card() -> rx.Component:
-    """One upload widget for the whole stage — the source-type is chosen from
-    a dropdown (a literal option list), so the widget id stays a Python
-    literal (rx.upload ids cannot contain a Var)."""
+# The rows Stage 2 shows, per recon type — literal tuples rather than the
+# slots list. `rx.upload` is a memoized component and Reflex hoists its props
+# out of the render scope, so a row's file input cannot take a Var belonging to
+# a `rx.foreach` item. Static rows keep every prop of that widget a literal.
+_ROWS_BY_RECON_TYPE: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (recon_type, tuple(discovery.slot_types_for(recon_type)))
+    for recon_type in discovery.RECON_TYPES
+)
+
+
+def _upload_row(source_type: str) -> rx.Component:
+    """One document this run needs, as its own row.
+
+    Choosing a file here uploads AND normalizes it in one action — the whole
+    job the old "Upload & normalize" button did, with nothing to pick first,
+    because the row already names the document. The row then reports what
+    normalize found.
+    """
+    s = ReconcileState.slot_rows[source_type]
     return c.card(
         rx.vstack(
-            c.section_title(
-                "Upload a file",
-                "Pick the slot it belongs to, then drop the file. It's normalized immediately.",
-            ),
             rx.hstack(
-                rx.vstack(
-                    rx.text("Slot", style=t.TEXT["label"]),
-                    rx.select(
-                        ReconcileState.slot_labels,
-                        value=ReconcileState.upload_slot_label,
-                        on_change=ReconcileState.set_upload_slot_label,
-                        width="260px",
+                rx.text(s.label, style=t.TEXT["card_title"]),
+                # `variant` is a Python branch inside c.pill, so it has to be
+                # a literal — hence the conds rather than a Var.
+                rx.cond(
+                    s.is_note,
+                    c.pill("Books side · optional", variant="accent"),
+                    rx.cond(
+                        s.is_books,
+                        c.pill("Books side", variant="accent"),
+                        c.pill("Portal side", variant="placeholder"),
                     ),
-                    spacing="1",
-                    align="start",
                 ),
-                rx.vstack(
-                    rx.text("File", style=t.TEXT["label"]),
-                    rx.upload(
-                        rx.vstack(
-                            rx.icon("upload", size=16, color=t.Color.NEUTRAL.value),
-                            rx.text("Drop a file here", style=t.TEXT["micro"]),
-                            spacing="1",
-                            align="center",
-                            padding="12px 20px",
-                        ),
-                        id="rc_upload",
-                        accept=_ACCEPT,
-                        multiple=False,
-                        border=f"1px dashed {t.Color.BORDER.value}",
-                        border_radius="10px",
-                        background=t.Color.SURFACE.value,
+                rx.spacer(),
+                rx.cond(
+                    s.selected != "",
+                    rx.match(
+                        s.chip_variant,
+                        ("rule", c.pill(s.chip_label, variant="rule")),
+                        ("ai", c.pill(s.chip_label, variant="ai")),
+                        ("danger", c.pill(s.chip_label, variant="danger")),
+                        c.pill(s.chip_label, variant="placeholder"),
                     ),
-                    spacing="1",
-                    align="start",
+                    rx.fragment(),
                 ),
-                spacing="4",
-                align="end",
-                wrap="wrap",
+                width="100%",
+                align="center",
+                spacing="3",
             ),
-            rx.hstack(
+            rx.text(s.hint, style=t.TEXT["micro"]),
+            # More than one file on disk for this document: the user picks
+            # which one rather than us guessing at the newest.
+            rx.cond(
+                s.files.length() > 1,
+                rx.select(
+                    s.files,
+                    value=s.selected,
+                    on_change=lambda v: ReconcileState.select_slot_file(source_type, v),
+                    width="100%",
+                    placeholder="which file?",
+                ),
+                rx.fragment(),
+            ),
+            rx.cond(
+                s.busy,
+                rx.hstack(
+                    rx.spinner(size="1"),
+                    rx.text(
+                        "Uploading and normalizing — reading the layout, then mapping the columns…",
+                        style=t.TEXT["micro"],
+                    ),
+                    spacing="2",
+                    align="center",
+                ),
+                rx.fragment(),
+            ),
+            # A wrong file: name the row it belongs in and offer to move it.
+            rx.cond(
+                (s.code == "wrong") & (s.suggested_source_type != ""),
                 rx.button(
-                    "Upload & normalize",
-                    on_click=ReconcileState.handle_upload(rx.upload_files(upload_id="rc_upload")),
+                    f"Move it to {s.suggested_label}",
+                    on_click=ReconcileState.move_slot(source_type, s.suggested_source_type),
+                    size="1",
                     background=t.Color.ACCENT.value,
                     color="#FFFFFF",
                 ),
-                rx.button(
-                    "Clear",
-                    on_click=rx.clear_selected_files("rc_upload"),
-                    variant="soft",
-                    background="transparent",
-                    color=t.Color.TEXT_SECONDARY.value,
-                    border=f"1px solid {t.Color.BORDER.value}",
-                    border_radius="9px",
-                ),
-                spacing="2",
-            ),
-            rx.cond(
-                ReconcileState.upload_error != "",
-                c.inline_reason(ReconcileState.upload_error),
                 rx.fragment(),
             ),
-            spacing="3",
+            rx.cond(
+                (s.code == "not_ingested") & (s.selected != ""),
+                rx.button(
+                    "Normalize it now",
+                    on_click=ReconcileState.normalize_slot(source_type),
+                    size="1",
+                    background=t.Color.ACCENT.value,
+                    color="#FFFFFF",
+                ),
+                rx.fragment(),
+            ),
+            rx.cond(s.error != "", c.inline_reason(s.error), rx.fragment()),
+            rx.cond(
+                s.caveats.length() > 0,
+                rx.vstack(
+                    rx.text("This file's gaps — and what they cost the report:", style=t.TEXT["micro"]),
+                    rx.foreach(
+                        s.caveats,
+                        lambda cv: rx.text(f"• {cv}", style=t.TEXT["micro"]),
+                    ),
+                    spacing="1",
+                    align="start",
+                    width="100%",
+                ),
+                rx.fragment(),
+            ),
+            rx.hstack(
+                # The row's own file input: Reflex wires this widget's files
+                # straight into the handler, so choosing a file IS the upload.
+                rx.upload(
+                    rx.hstack(
+                        rx.icon("upload", size=14, color=t.Color.NEUTRAL.value),
+                        rx.text(
+                            rx.cond(s.selected != "", "Replace file", "Choose file"),
+                            style=t.TEXT["micro"],
+                        ),
+                        spacing="1",
+                        align="center",
+                        padding="7px 12px",
+                    ),
+                    id=f"rc_up_{source_type}",
+                    accept=_ACCEPT,
+                    multiple=False,
+                    border=f"1px dashed {t.Color.BORDER.value}",
+                    border_radius="9px",
+                    background=t.Color.SURFACE.value,
+                    on_drop=ReconcileState.upload_slot(
+                        source_type, rx.upload_files(upload_id=f"rc_up_{source_type}")
+                    ),
+                ),
+                # A model re-run is a live call that discards the cached
+                # mapping, so it stays behind its own confirm dialog. A note
+                # register is parsed deterministically, so it is never offered.
+                rx.cond(
+                    (s.selected != "") & (~s.is_note),
+                    rx.button(
+                        rx.icon("refresh-cw", size=14),
+                        "Re-run through model",
+                        on_click=ReconcileState.open_rerun(source_type, s.selected),
+                        size="1",
+                        variant="soft",
+                        background="transparent",
+                        color=t.Color.TEXT_SECONDARY.value,
+                        border=f"1px solid {t.Color.BORDER.value}",
+                        border_radius="9px",
+                    ),
+                    rx.fragment(),
+                ),
+                rx.cond(
+                    s.selected != "",
+                    rx.button(
+                        "Remove",
+                        on_click=ReconcileState.remove_slot(source_type),
+                        size="1",
+                        variant="ghost",
+                        color=t.Color.TEXT_SECONDARY.value,
+                    ),
+                    rx.fragment(),
+                ),
+                spacing="2",
+                align="center",
+                wrap="wrap",
+            ),
+            rx.cond(
+                s.selected != "",
+                rx.text(f"Using: {s.selected}", style=t.TEXT["micro"]),
+                rx.text("Nothing chosen yet.", style=t.TEXT["micro"]),
+            ),
+            spacing="2",
             align="start",
             width="100%",
         ),
+        width="100%",
+    )
+
+
+def _upload_rows(source_types: tuple[str, ...]) -> rx.Component:
+    return rx.grid(
+        *(_upload_row(source_type) for source_type in source_types),
+        columns="2",
+        spacing="3",
         width="100%",
     )
 
@@ -495,16 +533,18 @@ def _upload_stage() -> rx.Component:
     return rx.vstack(
         c.section_title(
             "2. Upload",
-            "Every file for this recon type, side by side. Each one is normalized as soon as "
-            "you drop it — there's no separate ingestion screen to visit.",
+            "Every file this recon type needs has its own row. Choose a file and it's "
+            "uploaded and normalized straight away — the row then tells you what it found.",
         ),
-        _upload_card(),
         _rerun_dialog(),
-        rx.grid(
-            rx.foreach(ReconcileState.slots, _slot_card),
-            columns="3",
-            spacing="3",
-            width="100%",
+        rx.cond(
+            ReconcileState.ctx_recon_type != "",
+            rx.match(
+                ReconcileState.ctx_recon_type,
+                *((recon_type, _upload_rows(types)) for recon_type, types in _ROWS_BY_RECON_TYPE),
+                _upload_rows(_ROWS_BY_RECON_TYPE[0][1]),
+            ),
+            c.info_banner("Pick a client, a period and a recon type in Stage 1 to see the files this run needs."),
         ),
         rx.cond(
             ReconcileState.blockers.length() > 0,
@@ -538,7 +578,6 @@ def _upload_stage() -> rx.Component:
         width="100%",
         align="start",
     )
-
 
 # ---------------------------------------------------------------------------
 # Stage 3 — Reconcile
