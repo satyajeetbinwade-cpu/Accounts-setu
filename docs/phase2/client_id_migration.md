@@ -1,9 +1,10 @@
 # Client-id identity migration — report
 
 Branch: `client-id-migration`
-Status: **Steps 0–2 complete and verified; Step 3 (call-site refactor) foundation
-complete, the runtime call-sites in `runner`/`ingestion*`/`export`/`action_center`
-and the Reflex `setu/` state+views remain; Step 4 tests partially done.**
+Status: **COMPLETE — Steps 0-5 done. Full suite 548 passed.**
+`end_clients.client_id` is now the ONLY client identity: no code derives or
+matches identity from a name, and `src/data_paths.py` is the only module that
+builds a `data/` path (an invariant test now allows ZERO offenders).
 
 Artifacts:
 - `docs/phase2/client_id_migration_step0.md` — the Step 0 inspection.
@@ -86,24 +87,47 @@ Names with no match become `end_clients` rows with `origin='migrated'`.
   auth fix). Remaining breakage is entirely Step 3 call-sites still passing a
   client **name**.
 
-## Remaining work (Step 3 continuation + Step 4)
+## Step 3 — code changes (COMPLETE)
 
-1. `src/runner.py` — `execute_run(client_id, client_name_at_run, …)`,
-   `insert_run(...)`; drop the name parameter from `_run_gst/tds/other`.
-2. `src/ingestion.py` + `src/ingestion_ai/{normalizer,service,db}.py` — take
-   `client_id`; delete `_folder_name_for_client`; `source_data_path(client_id,…)`;
-   `upload_key`/shapes keyed by `client_id`; remove name-matched shapes.
-3. `src/export.py`, `src/reconciliation/report_export.py` — export dir from
-   `run["client_id"]`; download filenames via `data_paths.slugify(display_name)`.
-4. `src/action_center/{report,service}.py` — `resolve_client_id(folder)` and
-   `_folder_key_for_client` deleted; use `runs.client_id` / assignment `client_id`.
-5. `setu/state/*` + `setu/views/*` — every client Var/URL param carries
-   `client_id`; pickers render `display_name` from `discovery.list_clients()`
-   and return `client_id`; ingestion states stop deriving `_client_ref`.
-6. Update fixtures/tests (incl. `test_pnsarees_golden.py`, the note tests) to
-   pass `client_id`.
-7. Let the `test_no_data_path_built_outside_data_paths` allowlist in
-   `tests/test_client_id_migration.py` shrink to empty.
+1. `src/runner.py` — `execute_run(client_id, client_name_at_run, period,
+   recon_type, …)`; `insert_run` keyed by `client_id`.
+2. `src/ingestion.py` + `src/ingestion_ai/{normalizer,service,db}.py` — every
+   loader takes `client_id`; **`_folder_name_for_client` deleted**;
+   `source_data_path(client_id, …)` everywhere; `upload_key` and the shape cache
+   keyed by `client_id`; `client_ref` column removed.
+3. `src/export.py`, `src/reconciliation/report_export.py` — `exports_dir(client_id,
+   period)`; display names resolved from `end_clients` (never parsed back).
+4. `src/action_center/{report,service}.py` — `resolve_client_id`,
+   `_normalize_name`, `_folder_key_for_client` **deleted**; `_latest_run` /
+   `build_period_report` / team routing keyed by `client_id`.
+5. `src/shared/discovery.py` — `list_clients()` returns F2 option rows
+   (`client_id` + `display_name`, disambiguated + `(inactive)` labelled);
+   `list_periods`/`list_recon_types`/`source_file_status`/`period_has_source_data`
+   take `client_id`.
+6. `src/auth/*`, `src/clients/*` — `end_client_id`, `per_client_team_assignments`
+   `client_id`, team assignment by id.
+7. `setu/` — `client_picker` is id-keyed (value = `client_id`, label =
+   `legal_name`); **all 14 call sites converted**; `ReconcileState.ctx_client_id`,
+   `Phase1State.ctx_client_id`, `AdminState.team_selected_client_id`,
+   `ReportState.PeriodOption.client_id`, `IngestionAiState` (no `_client_ref`),
+   and the c5/documents/f6/rules/vault pickers all hold ids. Name→id bridges
+   deleted.
+
+## Step 4 — tests (COMPLETE)
+
+* `tests/test_client_id_migration.py` — 9 tests (migration guarantees, path
+  safety, same-name disambiguation, rename safety, and the **zero-offender**
+  data-path invariant).
+* `tests/conftest.py` — `seed_client()` helper.
+* Updated fixtures in the GST set2/set3, PNSarees golden, note-*, ingestion-period
+  and f6 tests to seed a client and lay files under `data/<client_id>/…`.
+* **Full suite: 548 passed.**
+
+## Also fixed during Step 4
+
+* `test_f6_purchase_register` called `confirm_mapping → materialize_upload_to_disk`
+  against the repo's REAL `data/` root (creating a stray `data/1/`). Its
+  `DATA_ROOT` is now a tmp dir; the artifact was removed.
 
 ## Flagged (NOT changed, as requested)
 
