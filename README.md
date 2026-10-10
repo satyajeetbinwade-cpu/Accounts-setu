@@ -91,6 +91,30 @@ The SQLite database (`db/poc.db`) and auth/session tables are created and seeded
 
 ## Running the app
 
+### First: create/upgrade the database (once per checkout, and after a pull)
+
+```bash
+source venv/bin/activate
+python main.py
+```
+
+**This is not optional and not just a smoke test any more.** `main.py` is the
+only entry point allowed to create or migrate the schema — it creates every
+module's tables, seeds first-run defaults, applies the client-id migration
+(backing up `db/poc.db` to `db/backups/` first), and moves `data/<name>/`
+folders to `data/<client_id>/`.
+
+The UI is deliberately **read-only** at import: `setu/setu.py` only *checks*
+the schema. If you start the frontend against a database that has not been
+initialised, it refuses to boot with
+
+```
+SchemaMigrationPending: Run python main.py (or python -m src.migrations --apply) first
+```
+
+That is the intended fail-closed behaviour — it means the app can never rewrite
+your database or move your client folders as a side effect of starting up.
+
 ### Frontend (Reflex)
 
 ```bash
@@ -103,14 +127,17 @@ reflex run
 
 Reflex serves both; you only need to expose port **3000** (and **8000** if the browser will reach the backend on a different host than the frontend — see deployment notes).
 
-### One-time smoke test
+Two local quirks worth knowing:
 
-```bash
-source venv/bin/activate
-python main.py
-```
-
-Initializes the DB, loads `config/`, and prints confirmation.
+- If your machine resolves `localhost` to `::1` only, the backend binds IPv4
+  only and the browser gets `ERR_CONNECTION_REFUSED` for the websocket. Start
+  it as `reflex run --backend-host ::` to bind both families.
+- The realtime socket must be **same-origin**: the browser asks for
+  `ws://localhost:<frontend_port>/_event` and the dev server proxies it to the
+  backend port. Do **not** set `REFLEX_API_URL=http://localhost:8000` to "fix" a
+  Connection Error — that makes the handshake cross-origin, where Reflex emits a
+  duplicate `access-control-allow-origin` header that browsers reject (see the
+  comment on `cors_allowed_origins` in `rxconfig.py`).
 
 ---
 
@@ -149,13 +176,23 @@ export REFLEX_DEPLOY_URL="http://YOUR-SERVER-HOST:3000"
 
 > **Why this matters:** the compiled frontend's `env.json` records the backend endpoints. With the default `localhost` value, a tester opening the page from another machine tries to reach *their own* `localhost:8000`, the websocket handshake fails, and the app shows **"Cannot connect to server"** and no login works.
 
+> **Caveat (measured):** setting `REFLEX_API_URL` to a host on a *different
+> origin* than the frontend does not actually work in this Reflex version. The
+> websocket handshake becomes cross-origin, and Reflex emits the
+> `access-control-allow-origin` header twice on `/_event` (its own Starlette
+> `CORSMiddleware` plus engineio's), which browsers reject — no value of
+> `cors_allowed_origins` avoids it. Serve the frontend and backend on **one
+> origin** (the Caddy setup in the Dockerfile does exactly that: both ports
+> behind one public port). See the `cors_allowed_origins` comment in
+> `rxconfig.py`.
+
 ### Step 4 — Run (dev-style)
 
 ```bash
 reflex run
 ```
 
-Because `backend_host` defaults to `0.0.0.0` and `cors_allowed_origins` is set to `"*"` (see below), the app is reachable to remote testers immediately.
+Because `backend_host` defaults to `0.0.0.0`, the backend port is reachable from other machines.
 
 ### Production hardening
 
