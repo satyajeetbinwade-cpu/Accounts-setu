@@ -168,7 +168,7 @@ def test_t6_null_is_not_zero(parsed):
 
 
 # --- T7 ---------------------------------------------------------------------
-def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
+def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path, monkeypatch):
     """A direct service call to hand an unconfirmed or failing run to Module 2
     is refused — the gate is at the SERVICE level, not just the UI."""
     import src.db as recon_db
@@ -177,6 +177,8 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
     from src.ingestion_ai.schema import init_ingestion_ai_schema
 
     db = str(tmp_path / "gate.db")
+    data_root = tmp_path / "data"
+    monkeypatch.setattr("src.data_paths.DATA_ROOT", data_root)
     from conftest import seed_client
     from src import bootstrap
 
@@ -219,7 +221,7 @@ def test_t7_pipeline_gate_refuses_unconfirmed(tmp_path):
 
 
 # --- T8 ---------------------------------------------------------------------
-def test_t8_provenance_is_truthful(tmp_path):
+def test_t8_provenance_is_truthful(tmp_path, monkeypatch):
     """An unconfirmed deterministic parse must never be labelled an AI
     proposal, and an unconfirmed cache entry must never read as recognised."""
     import src.db as recon_db
@@ -228,6 +230,8 @@ def test_t8_provenance_is_truthful(tmp_path):
     from src.ingestion_ai.schema import init_ingestion_ai_schema
 
     db = str(tmp_path / "prov.db")
+    data_root = tmp_path / "data"
+    monkeypatch.setattr("src.data_paths.DATA_ROOT", data_root)
     from conftest import seed_client
     from src import bootstrap
 
