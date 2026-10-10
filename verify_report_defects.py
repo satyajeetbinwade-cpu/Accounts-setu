@@ -15,6 +15,7 @@ GSTIN + one run) if it does not already exist.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -24,6 +25,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fitz  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
+
+# The harness regenerates the three exports, which the export layer writes to
+# data/<client_id>/<period>/exports/. Sandbox the data root: the source slots
+# are copied into a temp dir and every export lands there, so a verification
+# run can never add files to the real upload tree. Set SETU_DATA_ROOT to read
+# the sources from somewhere else (e.g. a DB copy).
+from src import data_paths  # noqa: E402
+
+_VERIFY_DATA_ROOT = data_paths.use_sandboxed_data_root(
+    os.environ.get("SETU_DATA_ROOT") or None,
+    prefix="setu_verify_defects_",
+)
 
 from src import db, queries, runner  # noqa: E402
 from src.clients import service as clients  # noqa: E402

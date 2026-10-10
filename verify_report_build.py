@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import glob
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -15,6 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import fitz  # noqa: E402
 from openpyxl import load_workbook  # noqa: E402
+
+# The report is written to data/<client_id>/<period>/exports/ and the credit
+# notes are read back from the portal workbook on disk. Sandbox the data root:
+# the source slots are copied into a temp dir and every export lands there, so
+# a verification run can never add files to the real upload tree. Set
+# SETU_DATA_ROOT to read the sources from somewhere else (e.g. a DB copy).
+from src import data_paths  # noqa: E402
+
+_VERIFY_DATA_ROOT = data_paths.use_sandboxed_data_root(
+    os.environ.get("SETU_DATA_ROOT") or None,
+    prefix="setu_verify_build_",
+)
 
 from src import db, queries  # noqa: E402
 from src.action_center import report as acr  # noqa: E402
