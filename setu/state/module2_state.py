@@ -364,23 +364,6 @@ class Module2State(AuthState):
         self._load_all()
 
     @rx.event
-    def set_client_by_name(self, name: str):
-        for o in self.client_options:
-            if o.legal_name == name:
-                self.client_id = o.client_id
-                break
-        self.selected_exception_id = 0
-        self._load_all()
-
-    @rx.var
-    def client_name(self) -> str:
-        """The selected client's legal name, or '' while none is chosen."""
-        for o in self.client_options:
-            if o.client_id == self.client_id:
-                return o.legal_name
-        return ""
-
-    @rx.event
     def set_filter_sub_type(self, v: str):
         self.filter_sub_type = v
         self._load_queue()

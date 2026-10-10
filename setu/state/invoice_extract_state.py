@@ -222,10 +222,6 @@ class InvoiceExtractState(SharedUploadState):
         return ""
 
     @rx.var
-    def client_names(self) -> list[str]:
-        return [o.legal_name for o in self.client_options]
-
-    @rx.var
     def touchpoint_keys(self) -> list[str]:
         return [tp.touchpoint_key for tp in self.touchpoints]
 
@@ -570,24 +566,8 @@ class InvoiceExtractState(SharedUploadState):
         self.export_client_id = _to_int(v)
         self._load_export()
 
-    @rx.event
-    def set_upload_client_by_name(self, name: str):
-        self.upload_client_id = self._id_for_name(name)
-        self._load_uploads()
-
     def set_batch_name(self, v: str):
         self.batch_name = v
-
-    @rx.event
-    def set_export_client_by_name(self, name: str):
-        self.export_client_id = self._id_for_name(name)
-        self._load_export()
-
-    def _id_for_name(self, name: str) -> int:
-        for o in self.client_options:
-            if o.legal_name == name:
-                return o.client_id
-        return self.client_options[0].client_id if self.client_options else 0
 
     def set_field_input(self, field_name: str, value: str):
         self.field_inputs[field_name] = value

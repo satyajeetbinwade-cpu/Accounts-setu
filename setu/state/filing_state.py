@@ -283,18 +283,8 @@ class FilingState(AuthState):
     def set_build_client(self, client_id: int):
         self.build_client_id = client_id
 
-    @rx.event
-    def set_build_client_by_name(self, name: str):
-        self.build_client_id = self._id_for_name(name)
-
     def set_build_period(self, v: str):
         self.build_period = v
-
-    def _id_for_name(self, name: str) -> int:
-        for o in self.client_options:
-            if o.legal_name == name:
-                return o.client_id
-        return self.client_options[0].client_id if self.client_options else 0
 
     @rx.var
     def build_ready(self) -> bool:
@@ -322,10 +312,6 @@ class FilingState(AuthState):
         self.new_client_id = client_id
 
     @rx.event
-    def set_new_client_by_name(self, name: str):
-        self.new_client_id = self._id_for_name(name)
-
-    @rx.event
     def set_new_obligation(self, v: str):
         self.new_obligation = v
 
@@ -335,11 +321,6 @@ class FilingState(AuthState):
     @rx.event
     def set_source_client(self, client_id: int):
         self.source_client_id = client_id
-        self._load_sources()
-
-    @rx.event
-    def set_source_client_by_name(self, name: str):
-        self.source_client_id = self._id_for_name(name)
         self._load_sources()
 
     @rx.event

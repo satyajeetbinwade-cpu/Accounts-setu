@@ -184,13 +184,6 @@ class DocumentsState(SharedUploadState):
         return self.reassign_client_id != 0 and self.reassign_client_id != self._detail_client_id()
 
     @rx.var
-    def reassign_client_name(self) -> str:
-        for o in self.client_options:
-            if o.client_id == self.reassign_client_id:
-                return o.legal_name
-        return self.detail_client
-
-    @rx.var
     def detail_period_label(self) -> str:
         return self.detail_period.strip() if self.detail_period and self.detail_period.strip() else "Not set"
 
@@ -500,13 +493,6 @@ class DocumentsState(SharedUploadState):
             self.reassign_client_id = int(v or 0)
         except (TypeError, ValueError):
             self.reassign_client_id = 0
-
-    @rx.event
-    def set_reassign_client_by_name(self, name: str):
-        for o in self.client_options:
-            if o.legal_name == name:
-                self.reassign_client_id = o.client_id
-                break
 
     def set_reassign_reason(self, v: str):
         self.reassign_reason = v
