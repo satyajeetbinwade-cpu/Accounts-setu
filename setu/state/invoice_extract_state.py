@@ -77,6 +77,9 @@ class FieldRow:
     resolved_value: str
     badge_pct: str
     input_value: str
+    # A PRESENT value the model returned with no confidence — flagged for
+    # review, but never labelled "not present" (it is unverified, not absent).
+    unverified: bool = False
     # Review-screen grouping + click-to-highlight + math suggestions.
     section: str = "header"
     has_bbox: bool = False
@@ -231,6 +234,14 @@ class InvoiceExtractState(SharedUploadState):
         Resolved checklist's visibility + headline count."""
         return sum(1 for f in self.fields if f.resolved)
 
+    @rx.var
+    def is_read_only(self) -> bool:
+        """True when the open upload is already in an immutable export batch.
+        The review screen then renders every field read-only — no Resolve, no
+        Edit, no inline editing — mirroring resolve_field(), re_extract_upload()
+        and discard_upload(), which all refuse on an exported upload."""
+        return read_only_for_status(self.detail_status)
+
     # ------------------------------------------------------------------
     @rx.event
     def load(self):
@@ -360,13 +371,11 @@ class InvoiceExtractState(SharedUploadState):
         is_present = bool(f.get("is_present"))
         resolved = bool(f.get("resolved"))
         is_derived = bool(f.get("is_derived"))
-        # A derived field is settled for export purposes, so it never counts
-        # as flagged (the service's review gate agrees — see
-        # service._satisfied_by_derivation).
-        flagged = (
-            (not resolved) and (not is_derived)
-            and ((not is_present) or conf is None or conf < threshold)
-        )
+        # THE gate decision comes from the service — never recomputed here.
+        # get_fields() sets ``requires_resolution`` with the same code path that
+        # get_reviewable_fields() and the export gate use, so the flags and
+        # Resolve inputs the reviewer sees can never disagree with the gate.
+        flagged = bool(f.get("requires_resolution"))
         # Math-derived suggestion: only for a flagged field whose dependencies
         # are all trustworthy. Pre-fills the input; the reviewer still clicks
         # Resolve (never auto-confirmed).
@@ -391,9 +400,13 @@ class InvoiceExtractState(SharedUploadState):
             resolved=resolved,
             flagged=flagged,
             auto_accepted=(not resolved) and (not is_derived) and is_present and conf is not None and conf >= threshold,
-            not_present=((not is_present) or conf is None) and not is_derived,
+            not_present=(not is_present) and not is_derived,
+            unverified=is_present and conf is None and not is_derived,
             resolved_value=f.get("resolved_value") or "",
-            badge_pct=f"AI — {int(conf)}%" if conf is not None else "not present",
+            badge_pct=(
+                f"AI — {int(conf)}%" if conf is not None
+                else ("present — unverified" if is_present else "not present")
+            ),
             input_value=default_input,
             section=f.get("section") or "header",
             has_bbox=bool(f.get("has_bbox")),
@@ -995,6 +1008,13 @@ def _replace_input(f: FieldRow, field_name: str, value: str) -> FieldRow:
         effective_value=f.effective_value, source_location=f.source_location,
         confidence=f.confidence, has_confidence=f.has_confidence, is_present=f.is_present,
         resolved=f.resolved, flagged=f.flagged, auto_accepted=f.auto_accepted,
-        not_present=f.not_present, resolved_value=f.resolved_value, badge_pct=f.badge_pct,
-        input_value=value,
+        not_present=f.not_present, unverified=f.unverified, resolved_value=f.resolved_value,
+        badge_pct=f.badge_pct, input_value=value,
     )
+
+
+def read_only_for_status(status: str) -> bool:
+    """An upload that is part of an immutable export batch is read-only on the
+    review screen. Kept as a plain function so the single condition the view
+    branches on is unit-testable."""
+    return status == "exported"

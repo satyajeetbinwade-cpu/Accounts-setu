@@ -391,21 +391,30 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
 
 def _apply_threshold(field_results: list[dict[str, Any]], threshold: int) -> list[dict[str, Any]]:
     """Tag each extracted field with the threshold decision:
-      * confidence >= threshold            -> auto_accepted (no badge shown)
-      * confidence < threshold (present)   -> reviewable ("AI — N%")
-      * not present (confidence is None)   -> reviewable ("not present")
-    Both flag kinds are reviewable by default. The ONE relaxation is the tax
-    rate↔amount pair: a half that is EXACTLY derivable from data the document
-    does carry (see _satisfied_by_derivation) is computed at export instead of
-    going to a human — arithmetic, never a guess. Everything else still gates."""
+      * confidence >= threshold   -> auto_accepted (no badge shown)
+      * confidence < threshold    -> reviewable ("AI — N%")
+      * present but no confidence -> reviewable ("present — unverified")
+      * genuinely not present     -> reviewable ("not present")
+
+    The last two are distinct: a value the model returned but did not score is
+    PRESENT-but-unverified, not absent — only is_present=0 is "not present".
+
+    The ONE relaxation is the tax rate↔amount pair: a half that is EXACTLY
+    derivable from data the document does carry (see _satisfied_by_derivation)
+    is computed at export instead of going to a human — arithmetic, never a
+    guess. Everything else still gates."""
     out: list[dict[str, Any]] = []
     for f in field_results:
         f = dict(f)
         label = FIELD_LABELS.get(f["field_name"], f["field_name"])
-        if not f.get("is_present") or f.get("confidence") is None:
+        if not f.get("is_present"):
             f["reviewable"] = True
             f["review_kind"] = "not_present"
             f["status_label"] = "not present"
+        elif f.get("confidence") is None:
+            f["reviewable"] = True
+            f["review_kind"] = "unverified"
+            f["status_label"] = "present — unverified"
         elif f["confidence"] >= threshold:
             f["reviewable"] = False
             f["review_kind"] = None
@@ -474,7 +483,8 @@ def get_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
     # computable from values it did (rate ↔ amount, or a sum). Computed here
     # so the review screen, the confirmation gate and the export all agree on
     # which fields are actually still missing.
-    available = _resolve_values({f["field_name"]: f for f in out}, threshold=get_threshold(db_path=db_path))
+    threshold = get_threshold(db_path=db_path)
+    available = _resolve_values({f["field_name"]: f for f in out}, threshold=threshold)
     for f in out:
         key = f["field_name"]
         eff = f["effective_value"]
@@ -487,6 +497,11 @@ def get_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
             f["derived_value"] = None
             f["derived_label"] = ""
             f["is_derived"] = False
+        # THE gate decision for this field, exposed so the review screen renders
+        # its flags and Resolve inputs from this one key and never recomputes
+        # it. get_reviewable_fields() filters on exactly this key, so the screen
+        # and the export gate can never disagree about a field.
+        f["requires_resolution"] = _requires_resolution(f, available, threshold)
     return out
 
 
@@ -618,54 +633,70 @@ def _to_number(raw: Any) -> Optional[float]:
 
 def _satisfied_by_derivation(field_name: str, available: dict[str, float]) -> bool:
     """True when a flagged field does NOT need human review because the
-    export can compute it exactly from data already on the document.
+    export can compute it exactly from data already available for the upload.
 
-    Scoped to the tax rate↔amount pairs: a tax RATE half never gates on its
-    own (its amount half is authoritative), and a tax AMOUNT half is
-    satisfied when its rate counterpart is available. Sum-derived fields
-    (total tax, invoice total) still gate as before — this function is the
-    only place that relaxes the gate, and it does so only where the other
-    half of the pair genuinely exists.
+    Scoped to the tax rate↔amount pairs (seed.PAIRED_DERIVATION_KEYS). A flagged
+    half is satisfied only when EVERY dependency of its derivation spec is
+    available — i.e. the value is genuinely computable, never merely waived:
+
+      * a tax AMOUNT half needs its RATE counterpart AND the taxable value;
+      * a tax RATE half needs its AMOUNT counterpart AND the taxable value.
+
+    The rate clause is the fix for a real defect: an unconditional waiver on all
+    three rate heads let a rate the model never found clear the gate silently,
+    so nothing ever asked a human for it. Sum-derived fields (total tax, invoice
+    total) are not paired, so they still gate. This is the only place the gate
+    is relaxed.
     """
-    if field_name in RATE_FIELD_KEYS:
-        return True
-    return field_name in PAIRED_DERIVATION_KEYS and field_name in available
+    if field_name not in PAIRED_DERIVATION_KEYS:
+        return False
+    spec = DERIVATIONS.get(field_name)
+    if spec is None:
+        return False
+    return all(dep in available for dep in spec.deps)
+
+
+def _requires_resolution(field: dict[str, Any], available: dict[str, float], threshold: int) -> bool:
+    """THE gate decision for one field: does it still need a human?
+
+    True when the field is unreviewed AND (absent, unscored, or below the
+    threshold) AND not exactly derivable from data the upload already has.
+    A field a human has already resolved never requires resolution again.
+
+    Shared by get_fields() (exposed as the per-field ``requires_resolution``
+    key), get_reviewable_fields() and _reviewable_keys(), so the review screen,
+    the confirmation gate and the export all read the SAME decision.
+    """
+    if field.get("resolved"):
+        return False
+    conf = field.get("confidence")
+    flagged = (not field.get("is_present")) or conf is None or conf < threshold
+    if not flagged:
+        return False
+    return not _satisfied_by_derivation(field["field_name"], available)
 
 
 def _reviewable_keys(tagged: list[dict[str, Any]], threshold: int) -> list[str]:
-    """The canonical fields that must be reviewed for a fresh extraction —
-    everything flagged EXCEPT the tax halves that are exactly derivable.
-    Used to set the upload's status at extraction time so the review queue
-    matches the live confirmation gate (get_reviewable_fields)."""
+    """The canonical fields that must be reviewed for a fresh extraction.
+    Uses the SAME decision as get_fields()/get_reviewable_fields()
+    (_requires_resolution) so the status set at extraction time can never
+    drift from the live confirmation gate."""
     available = _resolve_values({f["field_name"]: f for f in tagged}, threshold=threshold)
-    return [
-        f["field_name"] for f in tagged
-        if f["reviewable"] and not _satisfied_by_derivation(f["field_name"], available)
-    ]
+    return [f["field_name"] for f in tagged if _requires_resolution(f, available, threshold)]
 
 
 def get_reviewable_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
-    """Fields still gating this upload: unreviewed AND (sub-threshold or
-    not present). Once a reviewer resolves a field it drops off this list.
+    """Fields still gating this upload: exactly those get_fields() marks
+    ``requires_resolution``. Once a reviewer resolves a field it drops off.
 
-    A flagged tax half that can be DERIVED from trustworthy data does NOT
-    gate the upload — the export computes it (see seed.DERIVATIONS). This is
-    what lets an invoice that prints only the tax AMOUNT (the common case)
-    clear review without the reviewer hand-entering every rate, and vice-versa.
+    A flagged tax half that can be DERIVED from trustworthy data does NOT gate
+    — the export computes it (see seed.DERIVATIONS and _satisfied_by_derivation).
+    This lets an invoice that prints only the tax AMOUNT (the common case) clear
+    review without hand-entering every rate, and vice-versa — but a rate that is
+    NOT derivable (its amount counterpart or the taxable value is missing) now
+    gates, so a rate the model never found can no longer pass silently.
     """
-    threshold = get_threshold(db_path=db_path)
-    fields = get_fields(upload_id, db_path=db_path)
-    available = _resolve_values({f["field_name"]: f for f in fields}, threshold=threshold)
-    out = []
-    for r in fields:
-        if r["resolved"]:
-            continue
-        conf = r["confidence"]
-        if (not r["is_present"]) or conf is None or conf < threshold:
-            if _satisfied_by_derivation(r["field_name"], available):
-                continue
-            out.append(r)
-    return out
+    return [r for r in get_fields(upload_id, db_path=db_path) if r["requires_resolution"]]
 
 
 # ---------------------------------------------------------------------------

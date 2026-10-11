@@ -203,10 +203,16 @@ def test_derivable_tax_rates_do_not_gate(tmp_path):
 
 def test_absent_intra_state_igst_still_gates(tmp_path):
     """Neither half of the IGST pair is on an intra-state invoice and neither
-    is derivable, so it must still be reviewed (exactly as before)."""
+    is derivable, so BOTH halves still gate.
+
+    This used to assert only ``igst_amount``: the old gate waived every rate
+    head unconditionally, so ``igst_rate`` slipped through. The waiver was
+    narrowed (a rate now needs its amount counterpart AND the taxable value),
+    so the rate half gates too — the deliberate behaviour change on this
+    branch."""
     db_path, upload_id = _seed(tmp_path, {"cgst_amount": ("1,161.00", 93),
                                           "sgst_amount": ("1,161.00", 93)})
-    assert _reviewable(db_path, upload_id) == ["igst_amount"]
+    assert _reviewable(db_path, upload_id) == ["igst_amount", "igst_rate"]
 
 
 def test_sum_derived_fields_still_gate(tmp_path):

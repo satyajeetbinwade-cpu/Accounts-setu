@@ -393,15 +393,19 @@ def _field_row(f) -> rx.Component:
                             f.not_present,
                             c.confidence_badge("ai", label="not present"),
                             rx.cond(
-                                f.auto_accepted,
-                                c.confidence_badge("ai", label=f"Auto-accepted — {f.confidence}%"),
-                                c.confidence_badge("ai", pct=f.confidence),
+                                f.unverified,
+                                c.confidence_badge("ai", label="present — unverified"),
+                                rx.cond(
+                                    f.auto_accepted,
+                                    c.confidence_badge("ai", label=f"Auto-accepted — {f.confidence}%"),
+                                    c.confidence_badge("ai", pct=f.confidence),
+                                ),
                             ),
                         ),
                     ),
                 ),
                 rx.cond(
-                    f.resolved | f.auto_accepted | f.is_derived,
+                    (f.resolved | f.auto_accepted | f.is_derived) & ~InvoiceExtractState.is_read_only,
                     rx.button(
                         "Edit",
                         on_click=InvoiceExtractState.start_edit_field(f.field_name),
@@ -420,7 +424,8 @@ def _field_row(f) -> rx.Component:
             spacing="3",
         ),
         rx.cond(
-            f.flagged | (InvoiceExtractState.editing_field == f.field_name),
+            (f.flagged | (InvoiceExtractState.editing_field == f.field_name))
+            & ~InvoiceExtractState.is_read_only,
             rx.box(
                 rx.vstack(
                     rx.cond(
@@ -749,6 +754,14 @@ def _review_screen() -> rx.Component:
                             "Extracted fields",
                             f"Confidence threshold: {InvoiceExtractState.detail_threshold}% — "
                             "fields below it (or absent) are flagged.",
+                        ),
+                        rx.cond(
+                            InvoiceExtractState.is_read_only,
+                            c.inline_reason(
+                                "This upload is part of an immutable export batch — every field "
+                                "below is read-only. Correcting it means generating a new batch."
+                            ),
+                            rx.fragment(),
                         ),
                         _field_section("Header", "header"),
                         _field_section("Line items", "line_items"),
