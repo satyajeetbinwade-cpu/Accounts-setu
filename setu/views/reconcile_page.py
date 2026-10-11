@@ -540,7 +540,7 @@ def _upload_row(source_type: str) -> rx.Component:
             # The unfoldable detail panel: what this file's mapping could not
             # support, or which required columns went missing.
             rx.cond(
-                s.expanded,
+                ReconcileState.expanded_rows.contains(source_type),
                 rx.vstack(
                     rx.text(
                         "This file's gaps — and what they cost the report:",
@@ -577,7 +577,15 @@ def _upload_row(source_type: str) -> rx.Component:
                 ),
                 rx.fragment(),
             ),
-            rx.cond(s.message != "", c.inline_reason(s.message), rx.fragment()),
+            # The engine's own message, shown only where the row has no prose of
+            # its own to give (an unreadable file names the actual reason). On a
+            # wrong-file row the engine's sentence says the same thing as the
+            # row's status line, and printing both reads as two problems.
+            rx.cond(
+                (s.state == "failed") & (s.message != ""),
+                c.inline_reason(s.message),
+                rx.fragment(),
+            ),
             rx.cond(s.error != "", c.inline_reason(s.error), rx.fragment()),
             spacing="1",
             align="start",
@@ -603,10 +611,19 @@ def _upload_row(source_type: str) -> rx.Component:
                     id=f"rc_up_{source_type}",
                     accept=_ACCEPT,
                     multiple=False,
-                    disabled=s.busy | (s.state == "uploading"),
-                    border=f"1px dashed {t.Color.BORDER.value}",
+                    disabled=s.busy,
+                    # `rx.upload` defaults to a 5em-padded, centre-aligned DROP
+                    # ZONE. Here it has to read as one more action button in the
+                    # row's cluster, so the padding and centring are explicitly
+                    # overridden (and the border made solid to match its
+                    # siblings — the row itself already carries the dashed
+                    # "waiting" outline).
+                    padding="0",
+                    text_align="left",
+                    border=f"1px solid {t.Color.BORDER.value}",
                     border_radius="9px",
-                    background=t.Color.SURFACE.value,
+                    background="transparent",
+                    cursor="pointer",
                     on_drop=ReconcileState.upload_slot(
                         source_type, rx.upload_files(upload_id=f"rc_up_{source_type}")
                     ),

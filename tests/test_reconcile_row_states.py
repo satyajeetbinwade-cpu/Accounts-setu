@@ -533,3 +533,56 @@ def test_every_row_state_is_a_known_state():
     assert produced <= set(rs.ROW_STATES)
     assert {"waiting", "optional", "uploading", "ok", "reused", "review",
             "partial", "wrong", "not_ingested", "failed"} <= set(rs.ROW_STATES)
+
+
+def test_the_busy_row_says_what_it_is_doing(monkeypatch):
+    """THE state whose whole job is to prove the page is not frozen. Its text
+    is decided by `busy`, not by the last verdict — showing "identified 97%"
+    under a spinner would say the file has already been read."""
+    state = _slot_state(slot_busy="gstr2b")
+    monkeypatch.setattr(rs, "_list_files", lambda *a, **k: ["GSTR2B_082026.xlsx"])
+    monkeypatch.setattr(rs, "_newest_file", lambda *a, **k: "GSTR2B_082026.xlsx")
+
+    rs.ReconcileState._load_slots(state)
+
+    row = state.slot_rows["gstr2b"]
+    assert row.state == "uploading"
+    assert row.busy is True
+    assert "Uploading & normalizing" in row.status_text
+    # ... and no percentage is claimed anywhere on it.
+    assert "%" not in row.status_text
+    # Every other row is untouched by the one in flight.
+    assert state.slot_rows["credit_notes"].state == "optional"
+
+
+def test_every_state_has_its_own_words(monkeypatch):
+    """Guards a whole class of mistake: a status-text constant that is defined
+    and never wired, leaving two states that read identically."""
+    seen: dict[str, str] = {}
+
+    cases = [
+        ("empty", None, {"filename": ""}, "choosing a file"),
+        ("failed", _stored(status="empty"), {}, "untouched"),
+        ("not_ingested", None, {}, "never normalized"),
+    ]
+    for code, stored, kwargs, needle in cases:
+        info = _info(monkeypatch, stored, **kwargs)
+        assert info["code"] == code
+        assert needle in info["status_text"], (code, info["status_text"])
+        seen[code] = info["status_text"]
+
+    reused = _info(monkeypatch, _stored(llm_cached=True, notes=[_REUSE_SENTENCE]))
+    ok = _info(monkeypatch, _stored(model_used="gpt-4o",
+                                    classification={"confidence": 97}))
+    review = _info(monkeypatch, _stored(
+        mapping=[_mapping_entry("invoice_number", "Inv No", 0.4, required=True)]))
+    partial = _info(monkeypatch, _stored(status="partial", unmapped_required=["gstin"]))
+
+    texts = {
+        "reused": reused["status_text"], "ok": ok["status_text"],
+        "review": review["status_text"], "partial": partial["status_text"],
+        **seen,
+    }
+    assert len(set(texts.values())) == len(texts), (
+        "two states read identically: " + repr(texts)
+    )

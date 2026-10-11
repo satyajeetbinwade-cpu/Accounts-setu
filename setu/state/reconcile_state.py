@@ -251,7 +251,6 @@ class SlotRow:
     action_label: str = "Choose file"  # the row's own file input's label
     primary_label: str = ""         # the state's primary action, when it has one
     detail_lines: list[str] = field(default_factory=list)  # the expandable panel
-    expanded: bool = False           # whether that panel is unfolded
 
 
 @dataclass
@@ -482,7 +481,9 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     blockers: list[str] = []
     still_needed: str = ""                  # "Still needed: …"; "" once the run can go
     # Rows whose detail panel is unfolded. Presentation only — it changes
-    # nothing about a verdict, only whether a list is shown.
+    # nothing about a verdict, only whether a list is shown. The row reads it
+    # straight from here (rather than from a copy on `SlotRow`) so unfolding a
+    # panel is instant and does not re-run `_slot_info` for every row.
     expanded_rows: list[str] = []
 
     @rx.var
@@ -1009,6 +1010,17 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 suggested = ""
             code = info["code"]
             busy = self.slot_busy == source_type
+            # An optional row left empty says the MOCKUP's sentence, not its
+            # hint: the hint explains what the register is, and this row's job
+            # is to say that skipping it is fine. A busy row overrides both —
+            # while the file is being read, "what it found last time" is stale
+            # and "what this row wants" is no longer the question.
+            if busy:
+                status_text = _UPLOADING_TEXT
+            elif code == "empty" and is_optional:
+                status_text = _OPTIONAL_EMPTY_TEXT
+            else:
+                status_text = info["status_text"]
             out.append(
                 SlotRow(
                     source_type=source_type,
@@ -1034,12 +1046,11 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                     suggested_source_type=suggested,
                     suggested_label=discovery.source_type_label(suggested) if suggested else "",
                     state=self._row_state(code, busy, is_optional),
-                    status_text=info["status_text"],
+                    status_text=status_text,
                     identification=info["identification"],
                     action_label=_action_label(code, filename, is_optional),
                     primary_label=info.get("primary_label", ""),
                     detail_lines=list(info.get("detail_lines") or []),
-                    expanded=source_type in self.expanded_rows,
                 )
             )
         self.slots = out
@@ -1206,6 +1217,20 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 ],
             }
         if status == "partial" or needs_review:
+            # What the unfoldable panel lists. Prefer the stored caveats (the
+            # capabilities this file's gaps cost the report); otherwise name the
+            # fields themselves, so the panel a review row offers is never EMPTY
+            # — a button that opens nothing is worse than no button.
+            review_fields = [
+                f"{m['canonical_field']} — mapped at "
+                f"{round(float(m['confidence']) * 100)}% confidence, below the "
+                f"{round(float(threshold) * 100)}% bar"
+                for m in low_conf
+            ]
+            review_fields += [
+                f"{m['canonical_field']} — required column could not be mapped"
+                for m in unmapped
+            ]
             if needs_review:
                 chip_label = f"⚠ {needs_review} field(s) need review"
                 status_text = (
@@ -1224,7 +1249,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 **empty, "code": "review", "chip_variant": "ai", "rows": rows,
                 "needs_review": needs_review, "caveats": caveats, "chip_label": chip_label,
                 "resolved": True, "status_text": status_text, "primary_label": primary_label,
-                "detail_lines": caveats,
+                "detail_lines": caveats or review_fields or [status_text],
             }
         reused = _shape_note(stored)
         if reused:
