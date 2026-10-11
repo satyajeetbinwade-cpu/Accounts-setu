@@ -893,6 +893,32 @@ def ai_progress(label, *, visible=None) -> rx.Component:
     )
 
 
+def indeterminate_bar(*, width: str = "100%", height: str = "4px") -> rx.Component:
+    """A moving stripe for work that has no meaningful percentage.
+
+    Reading a file and asking a model to map its columns takes 15-25s and
+    reports no progress along the way. A bar that fills would be inventing a
+    number the user could act on, so this one scrolls instead. Same treatment
+    as `ai_progress` (which shares the `setu-indeterminate` keyframes).
+    """
+    return rx.el.div(
+        rx.el.div(
+            style={
+                "height": height,
+                "border_radius": "999px",
+                "background": (
+                    "repeating-linear-gradient(90deg, "
+                    + t.Color.ACCENT.value + " 0 24px, "
+                    + t.Color.BORDER.value + " 24px 48px)"
+                ),
+                "animation": "setu-indeterminate 1.1s linear infinite",
+                "width": "100%",
+            },
+        ),
+        style={"width": width, "overflow": "hidden", "border_radius": "999px"},
+    )
+
+
 def upload_progress_row(
     row,
 ) -> rx.Component:

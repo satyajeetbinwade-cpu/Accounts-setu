@@ -49,10 +49,15 @@ class _Upload:
 def _state(tmp_path, monkeypatch, *, period="2026-08", client_id=1, **extra):
     """A stand-in self whose storage root is tmp_path, with the real
     `_set_slot_error` bound (it only reads/writes `slot_errors`)."""
-    monkeypatch.setattr(
-        rs, "source_data_path",
-        lambda client_id, period, source_type: _mk(tmp_path, client_id, period, source_type),
-    )
+    # Redirect the REAL data root for the duration of the test. `store_upload`
+    # resolves `source_data_path` inside src.data_paths, so patching that
+    # module's DATA_ROOT is what actually keeps an upload out of the repo's
+    # own data/ tree — patching the state module's imported name would not.
+    from src import data_paths as dp
+    from src.shared import discovery as _discovery
+
+    monkeypatch.setattr(dp, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(_discovery, "DATA_ROOT", tmp_path)
     calls: list[tuple] = []
     st = SimpleNamespace(
         ctx_client_id=client_id,
@@ -61,6 +66,7 @@ def _state(tmp_path, monkeypatch, *, period="2026-08", client_id=1, **extra):
         selections={},
         slot_errors={},
         slot_busy="",
+        expanded_rows=[],
         upload_error="",
         error="",
         flash="",
@@ -212,15 +218,22 @@ def _slot_state(**extra):
     `_compute_readiness` touch."""
     st = SimpleNamespace(
         ctx_client_id=1, ctx_period="2026-08", ctx_recon_type="GST",
-        selections={}, slot_errors={}, slot_busy="", slots=[],
-        books_ok=False, portal_ok=False, ready=False, blockers=[],
-        _slot_info=lambda source_type, filename: {
+        selections={}, slot_errors={}, slot_busy="", slots=[], slot_rows={},
+        expanded_rows=[],
+        books_ok=False, portal_ok=False, ready=False, blockers=[], still_needed="",
+        _slot_info=lambda source_type, filename, **k: {
             "code": "empty", "chip_label": "— no file yet", "chip_variant": "placeholder",
             "rows": 0, "needs_review": 0, "required_missing": 0, "message": "",
             "caveats": [], "resolved": False, "suggested_source_type": "",
+            "status_text": "", "identification": "", "primary_label": "",
+            "detail_lines": [],
         },
     )
     st._compute_readiness = lambda: rs.ReconcileState._compute_readiness(st)
+    st._effective_file = lambda source_type, files: rs.ReconcileState._effective_file(
+        st, source_type, files
+    )
+    st._row_state = rs.ReconcileState._row_state
     st.__dict__.update(extra)
     return st
 
@@ -230,6 +243,7 @@ def test_every_row_gets_its_own_upload_input(tmp_path, monkeypatch):
     identity of the row IS the destination."""
     state = _slot_state()
     monkeypatch.setattr(rs, "_list_files", lambda *a, **k: [])
+    monkeypatch.setattr(rs, "_newest_file", lambda *a, **k: "")
     rs.ReconcileState._load_slots(state)
 
     ids = [s.upload_id for s in state.slots]
@@ -242,6 +256,7 @@ def test_the_note_row_reads_as_optional_not_as_the_books_side(tmp_path, monkeypa
     register must not claim to be the mandatory books side."""
     state = _slot_state()
     monkeypatch.setattr(rs, "_list_files", lambda *a, **k: [])
+    monkeypatch.setattr(rs, "_newest_file", lambda *a, **k: "")
     rs.ReconcileState._load_slots(state)
 
     by_type = {s.source_type: s for s in state.slots}
@@ -289,14 +304,16 @@ def test_a_suggestion_for_a_slot_this_run_does_not_show_is_dropped(monkeypatch):
     """A TDS run must not offer to move a file into a GST-only row."""
     state = _slot_state(
         ctx_recon_type="TDS",
-        _slot_info=lambda source_type, filename: {
+        _slot_info=lambda source_type, filename, **k: {
             "code": "wrong", "chip_label": "✕ looks like the wrong file type",
             "chip_variant": "danger", "rows": 0, "needs_review": 0,
             "required_missing": 0, "message": "", "caveats": [], "resolved": False,
-            "suggested_source_type": "gstr2b",
+            "suggested_source_type": "gstr2b", "status_text": "", "identification": "",
+            "primary_label": "", "detail_lines": [],
         },
     )
     monkeypatch.setattr(rs, "_list_files", lambda *a, **k: [])
+    monkeypatch.setattr(rs, "_newest_file", lambda *a, **k: "")
     rs.ReconcileState._load_slots(state)
 
     assert state.slots, "a TDS run still has rows"
@@ -316,7 +333,10 @@ def test_removing_a_row_keeps_the_users_file_on_disk(tmp_path, monkeypatch):
 
     rs.ReconcileState.remove_slot.fn(st, "gstr2b")
 
-    assert "gstr2b" not in st.selections
+    # An EXPLICIT empty string, not a removed key: the row has been answered
+    # with "nothing", so `_load_slots` must not preselect the newest file on
+    # disk again and make Remove look like it did nothing.
+    assert st.selections["gstr2b"] == ""
     assert saved.exists()
 
 
@@ -339,6 +359,7 @@ def test_the_page_rows_and_the_state_rows_agree(monkeypatch):
     }, "the page's literal rows drifted from what the state offers"
 
     monkeypatch.setattr(rs, "_list_files", lambda *a, **k: [])
+    monkeypatch.setattr(rs, "_newest_file", lambda *a, **k: "")
     for recon_type, source_types in _ROWS_BY_RECON_TYPE:
         state = _slot_state(ctx_recon_type=recon_type)
         rs.ReconcileState._load_slots(state)
