@@ -2,7 +2,13 @@
 
 A full-page, centered sign-in card. Faithful to ``render_login_gate``: generic
 failure message, an explicit "multiple failed attempts logged" notice from
-attempt 4, the first-run admin hint, and the inactivity sign-out message.
+attempt 4, and the inactivity sign-out message.
+
+This screen deliberately shows NO credential material: no pre-filled values,
+no example ID, and no bootstrap "first run" hint. The fields are empty on
+load, the password is masked and marked ``autoComplete="off"`` so the browser
+neither offers nor remembers it, and every credential check happens
+server-side in ``src.auth.service``.
 """
 
 from __future__ import annotations
@@ -13,7 +19,16 @@ from setu.foundation import tokens as t
 from setu.state import AuthState
 
 
-def _field(label: str, name: str, *, type_: str = "text", placeholder: str = "") -> rx.Component:
+def _field(
+    label: str,
+    name: str,
+    *,
+    type_: str = "text",
+    placeholder: str = "",
+    auto_complete: str | None = None,
+) -> rx.Component:
+    custom_attrs = {"autoComplete": auto_complete} if auto_complete is not None else {}
+
     return rx.vstack(
         rx.text(label, style=t.TEXT["label"]),
         rx.input(
@@ -22,6 +37,7 @@ def _field(label: str, name: str, *, type_: str = "text", placeholder: str = "")
             placeholder=placeholder,
             width="100%",
             size="3",
+            custom_attrs=custom_attrs,
         ),
         spacing="1",
         align="start",
@@ -76,11 +92,17 @@ def _login_card() -> rx.Component:
             ),
             rx.fragment(),
         ),
-        # Credentials
+        # Credentials. Both fields start empty — no example ID, no masked
+        # placeholder that reads as a filled-in secret.
         rx.form(
             rx.vstack(
-                _field("Username", "username", placeholder="your.username"),
-                _field("Password", "password", type_="password", placeholder="••••••••"),
+                _field("Username", "username", auto_complete="off"),
+                _field(
+                    "Password",
+                    "password",
+                    type_="password",
+                    auto_complete="off",
+                ),
                 rx.cond(
                     AuthState.login_error != "",
                     rx.vstack(
@@ -119,21 +141,6 @@ def _login_card() -> rx.Component:
             ),
             on_submit=AuthState.submit_login,
             reset_on_submit=False,
-            width="100%",
-        ),
-        # First-run hint
-        rx.box(
-            rx.text(
-                "First run? Default admin login is ",
-                rx.text.span("admin / ChangeMe123", font_weight="700"),
-                " — change this password immediately after signing in.",
-                font_size="12px",
-                color=t.Color.TEXT_SECONDARY.value,
-            ),
-            background="#EAF0FB",
-            border="1px solid #D4E1F8",
-            border_radius="10px",
-            padding="10px 14px",
             width="100%",
         ),
         spacing="4",

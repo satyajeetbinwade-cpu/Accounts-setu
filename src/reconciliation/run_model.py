@@ -23,9 +23,10 @@ def resolve_client_id(folder: str, *, db_path=None) -> Optional[int]:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
     try:
+        from src.auth import access
         from src.clients import service as clients
 
-        candidates = clients.list_clients(include_inactive=True)
+        candidates = clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True)
     except Exception:  # noqa: BLE001
         return None
     target = norm(folder)
@@ -53,9 +54,10 @@ def client_gstin_for(client_id: Optional[int], *, db_path=None) -> str:
     if not client_id:
         return ""
     try:
+        from src.auth import access
         from src.clients import service as clients
 
-        client = clients.get_client(client_id, db_path=db_path)
+        client = clients.find_client(client_id, viewer=access.SYSTEM_VIEWER, db_path=db_path)
     except Exception:  # noqa: BLE001
         return ""
     return str((client or {}).get("gstin") or "").strip()

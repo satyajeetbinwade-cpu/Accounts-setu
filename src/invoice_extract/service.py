@@ -58,6 +58,7 @@ from io import BytesIO
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.invoice_extract import ai_extractor
 from src.invoice_extract import db as idb
 from src.invoice_extract import extractor
@@ -430,16 +431,33 @@ def _duplicate_keys(tagged: list[dict[str, Any]]) -> dict[str, Optional[str]]:
 
 
 def list_uploads(
-    *, client_id: Optional[int] = None, status: Optional[str] = None, batch_id: Optional[str] = None, db_path=None,
+    *, client_id: Optional[int] = None, status: Optional[str] = None, batch_id: Optional[str] = None,
+    viewer=None, db_path=None,
 ) -> list[dict[str, Any]]:
+    """Uploads, restricted to the viewer's own clients."""
     conn = _connect(db_path)
     try:
-        return idb.list_uploads(conn, client_id=client_id, status=status, batch_id=batch_id)
+        rows = idb.list_uploads(conn, client_id=client_id, status=status, batch_id=batch_id)
     finally:
         conn.close()
+    return _scoped_uploads(rows, viewer)
 
 
-def get_upload(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+def _scoped_uploads(rows: list[dict[str, Any]], viewer) -> list[dict[str, Any]]:
+    """Drop uploads whose client this viewer doesn't own (None = admin)."""
+    owned = access.owned_client_ids(viewer)
+    if owned is None:
+        return rows
+    return [r for r in rows if int(r.get("client_id") or 0) in owned]
+
+
+def _raw_upload(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+    """The upload row with NO ownership filter.
+
+    For internal decisions about an upload the caller has already been
+    authorised to act on (the export gate, a status echo). Anything reached
+    from the UI must use ``get_upload(..., viewer=...)`` instead.
+    """
     conn = _connect(db_path)
     try:
         return idb.get_upload(conn, upload_id)
@@ -447,9 +465,36 @@ def get_upload(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
         conn.close()
 
 
-def get_upload_bytes(upload_id: int, *, db_path=None) -> Optional[bytes]:
+def _may_see_upload(conn, upload_id: int, viewer) -> bool:
+    """Whether this viewer may act on that upload — the gate for every
+    id-keyed invoice-extract operation."""
+    row = idb.get_upload(conn, upload_id)
+    if row is None:
+        return False
+    owned = access.owned_client_ids(viewer)
+    if owned is None:
+        return True
+    return int(row.get("client_id") or 0) in owned
+
+
+def get_upload(upload_id: int, *, viewer=None, db_path=None) -> Optional[dict[str, Any]]:
+    """One upload, or None when it isn't this viewer's (the id arrives from the
+    UI, so "not yours" and "no such upload" give the same answer)."""
     conn = _connect(db_path)
     try:
+        if not _may_see_upload(conn, upload_id, viewer):
+            return None
+        return idb.get_upload(conn, upload_id)
+    finally:
+        conn.close()
+
+
+def get_upload_bytes(upload_id: int, *, viewer=None, db_path=None) -> Optional[bytes]:
+    """The stored file — refused unless the upload is the viewer's."""
+    conn = _connect(db_path)
+    try:
+        if not _may_see_upload(conn, upload_id, viewer):
+            return None
         return idb.get_upload_bytes(conn, upload_id)
     finally:
         conn.close()
@@ -673,31 +718,46 @@ def get_reviewable_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-def list_review_queue(*, status: Optional[str] = "open", db_path=None) -> list[dict[str, Any]]:
+def list_review_queue(
+    *, status: Optional[str] = "open", viewer=None, db_path=None
+) -> list[dict[str, Any]]:
+    """This module's own review queue, restricted to the viewer's uploads."""
     conn = _connect(db_path)
     try:
         entries = idb.list_queue(conn, status=status)
+        owned = access.owned_client_ids(viewer)
         out = []
         for e in entries:
             up = idb.get_upload(conn, e["upload_id"])
+            if owned is not None and int((up or {}).get("client_id") or 0) not in owned:
+                continue
             out.append({**e, "upload": up})
         return out
     finally:
         conn.close()
 
 
-def review_queue_summary(*, db_path=None) -> dict[str, Any]:
+def review_queue_summary(*, viewer=None, db_path=None) -> dict[str, Any]:
     """Headline count of uploads awaiting resolution + a grouped-by-client
     breakdown (Foundation 3.6 headline -> grouped -> detail)."""
     conn = _connect(db_path)
     try:
         entries = idb.list_queue(conn, status="open")
+        owned = access.owned_client_ids(viewer)
         by_client: dict[int, int] = {}
+        open_count = 0
         for e in entries:
             up = idb.get_upload(conn, e["upload_id"])
-            if up:
-                by_client[up["client_id"]] = by_client.get(up["client_id"], 0) + 1
-        return {"open_count": len(entries), "by_client": by_client}
+            if not up:
+                continue
+            client_id = int(up["client_id"] or 0)
+            if owned is not None and client_id not in owned:
+                # A count is data: another user's queue must not move this
+                # user's figures.
+                continue
+            open_count += 1
+            by_client[client_id] = by_client.get(client_id, 0) + 1
+        return {"open_count": open_count, "by_client": by_client}
     finally:
         conn.close()
 
@@ -729,7 +789,7 @@ def resolve_field(
     remaining = get_reviewable_fields(upload_id, db_path=db_path)
     if not remaining:
         _confirm_upload(upload_id, actor=actor, db_path=db_path)
-    return {"remaining": remaining, "status": get_upload(upload_id, db_path=db_path)["status"]}
+    return {"remaining": remaining, "status": _raw_upload(upload_id, db_path=db_path)["status"]}
 
 
 def confirm_upload(upload_id: int, *, actor: str, db_path=None) -> None:
@@ -781,7 +841,7 @@ def discard_upload(upload_id: int, *, actor: str, db_path=None) -> None:
 def is_exportable(upload_id: int, *, db_path=None) -> tuple[bool, str]:
     """The HARD GATE, queryable by the UI: an upload is exportable only when
     Confirmed AND no flagged field remains unresolved. Returns (ok, reason)."""
-    upload = get_upload(upload_id, db_path=db_path)
+    upload = _raw_upload(upload_id, db_path=db_path)
     if upload is None:
         return False, "Upload not found."
     if upload["status"] == STATUS_EXPORTED:
@@ -834,7 +894,7 @@ def _export_row_values(conn: sqlite3.Connection, upload_id: int, *, threshold: i
 
 
 def generate_export(
-    *, upload_ids: list[int], actor: str, fmt: str = "xlsx", db_path=None,
+    *, upload_ids: list[int], actor: str, fmt: str = "xlsx", viewer=None, db_path=None,
 ) -> dict[str, Any]:
     """Generate a purchase-register batch from one or more Confirmed uploads.
 
@@ -846,6 +906,16 @@ def generate_export(
         raise InvoiceExtractError("Select at least one Confirmed upload to export.")
 
     blocked: list[str] = []
+    conn = _connect(db_path)
+    try:
+        for uid in upload_ids:
+            # An id that isn't this viewer's is refused outright — the export
+            # would otherwise hand back another client's invoice data.
+            if not _may_see_upload(conn, uid, viewer):
+                raise InvoiceExtractError("No such export batch.")
+    finally:
+        conn.close()
+
     for uid in upload_ids:
         ok, reason = is_exportable(uid, db_path=db_path)
         if not ok:
@@ -903,12 +973,27 @@ def _build_export_bytes(rows: list[dict[str, Any]], *, fmt: str) -> bytes:
     return buf.getvalue()
 
 
-def list_export_batches(*, db_path=None) -> list[dict[str, Any]]:
+def list_export_batches(*, viewer=None, db_path=None) -> list[dict[str, Any]]:
+    """Export batches, restricted to the viewer's own clients."""
     conn = _connect(db_path)
     try:
-        return idb.list_export_batches(conn)
+        rows = idb.list_export_batches(conn)
     finally:
         conn.close()
+    owned = access.owned_client_ids(viewer)
+    if owned is None:
+        return rows
+    return [b for b in rows if int(b.get("client_id") or 0) in owned]
+
+
+def _require_batch_access(conn, batch_id: int, viewer) -> dict[str, Any]:
+    """Refuse an export batch that isn't the viewer's — the gate for
+    regenerating a batch's bytes."""
+    row = idb.get_export_batch(conn, batch_id)
+    owned = access.owned_client_ids(viewer)
+    if row is None or (owned is not None and int(row.get("client_id") or 0) not in owned):
+        raise InvoiceExtractError("No such export batch.")
+    return row
 
 
 def get_export_batch(batch_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
@@ -919,13 +1004,15 @@ def get_export_batch(batch_id: int, *, db_path=None) -> Optional[dict[str, Any]]
         conn.close()
 
 
-def regenerate_export_bytes(batch_id: int, *, db_path=None) -> bytes:
+def regenerate_export_bytes(batch_id: int, *, viewer=None, db_path=None) -> bytes:
     """Rebuild the downloadable file for an existing (immutable) batch by
     reading its recorded uploads. This does NOT mutate the batch — it is a
     convenience re-download of the exact recorded row set."""
-    batch = get_export_batch(batch_id, db_path=db_path)
-    if batch is None:
-        raise InvoiceExtractError("Export batch not found.")
+    conn = _connect(db_path)
+    try:
+        batch = _require_batch_access(conn, batch_id, viewer)
+    finally:
+        conn.close()
     threshold = get_threshold(db_path=db_path)
     conn = _connect(db_path)
     try:

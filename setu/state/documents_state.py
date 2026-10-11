@@ -209,7 +209,7 @@ class DocumentsState(SharedUploadState):
     def _detail_client_id(self) -> int:
         if not self.selected_document_id:
             return 0
-        doc = documents.get_document(self.selected_document_id)
+        doc = documents.find_document(self.selected_document_id, viewer=self._viewer())
         return doc["client_id"] if doc else 0
 
     def _codes(self) -> set[str]:
@@ -224,7 +224,7 @@ class DocumentsState(SharedUploadState):
         self.embedded = False
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self._load_all()
 
@@ -240,7 +240,7 @@ class DocumentsState(SharedUploadState):
         self.vault_client_id = int(client_id or 0)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self._load_all()
 
@@ -253,12 +253,13 @@ class DocumentsState(SharedUploadState):
 
     def _load_documents(self) -> None:
         rows = documents.list_documents(
+            viewer=self._viewer(),
             client_id=self.vault_client_id or None,
             doc_type=None if self.filter_type == "All" else self.filter_type,
             period=self.filter_period or None,
             search=self.filter_search or None,
         )
-        dups = documents.find_duplicate_filenames()
+        dups = documents.find_duplicate_filenames(viewer=self._viewer())
         self.documents = [
             DocumentRow(
                 document_id=d["document_id"],
@@ -268,7 +269,7 @@ class DocumentsState(SharedUploadState):
                 review_status=d["review_status"],
                 classification_pct=int(d.get("classification_pct") or 0),
                 is_deleted=bool(d.get("is_deleted")),
-                client_label=(clients.get_client(d["client_id"]) or {}).get("legal_name", "—"),
+                client_label=(clients.find_client(d["client_id"], viewer=self._viewer()) or {}).get("legal_name", "—"),
                 uploaded_at=str(d.get("uploaded_at") or d.get("created_at") or "").replace("T", " ").split(".")[0],
                 file_size=int(d.get("file_size") or 0),
                 file_size_label=_human_size(int(d.get("file_size") or 0)),
@@ -278,12 +279,12 @@ class DocumentsState(SharedUploadState):
         ]
 
     def _load_detail(self) -> None:
-        doc = documents.get_document(self.selected_document_id)
+        doc = documents.find_document(self.selected_document_id, viewer=self._viewer())
         if doc is None:
             self.selected_document_id = 0
             return
-        client = clients.get_client(doc["client_id"])
-        versions = documents.list_versions(doc["document_id"])
+        client = clients.find_client(doc["client_id"], viewer=self._viewer())
+        versions = documents.list_versions(doc["document_id"], viewer=self._viewer())
         latest = versions[0] if versions else None
         self.detail_filename = latest["filename"] if latest else "(no version)"
         self.detail_client = client["legal_name"] if client else "—"
@@ -305,26 +306,26 @@ class DocumentsState(SharedUploadState):
             for v in versions
         ]
         self.evidence = [
-            EvidenceRow(target_label=link["target_label"]) for link in documents.used_in(doc["document_id"])
+            EvidenceRow(target_label=link["target_label"]) for link in documents.used_in(doc["document_id"], viewer=self._viewer())
         ]
         self.reassign_client_id = doc["client_id"]
 
     def _load_queue(self) -> None:
-        self.queue_progress = documents.queue_progress()
+        self.queue_progress = documents.queue_progress(viewer=self._viewer())
         self.queue = [
             QueueRow(
                 entry_id=e["entry_id"],
                 document_id=e["document_id"],
                 reason=e["reason"],
                 doc_type=e.get("doc_type") or "—",
-                client_label=(clients.get_client(e["client_id"]) or {}).get("legal_name", "—")
+                client_label=(clients.find_client(e["client_id"], viewer=self._viewer()) or {}).get("legal_name", "—")
                 if e.get("client_id")
                 else "—",
                 period=e.get("period") or "",
                 flag_kind=_flag_kind(e["reason"]),
                 flag_label=_flag_label(e["reason"]),
             )
-            for e in documents.list_queue("pending")
+            for e in documents.list_queue("pending", viewer=self._viewer())
         ]
         for e in self.queue:
             self.queue_type.setdefault(str(e.entry_id), "(keep as-is)")
@@ -339,7 +340,9 @@ class DocumentsState(SharedUploadState):
                 deleted_at=str(d.get("deleted_at") or "").replace("T", " ").split(".")[0],
                 deleted_by=d.get("deleted_by") or "",
             )
-            for d in documents.list_recently_deleted(client_id=self.vault_client_id or None)
+            for d in documents.list_recently_deleted(
+                viewer=self._viewer(), client_id=self.vault_client_id or None
+            )
         ]
 
     # ------------------------------------------------------------------
@@ -426,6 +429,7 @@ class DocumentsState(SharedUploadState):
                     file_bytes=self._pending_bytes(pf.key),
                     period=self.upload_period or None,
                     actor=self.username,
+                    viewer=self._viewer(),
                 )
                 if result["routed_to_queue"]:
                     self._set_stage(pf.key, "needs_review", label="Routed to Review Queue")
@@ -456,6 +460,7 @@ class DocumentsState(SharedUploadState):
                     file_bytes=data,
                     period=self.upload_period or None,
                     actor=self.username,
+                    viewer=self._viewer(),
                 )
             except documents.DocumentError as exc:
                 self.upload_error = str(exc)
@@ -497,6 +502,7 @@ class DocumentsState(SharedUploadState):
                 filename=f.filename or "upload",
                 file_bytes=data,
                 actor=self.username,
+                viewer=self._viewer(),
             )
             self.flash = "New version saved — evidence links and history preserved."
         except documents.DocumentError as exc:
@@ -526,6 +532,7 @@ class DocumentsState(SharedUploadState):
                 self.reassign_client_id,
                 reason=self.reassign_reason,
                 actor=self.username,
+                viewer=self._viewer(),
             )
             self.flash = "Document reassigned — version history and evidence links preserved."
             self.reassign_reason = ""
@@ -540,6 +547,7 @@ class DocumentsState(SharedUploadState):
     def soft_delete(self):
         documents.soft_delete_document(
             self.selected_document_id, reason=self.delete_reason or None, actor=self.username,
+            viewer=self._viewer(),
         )
         self.flash = "Document soft-deleted — recoverable from Recently Deleted."
         self.delete_reason = ""
@@ -547,7 +555,7 @@ class DocumentsState(SharedUploadState):
 
     @rx.event
     def restore_document(self, document_id: int):
-        documents.restore_document(document_id, actor=self.username)
+        documents.restore_document(document_id, actor=self.username, viewer=self._viewer())
         self.flash = "Document restored."
         self._load_all()
 
@@ -568,6 +576,7 @@ class DocumentsState(SharedUploadState):
             resolved_doc_type=None if corrected == "(keep as-is)" else corrected,
             notes=self.queue_notes.get(str(entry_id)) or None,
             actor=self.username,
+            viewer=self._viewer(),
         )
         self.flash = "Resolved and filed."
         self._load_all()
@@ -583,6 +592,7 @@ class DocumentsState(SharedUploadState):
             resolved_doc_type=None,
             notes=self.queue_notes.get(str(entry_id)) or None,
             actor=self.username,
+            viewer=self._viewer(),
         )
         self.flash = "Resolved and filed."
         self.queue_open_entry_id = 0
@@ -601,6 +611,7 @@ class DocumentsState(SharedUploadState):
                 resolved_doc_type=corrected,
                 notes=self.queue_notes.get(str(entry_id)) or None,
                 actor=self.username,
+                viewer=self._viewer(),
             )
         else:
             documents.resolve_queue_entry(
@@ -608,6 +619,7 @@ class DocumentsState(SharedUploadState):
                 resolved_doc_type=None,
                 notes=self.queue_notes.get(str(entry_id)) or None,
                 actor=self.username,
+                viewer=self._viewer(),
             )
         self.flash = "Resolved and filed."
         self.queue_open_entry_id = 0
@@ -626,7 +638,9 @@ class DocumentsState(SharedUploadState):
         """The 'discard' resolution option — removes the document outright."""
         for e in self.queue:
             if e.entry_id == entry_id:
-                documents.discard_document(e.document_id, actor=self.username)
+                documents.discard_document(
+                    e.document_id, actor=self.username, viewer=self._viewer()
+                )
                 break
         self.flash = "Document discarded."
         self.discard_confirm = False
@@ -733,7 +747,9 @@ class DocumentsState(SharedUploadState):
     @rx.event
     def save_notes(self):
         try:
-            documents.set_document_notes(self.selected_document_id, self.detail_notes_draft)
+            documents.set_document_notes(
+                self.selected_document_id, self.detail_notes_draft, viewer=self._viewer()
+            )
             self.detail_notes = self.detail_notes_draft
             self.flash = "Note saved."
         except documents.DocumentError as exc:
@@ -758,6 +774,7 @@ class DocumentsState(SharedUploadState):
     def confirm_soft_delete(self):
         documents.soft_delete_document(
             self.selected_document_id, reason=self.delete_reason or None, actor=self.username,
+            viewer=self._viewer(),
         )
         self.flash = "Document soft-deleted — recoverable from Recently Deleted."
         self.delete_reason = ""
@@ -772,7 +789,7 @@ class DocumentsState(SharedUploadState):
         """Build the shared viewer from the current version's bytes."""
         import base64
 
-        v = documents.get_current_version(self.selected_document_id)
+        v = documents.get_current_version(self.selected_document_id, viewer=self._viewer())
         if v is None:
             self.viewer_open = False
             return

@@ -253,7 +253,7 @@ class AdminState(AuthState):
         from src.shared import discovery
 
         try:
-            self.team_clients = discovery.list_clients()
+            self.team_clients = discovery.list_clients(self._viewer())
         except Exception:  # noqa: BLE001
             self.team_clients = []
         if self.team_selected_client:

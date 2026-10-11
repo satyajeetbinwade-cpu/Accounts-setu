@@ -28,6 +28,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.filing import db as fdb
 from src.filing.schema import init_filing_schema
 
@@ -345,6 +346,7 @@ def _link_evidence_document(document_id: int, filing_id: int, actor: str) -> Non
         from src.documents import service as documents
 
         documents.link_evidence(
+            viewer=access.SYSTEM_VIEWER,
             document_id=document_id, target_type="filing_record",
             target_id=filing_id, target_label=f"Filing #{filing_id}",
             actor=actor,

@@ -33,6 +33,23 @@ def _row_to_dict(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Opti
 # ---------------------------------------------------------------------------
 
 
+def _owner_for_client(conn: sqlite3.Connection, client_id: int) -> Optional[int]:
+    """The owning user of the client this document belongs to, or ``None``.
+
+    Tolerant of a database that has documents but not the client master (a
+    module-scoped fixture): the document is then unowned, which every read path
+    treats as admin-only. The owner is never guessed — a wrong owner would show
+    the file to the wrong user.
+    """
+    try:
+        row = conn.execute(
+            "SELECT owner_user_id FROM end_clients WHERE client_id = ?", (client_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return int(row[0]) if row and row[0] is not None else None
+
+
 def create_document_with_version(
     conn: sqlite3.Connection, *, client_id: int, doc_type: str, period: Optional[str],
     filename: str, file_ext: str, file_size: int, file_bytes: bytes,
@@ -44,10 +61,12 @@ def create_document_with_version(
         """
         INSERT INTO documents
             (client_id, doc_type, period, current_version_id, classification_source,
-             classification_pct, review_status, is_deleted, created_at, created_by)
-        VALUES (?, ?, ?, NULL, ?, ?, ?, 0, ?, ?)
+             classification_pct, review_status, is_deleted, owner_user_id,
+             created_at, created_by)
+        VALUES (?, ?, ?, NULL, ?, ?, ?, 0, ?, ?, ?)
         """,
-        (client_id, doc_type, period, classification_source, classification_pct, review_status, now, created_by),
+        (client_id, doc_type, period, classification_source, classification_pct, review_status,
+         _owner_for_client(conn, client_id), now, created_by),
     )
     document_id = cur.lastrowid
     version_id = add_version(
@@ -147,9 +166,15 @@ def get_document(conn: sqlite3.Connection, document_id: int) -> Optional[dict[st
 def list_documents(
     conn: sqlite3.Connection, *, client_id: Optional[int] = None, doc_type: Optional[str] = None,
     period: Optional[str] = None, include_deleted: bool = False, deleted_only: bool = False,
+    owner_user_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM documents WHERE 1=1"
     params: list[Any] = []
+    if owner_user_id is not None:
+        # The data-silo filter: a standard user's document queries only ever
+        # see documents owned by them. None = admin view, no restriction.
+        sql += " AND owner_user_id = ?"
+        params.append(owner_user_id)
     if client_id is not None:
         sql += " AND client_id = ?"
         params.append(client_id)
@@ -182,7 +207,23 @@ def set_document_deleted(conn: sqlite3.Connection, document_id: int, *, is_delet
 
 
 def reassign_document_client(conn: sqlite3.Connection, document_id: int, new_client_id: int) -> None:
-    conn.execute("UPDATE documents SET client_id = ? WHERE document_id = ?", (new_client_id, document_id))
+    """Move a document to another client AND re-derive its owner.
+
+    The owner must follow the client here: leaving the old owner in place would
+    keep showing the document to its previous owner and hide it from the new
+    client's owner.
+    """
+    conn.execute(
+        """
+        UPDATE documents
+           SET client_id = ?,
+               owner_user_id = (
+                     SELECT c.owner_user_id FROM end_clients c WHERE c.client_id = ?
+                   )
+         WHERE document_id = ?
+        """,
+        (new_client_id, new_client_id, document_id),
+    )
     conn.commit()
 
 

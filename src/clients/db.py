@@ -34,12 +34,54 @@ def _row_to_dict(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Opti
 # ---------------------------------------------------------------------------
 
 
-def list_clients(conn: sqlite3.Connection, *, include_inactive: bool = True) -> list[dict[str, Any]]:
+def list_clients(
+    conn: sqlite3.Connection, *, include_inactive: bool = True, owner_user_id: Optional[int] = None
+) -> list[dict[str, Any]]:
+    """Client rows, optionally restricted to a single owner.
+
+    ``owner_user_id=None`` means "no owner filter" — the admin view. Every
+    caller that serves a standard user must pass their id; the service layer
+    is what guarantees that (see ``src.clients.service.list_clients``).
+    """
     sql = "SELECT * FROM end_clients"
+    params: list[Any] = []
+    clauses: list[str] = []
     if not include_inactive:
-        sql += " WHERE is_active = 1"
+        clauses.append("is_active = 1")
+    if owner_user_id is not None:
+        clauses.append("owner_user_id = ?")
+        params.append(owner_user_id)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
     sql += " ORDER BY legal_name"
-    return _rows_to_dicts(conn, sql)
+    return _rows_to_dicts(conn, sql, tuple(params))
+
+
+def list_client_names_for_owner(conn: sqlite3.Connection, owner_user_id: int) -> set[str]:
+    """The legal names owned by one user.
+
+    Used to scope the filesystem/runs view of the clients (``data/<name>/``,
+    ``runs.client``) to the same ownership as the master records.
+    """
+    rows = conn.execute(
+        "SELECT legal_name FROM end_clients WHERE owner_user_id = ?", (owner_user_id,)
+    ).fetchall()
+    return {r[0] for r in rows if r[0]}
+
+
+def list_client_ids_for_owner(conn: sqlite3.Connection, owner_user_id: int) -> set[int]:
+    """The client ids owned by one user — the id-keyed twin of
+    ``list_client_names_for_owner``, for module queues that store a client_id."""
+    rows = conn.execute(
+        "SELECT client_id FROM end_clients WHERE owner_user_id = ?", (owner_user_id,)
+    ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def list_all_client_names(conn: sqlite3.Connection) -> set[str]:
+    """The legal name of every client record."""
+    rows = conn.execute("SELECT legal_name FROM end_clients").fetchall()
+    return {r[0] for r in rows if r[0]}
 
 
 def get_client(conn: sqlite3.Connection, client_id: int) -> Optional[dict[str, Any]]:
@@ -65,21 +107,21 @@ def create_client(
     conn: sqlite3.Connection, *, legal_name: str, pan: Optional[str], tan: Optional[str],
     gstin: Optional[str], assigned_team: Optional[str], primary_contact_email: Optional[str],
     primary_contact_phone: Optional[str], primary_contact_address: Optional[str],
-    created_by: str,
+    created_by: str, owner_user_id: Optional[int] = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO end_clients (
             legal_name, pan, tan, gstin, assigned_team,
             primary_contact_email, primary_contact_phone, primary_contact_address,
-            is_active, created_at, created_by
+            owner_user_id, is_active, created_at, created_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             legal_name, pan, tan, gstin, assigned_team,
             primary_contact_email, primary_contact_phone, primary_contact_address,
-            _now(), created_by,
+            owner_user_id, _now(), created_by,
         ),
     )
     conn.commit()
@@ -137,10 +179,11 @@ def create_contact(
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO contact_directory (client_id, name, role_title, email, phone, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO contact_directory
+            (client_id, owner_user_id, name, role_title, email, phone, notes, created_at)
+        VALUES (?, (SELECT owner_user_id FROM end_clients WHERE client_id = ?), ?, ?, ?, ?, ?, ?)
         """,
-        (client_id, name, role_title, email, phone, notes, _now()),
+        (client_id, client_id, name, role_title, email, phone, notes, _now()),
     )
     conn.commit()
     return cur.lastrowid
@@ -174,10 +217,11 @@ def bulk_insert_coa(conn: sqlite3.Connection, client_id: int, rows: list[tuple[s
     for code, name, account_type in rows:
         conn.execute(
             """
-            INSERT INTO chart_of_accounts (client_id, code, name, account_type, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO chart_of_accounts
+                (client_id, owner_user_id, code, name, account_type, created_at)
+            VALUES (?, (SELECT owner_user_id FROM end_clients WHERE client_id = ?), ?, ?, ?, ?)
             """,
-            (client_id, code, name, account_type, now),
+            (client_id, client_id, code, name, account_type, now),
         )
     conn.commit()
     return len(rows)
@@ -186,10 +230,11 @@ def bulk_insert_coa(conn: sqlite3.Connection, client_id: int, rows: list[tuple[s
 def add_coa_row(conn: sqlite3.Connection, client_id: int, code: str, name: str, account_type: str) -> int:
     cur = conn.execute(
         """
-        INSERT INTO chart_of_accounts (client_id, code, name, account_type, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO chart_of_accounts
+            (client_id, owner_user_id, code, name, account_type, created_at)
+        VALUES (?, (SELECT owner_user_id FROM end_clients WHERE client_id = ?), ?, ?, ?, ?)
         """,
-        (client_id, code, name, account_type, _now()),
+        (client_id, client_id, code, name, account_type, _now()),
     )
     conn.commit()
     return cur.lastrowid
@@ -230,10 +275,11 @@ def bulk_insert_snapshot(
     for line_item, amount, notes in rows:
         conn.execute(
             """
-            INSERT INTO historical_snapshots (client_id, fiscal_year, line_item, amount, notes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO historical_snapshots
+                (client_id, owner_user_id, fiscal_year, line_item, amount, notes, created_at)
+            VALUES (?, (SELECT owner_user_id FROM end_clients WHERE client_id = ?), ?, ?, ?, ?, ?)
             """,
-            (client_id, fiscal_year, line_item, amount, notes, now),
+            (client_id, client_id, fiscal_year, line_item, amount, notes, now),
         )
     conn.commit()
     return len(rows)
@@ -244,10 +290,11 @@ def add_snapshot_row(
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO historical_snapshots (client_id, fiscal_year, line_item, amount, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO historical_snapshots
+            (client_id, owner_user_id, fiscal_year, line_item, amount, notes, created_at)
+        VALUES (?, (SELECT owner_user_id FROM end_clients WHERE client_id = ?), ?, ?, ?, ?, ?)
         """,
-        (client_id, fiscal_year, line_item, amount, notes, _now()),
+        (client_id, client_id, fiscal_year, line_item, amount, notes, _now()),
     )
     conn.commit()
     return cur.lastrowid

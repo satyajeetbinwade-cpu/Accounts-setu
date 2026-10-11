@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import reflex as rx
 
 from src.action_center import service as ac
+from src.auth import access
 from src.auth import service as auth
 from setu.state.auth_state import AuthState
 
@@ -163,7 +164,11 @@ class Module8State(AuthState):
         self._load_all()
 
     def _load_all(self) -> None:
-        all_items = ac.list_flagged_items(status="open")
+        # The unified queue spans clients; scope it to this viewer's own before
+        # any of the counts below are derived from it.
+        all_items = access.filter_rows_by_owner(
+            self._viewer(), ac.list_flagged_items(status="open")
+        )
         counts = ac.item_counts(all_items)
 
         self.total_open = counts["total"]
@@ -318,7 +323,9 @@ class Module8State(AuthState):
             return
         # Resolve the selected generic items and surface the origin's own
         # mechanism (Module 8 never re-implements resolution).
-        all_items = ac.list_flagged_items(status="open")
+        all_items = access.filter_rows_by_owner(
+            self._viewer(), ac.list_flagged_items(status="open")
+        )
         chosen = [i for i in all_items if i["item_ref"] in self.selected_refs]
         result = ac.batch_action(chosen, actor=self.username)
         self.flash = (

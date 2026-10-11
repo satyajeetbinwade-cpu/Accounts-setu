@@ -300,6 +300,10 @@ class ReconcileState(AuthState):
     ctx_client: str = ""
     ctx_period: str = ""
     ctx_recon_type: str = ""
+    # Opening the FIRST period for a brand-new client (a client record with no
+    # data/ folder yet has no periods, so the flow would otherwise dead-end).
+    new_period: str = ""
+    period_error: str = ""
 
     # flow state
     selections: dict[str, str] = {}
@@ -543,20 +547,40 @@ class ReconcileState(AuthState):
     # ==================================================================
     @rx.event
     def load(self, params: dict | None = None):
-        self.clients = discovery.list_clients()
-        if not self.ctx_client and self.clients:
-            self.ctx_client = self.clients[0]
-        self._load_context()
-        # Deep-link support: a filtered Review view is linkable
-        # (/reconcile?stage=4&cls=…&cause=…). Params are read from the
-        # caller's dict when supplied, else from this state's own router (the
-        # reliable source when the event is dispatched without arguments).
+        self.clients = discovery.list_clients(self._viewer())
+        # A page load starts clean: a message from an earlier action is spent.
+        self.flash = ""
+        # Params are read from the caller's dict when supplied, else from this
+        # state's own router (the reliable source when the event is dispatched
+        # without arguments).
         url_params = params if isinstance(params, dict) and params else None
         if url_params is None:
             try:
                 url_params = dict(self.router.page.params or {})
             except Exception:  # noqa: BLE001
                 url_params = {}
+        # A deep link that names a client wins over the default pick — this is
+        # what returns the user here, client already selected, straight after
+        # creating one. An unknown/unauthorised name is ignored (never trusted).
+        self._apply_url_client(url_params)
+        if self.ctx_client and self.ctx_client not in self.clients:
+            # The context client is no longer selectable — deleted, deactivated,
+            # or no longer this user's. Drop the whole context rather than
+            # rendering one that no longer exists.
+            self.ctx_client = ""
+            self.ctx_period = ""
+            self.ctx_recon_type = ""
+        if not self.ctx_client and self.clients:
+            self.ctx_client = self.clients[0]
+        if not self.clients:
+            # Nothing to reconcile yet, so land on the Context step — that is
+            # where the "create your first client" call to action lives. Without
+            # this, a stage left over from an earlier session would show the
+            # upload step's "pick a client" text instead, with no way forward.
+            self.stage = 1
+        self._load_context()
+        # Deep-link support: a filtered Review view is linkable
+        # (/reconcile?stage=4&cls=…&cause=…).
         if url_params:
             self.read_url_params(url_params)
             # A URL that names a record opens its drawer; one that does not
@@ -569,6 +593,69 @@ class ReconcileState(AuthState):
                 self.stage = 4
                 self._load_review()
 
+    def _apply_url_client(self, params: dict | None) -> None:
+        """Select the client named by ``?client=<legal name>``, if it is one
+        this user may see. Anything else is ignored, so the parameter cannot be
+        used to reach a client that isn't visible."""
+        name = str((params or {}).get("client") or "").strip()
+        if name and name in self.clients:
+            self.ctx_client = name
+            # A named client also means "start here", not "resume the review
+            # of whatever was on screen" — so the stage rail resets.
+            self.stage = 1
+
+    # ------------------------------------------------------------------
+    # Adding the first period for a brand-new client
+    # ------------------------------------------------------------------
+    def set_new_period(self, v: str):
+        self.new_period = v
+        self.period_error = ""
+
+    @rx.event
+    def add_period(self, form_data: dict | None = None):
+        """Open a new period (YYYY-MM) for the selected client.
+
+        A period is a folder under ``data/<client>/``, and the engine reads its
+        source files from there — so this is simply "start a period". Without
+        it a freshly-created client has no periods at all and the guided flow
+        has nowhere to put an upload.
+        """
+        value = str((form_data or {}).get("new_period") or self.new_period or "").strip()
+        self.new_period = value
+        if not period_utils.is_valid_period(value):
+            self.period_error = "Enter the period as YYYY-MM, for example 2026-08."
+            return
+        if not self.ctx_client:
+            self.period_error = "Pick a client first."
+            return
+        # The folder name is taken from the selected client, so re-check it
+        # here: this is the one place in the flow that CREATES a path, and a
+        # name that is not one of the viewer's clients must never be written.
+        if self.ctx_client not in self.clients:
+            self.period_error = "Pick a client from the list first."
+            return
+
+        from src.data_paths import DATA_ROOT
+
+        target = DATA_ROOT / self.ctx_client / value
+        # Belt and braces against a crafted name: the resolved path must stay
+        # inside data/<client>/.
+        if DATA_ROOT.resolve() not in target.resolve().parents:
+            self.period_error = "That client name can't be used for a period folder."
+            return
+
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001 — surface it, never fail silently
+            self.period_error = f"Couldn't create the period folder: {exc}"
+            return
+
+        self.period_error = ""
+        self.ctx_period = value
+        self.new_period = ""
+        self.flash = f"Period {value} opened for {self.ctx_client}."
+        self._load_context()
+
     @rx.event
     def load_review_page(self):
         """On-load for the standalone /review screen.
@@ -578,7 +665,7 @@ class ReconcileState(AuthState):
         latest run in the selected context (exactly what the guided flow's
         "Continue this run" does).
         """
-        self.clients = discovery.list_clients()
+        self.clients = discovery.list_clients(self._viewer())
         if not self.ctx_client and self.clients:
             self.ctx_client = self.clients[0]
         self._load_context()
@@ -654,12 +741,21 @@ class ReconcileState(AuthState):
 
     @rx.event
     def set_review_run(self, run_id: str):
-        """Switch the Review screen to a different run of this context."""
+        """Switch the Review screen to a different run of this context.
+
+        The id comes from the event, so the run's OWN client is checked against
+        the clients this user may see before any result is read — run ids are
+        sequential, so an unchecked id would expose any other user's results.
+        """
         try:
             rid = int(run_id)
         except (TypeError, ValueError):
             return
         if not rid or rid == self.run_id:
+            return
+        run = queries.get_run(rid)
+        if run is None or run.get("client") not in self.clients:
+            self.flash = "That run isn't in this client's context."
             return
         self.run_id = rid
         self.selected_result_id = 0
@@ -674,6 +770,14 @@ class ReconcileState(AuthState):
 
     @rx.event
     def set_ctx_client(self, v: str):
+        """Choose the client this run is for.
+
+        The value arrives from the event, so it is checked against the clients
+        this user may actually see before anything downstream (periods, runs,
+        uploads) is keyed on it — the picker being scoped is not enough.
+        """
+        if v not in self.clients:
+            return
         self.ctx_client = v
         self.rail_return = False
         self._load_context()
@@ -683,9 +787,11 @@ class ReconcileState(AuthState):
         """Open the standalone New Client screen.
 
         Client creation lives on exactly ONE screen (/clients/new), reached
-        from here rather than duplicating the form inside the guided flow.
+        from here rather than duplicating the form inside the guided flow. The
+        ``next`` parameter brings the user straight back to Reconcile with the
+        new client already selected, so creating one is not a detour.
         """
-        return rx.redirect("/clients/new")
+        return rx.redirect("/clients/new?next=reconcile")
 
     @rx.event
     def set_ctx_period(self, v: str):
@@ -2559,7 +2665,7 @@ def _client_id_for_folder(folder: str) -> int | None:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
     try:
-        candidates = clients.list_clients(include_inactive=True)
+        candidates = clients.list_clients(viewer=self._viewer(), include_inactive=True)
     except Exception:  # noqa: BLE001
         return None
     target = norm(folder)

@@ -285,10 +285,14 @@ DEFAULT_ROLE_GRANTS: dict[str, list[str]] = {
     ],
 }
 
-# Seed the very first Admin user so there's always a way in. Change this
-# password immediately after first login in a real deployment.
+# Seed the very first Admin user so there's always a way in. The password is
+# NEVER hardcoded: it is read from SETU_ADMIN_PASSWORD, or generated at random
+# on a truly first run and printed once to the server console. Either way the
+# account is flagged must_change_password, so a bootstrap credential cannot
+# stay in use — and it is never rendered in the UI.
 DEFAULT_ADMIN_USERNAME = "admin"
-DEFAULT_ADMIN_PASSWORD = "ChangeMe123"
+ADMIN_PASSWORD_ENV = "SETU_ADMIN_PASSWORD"
+ADMIN_USERNAME_ENV = "SETU_ADMIN_USERNAME"
 
 
 def _now() -> str:
@@ -384,6 +388,24 @@ def _seed_role_permissions(conn: sqlite3.Connection) -> None:
             )
 
 
+def initial_admin_credentials() -> tuple[str, str, bool]:
+    """``(username, password, should_print)`` for a first-run admin.
+
+    The password comes from ``SETU_ADMIN_PASSWORD`` when the operator set one.
+    Otherwise it is generated at random and returned with ``should_print=True``
+    so the caller can surface it on the console exactly once — the only way to
+    reach a fresh install without ever committing a credential. Callers must
+    never write it to a log file or a response body.
+    """
+    import os
+
+    username = (os.environ.get(ADMIN_USERNAME_ENV) or DEFAULT_ADMIN_USERNAME).strip()
+    password = os.environ.get(ADMIN_PASSWORD_ENV) or ""
+    if password:
+        return username, password, False
+    return username, security.generate_password(), True
+
+
 def _seed_first_admin(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     if count:
@@ -391,16 +413,27 @@ def _seed_first_admin(conn: sqlite3.Connection) -> None:
     admin_role = conn.execute("SELECT role_id FROM roles WHERE name = 'Admin'").fetchone()
     if admin_role is None:
         return
-    salt, pw_hash = security.hash_password(DEFAULT_ADMIN_PASSWORD)
+    username, password, generated = initial_admin_credentials()
+    salt, pw_hash = security.hash_password(password)
     conn.execute(
         """
         INSERT INTO users
             (username, display_name, email, password_salt, password_hash,
-             role_id, is_active, is_end_client, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, 0, ?)
+             role_id, role, is_active, is_end_client, must_change_password, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'admin', 1, 0, 1, ?)
         """,
         (
-            DEFAULT_ADMIN_USERNAME, "Default Admin", None, salt, pw_hash,
+            username, "Default Admin", None, salt, pw_hash,
             admin_role[0], _now(),
         ),
     )
+    if generated:
+        print(
+            "\n"
+            "================ SETU FIRST-RUN ADMIN ================\n"
+            f"  username: {username}\n"
+            f"  password: {password}\n"
+            "  Shown once, on the server console only. You must change\n"
+            "  it at first sign-in.\n"
+            "=====================================================\n"
+        )

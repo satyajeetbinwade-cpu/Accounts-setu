@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS end_clients (
     assigned_team            TEXT,                        -- free-text description; per-client staff
                                                           -- assignment for module scoping still lives
                                                           -- in F1's per_client_team_assignments
+    -- The standard user who created this client. THE data-silo key: a
+    -- standard user's every client query is filtered on it, and a direct
+    -- lookup by id that doesn't match is refused. Set from the session on
+    -- creation, never from request input. NULL = unowned, which is admin-only.
+    owner_user_id            INTEGER,
     primary_contact_email    TEXT,
     primary_contact_phone    TEXT,
     primary_contact_address  TEXT,                        -- includes the state (free text this phase)
@@ -51,10 +56,15 @@ CREATE TABLE IF NOT EXISTS end_clients (
     created_by               TEXT
 );
 
+-- NOTE: the owner indexes are created in _migrate() below, not here.
+-- "CREATE INDEX IF NOT EXISTS" on a pre-existing table would fail on the
+-- missing column before the ALTER runs, so the indexes follow the ALTERs.
+
 -- Internal reference only \u2014 never linked to a login row.
 CREATE TABLE IF NOT EXISTS contact_directory (
     contact_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id      INTEGER NOT NULL REFERENCES end_clients(client_id),
+    owner_user_id  INTEGER,                              -- mirrors the parent client's owner
     name           TEXT    NOT NULL,
     role_title     TEXT,
     email          TEXT,
@@ -69,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_contact_directory_client ON contact_directory(cli
 CREATE TABLE IF NOT EXISTS chart_of_accounts (
     coa_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id      INTEGER NOT NULL REFERENCES end_clients(client_id),
+    owner_user_id  INTEGER,                              -- mirrors the parent client's owner
     code           TEXT    NOT NULL,
     name           TEXT    NOT NULL,
     account_type   TEXT,
@@ -82,6 +93,7 @@ CREATE INDEX IF NOT EXISTS idx_coa_client ON chart_of_accounts(client_id);
 CREATE TABLE IF NOT EXISTS historical_snapshots (
     snapshot_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id      INTEGER NOT NULL REFERENCES end_clients(client_id),
+    owner_user_id  INTEGER,                              -- mirrors the parent client's owner
     fiscal_year    TEXT    NOT NULL,
     line_item      TEXT    NOT NULL,
     amount         TEXT,
@@ -107,14 +119,69 @@ CREATE TABLE IF NOT EXISTS client_edit_log (
 """
 
 
-# Columns the flat EndClient gained when the branch model was removed.
+# Columns the flat EndClient gained when the branch model was removed, plus
+# the ownership column that makes per-user data silos possible.
 _NEW_CLIENT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tan", "TEXT"),
     ("gstin", "TEXT"),
     ("primary_contact_email", "TEXT"),
     ("primary_contact_phone", "TEXT"),
     ("primary_contact_address", "TEXT"),
+    ("owner_user_id", "INTEGER"),
 )
+
+# Client child tables that mirror the parent's owner. Kept as (table, parent
+# key) so the backfill below can be written once instead of four times.
+_OWNER_CHILD_TABLES: tuple[tuple[str, str], ...] = (
+    ("contact_directory", "client_id"),
+    ("chart_of_accounts", "client_id"),
+    ("historical_snapshots", "client_id"),
+)
+
+
+def _backfill_owner_columns(conn: sqlite3.Connection) -> None:
+    """Give every pre-existing client an owner and mirror it onto children.
+
+    Everything that exists before the silo model belongs to the firm, so it is
+    assigned to the first Admin — no data is lost and no client is left
+    unowned (an unowned row would be invisible to standard users *and* to a
+    non-Admin admin-less database, which is a data-loss bug, not a safe
+    default). A database with no Admin yet keeps NULL owners; every read path
+    treats NULL as admin-only, so nothing leaks while waiting for a seed.
+    """
+    if not _table_exists(conn, "users"):
+        # A database that has client tables but no auth layer yet (a legacy
+        # fixture, or init order in a test). Owners stay NULL, and every read
+        # path treats NULL as admin-only — so nothing leaks while it waits.
+        return
+
+    user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+    if "role" not in user_cols:
+        # Users table exists but has not been migrated onto the access-role
+        # model yet. Same reasoning: leave owners NULL rather than guess.
+        return
+
+    admin_id = conn.execute(
+        "SELECT MIN(user_id) FROM users WHERE role = 'admin' AND is_active = 1"
+    ).fetchone()[0]
+    if admin_id is None:
+        return
+
+    conn.execute(
+        "UPDATE end_clients SET owner_user_id = ? WHERE owner_user_id IS NULL",
+        (admin_id,),
+    )
+    for table, parent_key in _OWNER_CHILD_TABLES:
+        conn.execute(
+            f"""
+            UPDATE {table}
+               SET owner_user_id = (
+                     SELECT c.owner_user_id FROM end_clients c
+                      WHERE c.client_id = {table}.{parent_key}
+                   )
+             WHERE owner_user_id IS NULL
+            """
+        )
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -131,6 +198,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for name, decl in _NEW_CLIENT_COLUMNS:
         if name not in cols:
             conn.execute(f"ALTER TABLE end_clients ADD COLUMN {name} {decl}")
+
+    for table, _parent_key in _OWNER_CHILD_TABLES:
+        child_cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if child_cols and "owner_user_id" not in child_cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_user_id INTEGER")
+
+    # Indexes last: they reference the columns the ALTERs above just added, and
+    # `CREATE INDEX IF NOT EXISTS` cannot run before them on a legacy database.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_end_clients_owner ON end_clients(owner_user_id)")
+    for table, _parent_key in _OWNER_CHILD_TABLES:
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_owner ON {table}(owner_user_id)"
+        )
+
+    _backfill_owner_columns(conn)
 
     if _table_exists(conn, "gstin_branches"):
         # Only fill a BLANK GSTIN: a client already carrying one is authoritative.

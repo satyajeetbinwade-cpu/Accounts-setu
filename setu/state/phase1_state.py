@@ -192,7 +192,7 @@ class Phase1State(AuthState):
     # ==================================================================
     @rx.event
     def load(self):
-        self.clients = discovery.list_clients()
+        self.clients = discovery.list_clients(self._viewer())
         if not self.ctx_client and self.clients:
             self.ctx_client = self.clients[0]
         self._load_context()
@@ -228,6 +228,10 @@ class Phase1State(AuthState):
 
     @rx.event
     def set_ctx_client(self, v: str):
+        """Only a client this user may see — the value comes from the event,
+        and periods/runs are looked up by it."""
+        if v not in self.clients:
+            return
         self.ctx_client = v
         self.selected_run_id = 0
         self._load_context()
@@ -268,7 +272,15 @@ class Phase1State(AuthState):
 
     @rx.event
     def set_selected_run(self, run_id: str):
-        self.selected_run_id = _to_int(run_id)
+        """Only a run belonging to a client this user may see — the id arrives
+        from the event, and run ids are sequential."""
+        rid = _to_int(run_id)
+        run = queries.get_run(rid) if rid else None
+        if run is None or run.get("client") not in self.clients:
+            self.selected_run_id = 0
+            self.flash = "That run isn't in this client's context."
+            return
+        self.selected_run_id = rid
         self._load_review()
         self._load_config()
         self._reset_export()
@@ -858,7 +870,7 @@ def _client_id_for_folder(folder: str) -> int | None:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
     try:
-        candidates = clients.list_clients(include_inactive=True)
+        candidates = clients.list_clients(viewer=self._viewer(), include_inactive=True)
     except Exception:  # noqa: BLE001
         return None
     target = norm(folder)

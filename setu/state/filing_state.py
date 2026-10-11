@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import reflex as rx
 
+from src.auth import access
 from src.auth import service as auth
 from src.clients import service as clients
 from src.documents import service as documents
@@ -170,11 +171,11 @@ class FilingState(AuthState):
             return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self.client_label_map = {
             str(c["client_id"]): c["legal_name"]
-            for c in clients.list_clients(include_inactive=True)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=True)
         }
         self.obligation_options = [o["obligation"] for o in rules.list_statutory_due_dates()]
         if not self.build_client_id and self.client_options:
@@ -208,11 +209,13 @@ class FilingState(AuthState):
                 urgency_variant=_urgency_variant(e.get("days_until_due")),
                 urgency_label=_urgency_label(e.get("days_until_due")),
             )
-            for e in filing.list_calendar()
+            for e in access.filter_rows_by_owner(self._viewer(), filing.list_calendar())
         ]
 
     def _load_filings(self) -> None:
-        rows = filing.list_filings()
+        # Scoped before the open-count is derived, so the count cannot reveal
+        # other users' filings either.
+        rows = access.filter_rows_by_owner(self._viewer(), filing.list_filings())
         self.open_count = sum(1 for r in rows if r["status"] in ("prepared", "sent"))
         self.filings = [
             FilingRow(
@@ -226,9 +229,19 @@ class FilingState(AuthState):
             for r in rows
         ]
 
+    def _owns_client(self, client_id) -> bool:
+        """Whether this user may see that client — the check every filing id
+        that reaches the service has to pass."""
+        options = {o.client_id for o in self.client_options}
+        try:
+            return int(client_id or 0) in options
+        except (TypeError, ValueError):
+            return False
+
     def _load_detail(self) -> None:
         rec = filing.get_filing(self.selected_filing_id)
-        if rec is None:
+        if rec is None or not self._owns_client(rec.get("client_id")):
+            # Missing OR not this user's — the same answer either way.
             self.selected_filing_id = 0
             return
         self.detail_obligation = rec["obligation"]
@@ -288,6 +301,9 @@ class FilingState(AuthState):
 
     @rx.event
     def set_build_client(self, client_id: int):
+        """Only a client this user may see (the value comes from the event)."""
+        if client_id not in {o.client_id for o in self.client_options}:
+            return
         self.build_client_id = client_id
 
     @rx.event
@@ -314,6 +330,9 @@ class FilingState(AuthState):
 
     @rx.event
     def set_new_client(self, client_id: int):
+        """Only a client this user may see (the value comes from the event)."""
+        if client_id not in {o.client_id for o in self.client_options}:
+            return
         self.new_client_id = client_id
 
     @rx.event
@@ -329,6 +348,11 @@ class FilingState(AuthState):
 
     @rx.event
     def set_source_client(self, client_id: int):
+        """Only a client this user may see — the id arrives from the event and
+        keys both the source-availability read (which lists that client's
+        connection credentials) and the per-client toggle write."""
+        if client_id not in {o.client_id for o in self.client_options}:
+            return
         self.source_client_id = client_id
         self._load_sources()
 
@@ -365,6 +389,7 @@ class FilingState(AuthState):
                 file_bytes=data,
                 period=self.new_period or None,
                 actor=self.username,
+                viewer=self._viewer(),
             )
         except documents.DocumentError as exc:
             self.error = str(exc)
@@ -389,6 +414,14 @@ class FilingState(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def open_filing(self, filing_id: int):
+        """Only a filing of a client this user may see; the id comes from the
+        event, and the detail view (and its send/outcome actions) act on it."""
+        record = filing.get_filing(filing_id)
+        if record is None or record.get("client_id") not in {
+            o.client_id for o in self.client_options
+        }:
+            self.error = "That filing isn't in a client you can open."
+            return
         self.selected_filing_id = filing_id
         self.send_confirm = False
         self.outcome_choice = "acknowledged"
@@ -406,6 +439,12 @@ class FilingState(AuthState):
 
     @rx.event
     def send_filing(self):
+        # A WRITE: re-check ownership here too, not only on open.
+        record = filing.get_filing(self.selected_filing_id)
+        if record is None or not self._owns_client(record.get("client_id")):
+            self.error = "That filing isn't in a client you can send."
+            self.selected_filing_id = 0
+            return
         try:
             filing.send_filing(
                 self.selected_filing_id, actor=self.username, actor_role=self._role()
@@ -425,6 +464,11 @@ class FilingState(AuthState):
 
     @rx.event
     def record_outcome(self):
+        record = filing.get_filing(self.selected_filing_id)
+        if record is None or not self._owns_client(record.get("client_id")):
+            self.error = "That filing isn't in a client you can update."
+            self.selected_filing_id = 0
+            return
         try:
             filing.record_outcome(
                 self.selected_filing_id,
@@ -460,6 +504,7 @@ class FilingState(AuthState):
                 file_bytes=data,
                 period=rec["period"],
                 actor=self.username,
+                viewer=self._viewer(),
             )
             filing.confirm_acknowledgement(
                 self.selected_filing_id,

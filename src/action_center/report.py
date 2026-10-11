@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from src import db as recon_db
 from src import queries
+from src.auth import access
 from src.clients import service as clients
 from src.module2 import service as m2
 from src.reconciliation.review import drop_zero_slices
@@ -67,9 +68,14 @@ class ReportError(Exception):
 
 def list_report_runs(
     *, client: Optional[str] = None, period: Optional[str] = None, recon_type: Optional[str] = None,
+    viewer=None, db_path=None,
 ) -> list[dict[str, Any]]:
-    """Every completed run the report can be built for, newest first."""
-    df = queries.list_runs(client=client, period=period, recon_type=recon_type)
+    """Every completed run the report can be built for, newest first, scoped to
+    the viewer's own clients."""
+    df = queries.list_runs(client=client, period=period, recon_type=recon_type, db_path=db_path)
+    visible = access.visible_client_names(viewer, db_path=db_path)
+    if visible is not None and not df.empty:
+        df = df[df["client"].isin(visible)]
     runs: list[dict[str, Any]] = []
     for _, row in df.iterrows():
         rt = row.get("recon_type")
@@ -98,7 +104,7 @@ def resolve_client_id(folder: str) -> Optional[int]:
     if not folder:
         return None
     try:
-        rows = clients.list_clients(include_inactive=True)
+        rows = clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True)
     except Exception:  # noqa: BLE001
         return None
     target = _normalize_name(folder)
@@ -115,7 +121,7 @@ def resolve_client_id(folder: str) -> Optional[int]:
 def _client_display_name(client_id: Optional[int], folder: str) -> str:
     if client_id is not None:
         try:
-            row = clients.get_client(client_id)
+            row = clients.find_client(client_id, viewer=access.SYSTEM_VIEWER)
             if row and row.get("legal_name"):
                 return row["legal_name"]
         except Exception:  # noqa: BLE001
@@ -424,11 +430,18 @@ def build_report(run_id: int, *, allow_ai: bool = False, db_path=None) -> dict[s
     }
 
 
-def list_report_periods() -> list[dict[str, Any]]:
+def list_report_periods(viewer=None, *, db_path=None) -> list[dict[str, Any]]:
     """Distinct client+period combinations that have at least one run, newest
     period first. This is the report's unit of selection — a period report
-    shows GST and TDS together."""
-    df = queries.list_runs()
+    shows GST and TDS together.
+
+    Scoped to ``viewer``: a standard user is offered only their own clients'
+    runs, so the picker cannot be used to name somebody else's period.
+    """
+    df = queries.list_runs(db_path=db_path)
+    visible = access.visible_client_names(viewer, db_path=db_path)
+    if visible is not None and not df.empty:
+        df = df[df["client"].isin(visible)]
     seen: dict[tuple[str, str], dict[str, Any]] = {}
     for _, row in df.iterrows():
         folder = row.get("client") or ""
@@ -465,10 +478,18 @@ def _latest_run(folder: str, period: str, recon_type: str) -> Optional[int]:
     return int(row[0]) if row else None
 
 
-def build_period_report(folder: str, period: str, *, allow_ai: bool = False) -> dict[str, Any]:
+def build_period_report(
+    folder: str, period: str, *, viewer=None, allow_ai: bool = False, db_path=None
+) -> dict[str, Any]:
     """Compose the GST and TDS reports for one client+period into the single
     report the screen renders. Either side may be absent — the view renders a
-    clear, actionable empty state rather than a blank card."""
+    clear, actionable empty state rather than a blank card.
+
+    ``viewer`` is checked before any of that: the folder comes from the UI, so
+    a caller that is not allowed to see this client must be refused here, not
+    merely left off the picker.
+    """
+    access.require_client_name(viewer, folder, db_path=db_path)
     gst_run = _latest_run(folder, period, "GST")
     tds_run = _latest_run(folder, period, "TDS")
 

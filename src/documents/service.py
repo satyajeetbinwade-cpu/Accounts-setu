@@ -25,6 +25,7 @@ import sqlite3
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.documents import db as ddb
 from src.documents.schema import init_documents_schema
 
@@ -112,12 +113,17 @@ def classify_document(filename: str) -> tuple[str, int]:
 
 
 def upload_document(
-    *, client_id: int, filename: str, file_bytes: bytes, period: Optional[str], actor: str, db_path=None,
+    *, client_id: int, filename: str, file_bytes: bytes, period: Optional[str], actor: str,
+    viewer, db_path=None,
 ) -> dict[str, Any]:
     """Upload → auto-classify → file (high confidence) OR route to the
     Unified Review Queue tagged "couldn't classify" (low confidence).
     Returns {"document_id": int, "doc_type": str, "confidence": int,
-    "routed_to_queue": bool}."""
+    "routed_to_queue": bool}.
+
+    The target client is checked FIRST: ``client_id`` arrives from the UI and
+    the document's owner is taken from it, so without this a standard user
+    could inject a document into another user's client."""
     ext = validate_file(filename)
     doc_type, confidence = classify_document(filename)
     routed_to_queue = confidence < AUTO_FILE_CONFIDENCE_THRESHOLD
@@ -125,6 +131,7 @@ def upload_document(
 
     conn = _connect(db_path)
     try:
+        _require_client_owned(conn, client_id, viewer)
         document_id = ddb.create_document_with_version(
             conn, client_id=client_id, doc_type=doc_type, period=period,
             filename=filename, file_ext=ext, file_size=len(file_bytes), file_bytes=file_bytes,
@@ -142,13 +149,15 @@ def upload_document(
 
 
 def add_version(
-    document_id: int, *, filename: str, file_bytes: bytes, actor: str, notes: Optional[str] = None, db_path=None,
+    document_id: int, *, filename: str, file_bytes: bytes, actor: str, viewer,
+    notes: Optional[str] = None, db_path=None,
 ) -> int:
     """File-level version control — supersedes the current version
     without discarding history."""
     ext = validate_file(filename)
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         version_number = ddb.next_version_number(conn, document_id)
         version_id = ddb.add_version(
             conn, document_id=document_id, version_number=version_number, filename=filename,
@@ -161,63 +170,94 @@ def add_version(
         conn.close()
 
 
-def list_versions(document_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def list_versions(document_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         return ddb.list_versions(conn, document_id)
     finally:
         conn.close()
 
 
-def get_version_bytes(version_id: int, *, db_path=None) -> Optional[bytes]:
+def get_version_bytes(version_id: int, *, viewer, db_path=None) -> Optional[bytes]:
+    """The stored bytes of one version — refused unless the viewer owns the
+    document the version belongs to."""
     conn = _connect(db_path)
     try:
+        row = conn.execute(
+            "SELECT document_id FROM document_versions WHERE version_id = ?", (version_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        _require_document_access(conn, int(row[0]), viewer)
         return ddb.get_version_bytes(conn, version_id)
     finally:
         conn.close()
 
 
-def get_document(document_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+def get_document(document_id: int, *, viewer, db_path=None) -> dict[str, Any]:
+    """The document, or raise :class:`DocumentAccessDenied`.
+
+    Strict form, for an id that arrived from the user (a URL parameter).
+    """
     conn = _connect(db_path)
     try:
-        return ddb.get_document(conn, document_id)
+        return _require_document_access(conn, document_id, viewer)
     finally:
         conn.close()
 
 
-def get_current_version(document_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
-    """The document's current version (filename/file_ext/file_size/file_bytes),
-    used by the shared file viewer to render content inline without
-    downloading."""
+def find_document(document_id: int, *, viewer, db_path=None) -> Optional[dict[str, Any]]:
+    """``get_document`` without the exception: ``None`` when missing or
+    refused, for render paths where both mean "show nothing"."""
     conn = _connect(db_path)
     try:
+        row = ddb.get_document(conn, document_id)
+        if row is None:
+            return None
+        return row if _may_see_document(viewer, row) else None
+    finally:
+        conn.close()
+
+
+def get_current_version(document_id: int, *, viewer, db_path=None) -> Optional[dict[str, Any]]:
+    """The document's current version (filename/file_ext/file_size/file_bytes),
+    used by the shared file viewer to render content inline without
+    downloading. Refused unless the viewer owns the document."""
+    conn = _connect(db_path)
+    try:
+        _require_document_access(conn, document_id, viewer)
         return ddb.get_current_version(conn, document_id)
     finally:
         conn.close()
 
 
-def set_document_notes(document_id: int, notes: str, *, db_path=None) -> None:
+def set_document_notes(document_id: int, notes: str, *, viewer, db_path=None) -> None:
     """Optional reviewer note on the document itself — distinct from
     Unified Review Queue resolution notes."""
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         ddb.set_document_notes(conn, document_id, notes or "")
     finally:
         conn.close()
 
 
 def list_documents(
-    *, client_id: Optional[int] = None, doc_type: Optional[str] = None, period: Optional[str] = None,
+    *, viewer, client_id: Optional[int] = None, doc_type: Optional[str] = None, period: Optional[str] = None,
     search: Optional[str] = None, include_deleted: bool = False, deleted_only: bool = False, db_path=None,
 ) -> list[dict[str, Any]]:
     """Search by client, period, document type, and free text where
     extractable (matches against the latest version's filename — OCR/text
-    extraction is explicitly deferred, not built here)."""
+    extraction is explicitly deferred, not built here).
+
+    Scoped server-side to the viewer's own documents; the UI cannot widen it."""
     conn = _connect(db_path)
     try:
         rows = ddb.list_documents(
             conn, client_id=client_id, doc_type=doc_type, period=period,
             include_deleted=include_deleted, deleted_only=deleted_only,
+            owner_user_id=access.owner_filter(viewer),
         )
         if search:
             needle = search.lower()
@@ -232,6 +272,56 @@ def list_documents(
         return rows
     finally:
         conn.close()
+
+
+class DocumentAccessDenied(Exception):
+    """The document exists but is not this viewer's."""
+
+
+def _may_see_document(viewer, row: Optional[dict[str, Any]]) -> bool:
+    if row is None:
+        return False
+    if access.is_admin(viewer):
+        return True
+    owner = row.get("owner_user_id")
+    return owner is not None and int(owner) == access.viewer_user_id(viewer)
+
+
+def _require_document_access(conn, document_id: int, viewer) -> dict[str, Any]:
+    """Fetch a document for this viewer or refuse it (403/404)."""
+    row = ddb.get_document(conn, document_id)
+    if not _may_see_document(viewer, row):
+        raise DocumentAccessDenied("No such document.")
+    assert row is not None
+    return row
+
+
+def _require_client_owned(conn, client_id: int, viewer) -> dict[str, Any]:
+    """Refuse a client that is not the viewer's.
+
+    The gate for every document operation that takes a ``client_id`` from the
+    request: the document's owner is DERIVED from the target client, so an
+    unchecked id would let a user file documents into somebody else's client.
+    """
+    from src.clients import db as cdb
+
+    row = cdb.get_client(conn, client_id)
+    if row is None or not access.can_access_client_row(viewer, row):
+        raise DocumentAccessDenied("No such client.")
+    return row
+
+
+def _scoped_queue_rows(conn, rows: list[dict[str, Any]], viewer) -> list[dict[str, Any]]:
+    """Drop queue entries whose document the viewer may not see."""
+    if access.is_admin(viewer):
+        return rows
+    owner = access.viewer_user_id(viewer)
+    kept: list[dict[str, Any]] = []
+    for row in rows:
+        doc = ddb.get_document(conn, row["document_id"])
+        if doc is not None and doc.get("owner_user_id") is not None and int(doc["owner_user_id"]) == owner:
+            kept.append(row)
+    return kept
 
 
 def _attach_version_meta(conn, row: dict[str, Any]) -> None:
@@ -259,7 +349,7 @@ _EVIDENCE_TARGET_LABELS = {
 
 def link_evidence(
     *, document_id: int, target_type: str, target_id: Optional[int] = None,
-    target_label: Optional[str] = None, actor: Optional[str] = None, db_path=None,
+    target_label: Optional[str] = None, actor: Optional[str] = None, viewer, db_path=None,
 ) -> int:
     """Structurally real, generic/polymorphic link — most target types
     have no real backing table yet (Modules 2/3/5 don't exist), so this
@@ -270,6 +360,7 @@ def link_evidence(
     label = target_label or _EVIDENCE_TARGET_LABELS.get(target_type, target_type)
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         return ddb.add_evidence_link(
             conn, document_id=document_id, target_type=target_type, target_id=target_id,
             target_label=label, created_by=actor,
@@ -278,22 +369,25 @@ def link_evidence(
         conn.close()
 
 
-def used_in(document_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def used_in(document_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     """From a document → every place it's used. Structurally real,
     empty list until Modules 2/3/5 exist — the 'Used in' panel renders
     its 'Not yet used in any record' empty state on an empty list."""
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         return ddb.list_evidence_links_for_document(conn, document_id)
     finally:
         conn.close()
 
 
-def documents_for_target(target_type: str, target_id: int, *, db_path=None) -> list[dict[str, Any]]:
-    """From any evidence-link target → back to its document(s)."""
+def documents_for_target(target_type: str, target_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
+    """From any evidence-link target → back to its document(s), filtered to
+    documents this viewer owns."""
     conn = _connect(db_path)
     try:
-        return ddb.list_documents_for_target(conn, target_type, target_id)
+        rows = ddb.list_documents_for_target(conn, target_type, target_id)
+        return [r for r in rows if _may_see_document(viewer, r)]
     finally:
         conn.close()
 
@@ -303,42 +397,62 @@ def documents_for_target(target_type: str, target_id: int, *, db_path=None) -> l
 # ---------------------------------------------------------------------------
 
 
-def list_queue(status: Optional[str] = "pending", *, db_path=None) -> list[dict[str, Any]]:
+def list_queue(status: Optional[str] = "pending", *, viewer, db_path=None) -> list[dict[str, Any]]:
+    """The review queue, restricted to entries whose document the viewer owns."""
     conn = _connect(db_path)
     try:
-        return ddb.list_queue_entries(conn, status=status)
+        rows = ddb.list_queue_entries(conn, status=status)
+        return _scoped_queue_rows(conn, rows, viewer)
     finally:
         conn.close()
 
 
-def discard_document(document_id: int, *, actor: str, db_path=None) -> None:
+def discard_document(document_id: int, *, actor: str, viewer, db_path=None) -> None:
     """The 'discard' resolution option in the Unified Review Queue — removes
     the document outright (not a soft-delete; it is still under review and
     was never filed)."""
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         ddb.discard_document(conn, document_id, actor)
     finally:
         conn.close()
 
 
-def queue_progress(db_path=None) -> dict[str, int]:
+def queue_progress(*, viewer, db_path=None) -> dict[str, int]:
     """Queue-level progress: how many entries were resolved 'today' vs still
-    pending, for the Unified Review Queue's progress indicator."""
+    pending, for the Unified Review Queue's progress indicator.
+
+    Counts are SCOPE-filtered: a standard user's indicators must not reveal
+    how much work exists on other users' documents.
+    """
     conn = _connect(db_path)
     try:
+        owner = access.owner_filter(viewer)
+        scope_sql = (
+            " JOIN documents d ON d.document_id = q.document_id"
+            if owner is not None
+            else ""
+        )
+        where_owner = " AND d.owner_user_id = ?" if owner is not None else ""
+        args: tuple = (owner,) if owner is not None else ()
+
         cur = conn.execute(
-            "SELECT COUNT(*) FROM unified_review_queue_entries WHERE status = 'pending'"
+            f"SELECT COUNT(*) FROM unified_review_queue_entries q{scope_sql} "
+            f"WHERE q.status = 'pending'{where_owner}",
+            args,
         )
         pending = cur.fetchone()[0]
         cur = conn.execute(
-            "SELECT COUNT(*) FROM unified_review_queue_entries "
-            "WHERE status = 'resolved' AND date(resolved_at) = date('now')"
+            f"SELECT COUNT(*) FROM unified_review_queue_entries q{scope_sql} "
+            f"WHERE q.status = 'resolved' AND date(q.resolved_at) = date('now'){where_owner}",
+            args,
         )
         resolved_today = cur.fetchone()[0]
         cur = conn.execute(
-            "SELECT COUNT(*) FROM unified_review_queue_entries "
-            "WHERE status = 'resolved'"
+            f"SELECT COUNT(*) FROM unified_review_queue_entries q{scope_sql} "
+            f"WHERE q.status = 'resolved'{where_owner}",
+            args,
         )
         resolved_total = cur.fetchone()[0]
         return {"pending": pending, "resolved_today": resolved_today, "resolved_total": resolved_total}
@@ -346,26 +460,42 @@ def queue_progress(db_path=None) -> dict[str, int]:
         conn.close()
 
 
-def find_duplicate_filenames(*, db_path=None) -> set[str]:
+def find_duplicate_filenames(*, viewer, db_path=None) -> set[str]:
     """Filenames shared by more than one NON-deleted document — surfaced as a
-    'Possible duplicate' affordance mirroring F3-B's duplicate badge."""
+    'Possible duplicate' affordance mirroring F3-B's duplicate badge.
+
+    Scoped to the viewer's own documents: a shared filename elsewhere in the
+    vault is not this user's business, and counting it would both leak the
+    existence of another user's file and wrongly badge this user's own.
+    """
     conn = _connect(db_path)
     try:
-        cur = conn.execute(
+        owner = access.owner_filter(viewer)
+        sql = (
             "SELECT v.filename FROM document_versions v "
             "JOIN documents d ON d.current_version_id = v.version_id "
-            "WHERE d.is_deleted = 0 GROUP BY v.filename HAVING COUNT(*) > 1"
+            "WHERE d.is_deleted = 0"
         )
+        params: tuple = ()
+        if owner is not None:
+            sql += " AND d.owner_user_id = ?"
+            params = (owner,)
+        sql += " GROUP BY v.filename HAVING COUNT(*) > 1"
+        cur = conn.execute(sql, params)
         return {r[0] for r in cur.fetchall()}
     finally:
         conn.close()
 
 
 def resolve_queue_entry(
-    entry_id: int, *, resolved_doc_type: Optional[str] = None, notes: Optional[str], actor: str, db_path=None,
+    entry_id: int, *, resolved_doc_type: Optional[str] = None, notes: Optional[str], actor: str,
+    viewer, db_path=None,
 ) -> None:
     """Human resolves a queue entry — files the document under the
-    corrected type (if supplied) and marks it filed."""
+    corrected type (if supplied) and marks it filed.
+
+    Refused unless the viewer owns the entry's document: ``entry_id`` comes
+    from the client, and resolving an entry reclassifies a real document."""
     conn = _connect(db_path)
     try:
         row = conn.execute(
@@ -374,6 +504,7 @@ def resolve_queue_entry(
         if row is None:
             raise DocumentError("Queue entry not found.")
         document_id = row[0]
+        _require_document_access(conn, document_id, viewer)
         if resolved_doc_type:
             conn.execute(
                 "UPDATE documents SET doc_type = ?, review_status = 'filed' WHERE document_id = ?",
@@ -393,9 +524,12 @@ def resolve_queue_entry(
 # ---------------------------------------------------------------------------
 
 
-def soft_delete_document(document_id: int, *, reason: Optional[str] = None, actor: str, db_path=None) -> None:
+def soft_delete_document(
+    document_id: int, *, reason: Optional[str] = None, actor: str, viewer, db_path=None
+) -> None:
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         ddb.set_document_deleted(conn, document_id, is_deleted=True, actor=actor)
         ddb.log_edit(
             conn, document_id=document_id, action="soft_delete", old_value="active", new_value="deleted",
@@ -405,11 +539,12 @@ def soft_delete_document(document_id: int, *, reason: Optional[str] = None, acto
         conn.close()
 
 
-def restore_document(document_id: int, *, actor: str, db_path=None) -> None:
+def restore_document(document_id: int, *, actor: str, viewer, db_path=None) -> None:
     """Evidence links are never removed on soft-delete, so they still
     resolve correctly after a restore — nothing to re-link here."""
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         ddb.set_document_deleted(conn, document_id, is_deleted=False, actor=actor)
         ddb.log_edit(
             conn, document_id=document_id, action="restore", old_value="deleted", new_value="active",
@@ -419,8 +554,10 @@ def restore_document(document_id: int, *, actor: str, db_path=None) -> None:
         conn.close()
 
 
-def list_recently_deleted(*, client_id: Optional[int] = None, db_path=None) -> list[dict[str, Any]]:
-    return list_documents(client_id=client_id, deleted_only=True, db_path=db_path)
+def list_recently_deleted(*, viewer, client_id: Optional[int] = None, db_path=None) -> list[dict[str, Any]]:
+    return list_documents(
+        viewer=viewer, client_id=client_id, deleted_only=True, db_path=db_path
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -430,18 +567,22 @@ def list_recently_deleted(*, client_id: Optional[int] = None, db_path=None) -> l
 
 
 def reassign_document(
-    document_id: int, new_client_id: int, *, reason: str, actor: str, db_path=None,
+    document_id: int, new_client_id: int, *, reason: str, actor: str, viewer, db_path=None,
 ) -> None:
     """A misfiled document can be reassigned to the correct client
     without losing version history or evidence links — neither table is
-    touched by this call, only the document's client_id."""
+    touched by this call, only the document's client_id (and its owner, which
+    follows the client).
+
+    Both ends are checked: the viewer must own the document AND the client it
+    is being moved to, so a reassignment can neither move somebody else's
+    document nor push one into somebody else's client."""
     if not reason or not reason.strip():
         raise DocumentError("A reason is required before saving a reassignment.")
     conn = _connect(db_path)
     try:
-        doc = ddb.get_document(conn, document_id)
-        if doc is None:
-            raise DocumentError("Document not found.")
+        doc = _require_document_access(conn, document_id, viewer)
+        _require_client_owned(conn, new_client_id, viewer)
         old_client_id = doc["client_id"]
         ddb.reassign_document_client(conn, document_id, new_client_id)
         ddb.log_edit(
@@ -452,9 +593,10 @@ def reassign_document(
         conn.close()
 
 
-def list_edit_log(document_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def list_edit_log(document_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_document_access(conn, document_id, viewer)
         return ddb.list_edit_log(conn, document_id)
     finally:
         conn.close()

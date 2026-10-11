@@ -239,11 +239,11 @@ class InvoiceExtractState(SharedUploadState):
             return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self.client_label_map = {
             str(c["client_id"]): c["legal_name"]
-            for c in clients.list_clients(include_inactive=True)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=True)
         }
         if not self.upload_client_id and self.client_options:
             self.upload_client_id = self.client_options[0].client_id
@@ -288,10 +288,12 @@ class InvoiceExtractState(SharedUploadState):
         if not self.upload_client_id:
             self.uploads = []
             return
-        self.uploads = [self._to_upload_row(u) for u in ie.list_uploads(client_id=self.upload_client_id)]
+        self.uploads = [self._to_upload_row(u) for u in ie.list_uploads(
+            client_id=self.upload_client_id, viewer=self._viewer()
+        )]
 
     def _load_queue(self) -> None:
-        summary = ie.review_queue_summary()
+        summary = ie.review_queue_summary(viewer=self._viewer())
         self.queue_open_count = summary["open_count"]
         self.queue_by_client = [
             ClientCount(client_id=cid, label=self._client_label(cid), count=count)
@@ -299,7 +301,7 @@ class InvoiceExtractState(SharedUploadState):
         ]
         self.queue_entries = [
             self._to_upload_row(e["upload"], flagged=len(e.get("flagged_fields") or []))
-            for e in ie.list_review_queue(status="open")
+            for e in ie.list_review_queue(status="open", viewer=self._viewer())
             if e.get("upload")
         ]
 
@@ -307,7 +309,10 @@ class InvoiceExtractState(SharedUploadState):
         if self.export_client_id:
             self.confirmed_uploads = [
                 self._to_upload_row(u)
-                for u in ie.list_uploads(client_id=self.export_client_id, status="confirmed")
+                for u in ie.list_uploads(
+                    client_id=self.export_client_id, status="confirmed",
+                    viewer=self._viewer(),
+                )
             ]
         else:
             self.confirmed_uploads = []
@@ -320,7 +325,7 @@ class InvoiceExtractState(SharedUploadState):
                 generated_at=str(b.get("generated_at") or "").replace("T", " ").split(".")[0],
                 fmt="csv" if b["filename"].endswith(".csv") else "xlsx",
             )
-            for b in ie.list_export_batches()
+            for b in ie.list_export_batches(viewer=self._viewer())
         ]
 
     def _load_models(self) -> None:
@@ -337,7 +342,7 @@ class InvoiceExtractState(SharedUploadState):
         ]
 
     def _load_detail(self) -> None:
-        up = ie.get_upload(self.selected_upload_id)
+        up = ie.get_upload(self.selected_upload_id, viewer=self._viewer())
         if up is None:
             self.selected_upload_id = 0
             return
@@ -418,7 +423,7 @@ class InvoiceExtractState(SharedUploadState):
         self.preview_text = ""
         self.preview_table_rows = []
         self.preview_table_headers = []
-        data = ie.get_upload_bytes(self.selected_upload_id)
+        data = ie.get_upload_bytes(self.selected_upload_id, viewer=self._viewer())
         if not data:
             return
         fmt = up.get("source_format")
@@ -480,8 +485,8 @@ class InvoiceExtractState(SharedUploadState):
     def _load_shared_viewer(self) -> None:
         """Populate the shared FileViewerPanel fields so F3-B's review screen
         renders the document through the SAME viewer F3 uses."""
-        data = ie.get_upload_bytes(self.selected_upload_id)
-        up = ie.get_upload(self.selected_upload_id)
+        data = ie.get_upload_bytes(self.selected_upload_id, viewer=self._viewer())
+        up = ie.get_upload(self.selected_upload_id, viewer=self._viewer())
         if not data:
             return
         from setu.state.shared_upload import (
@@ -562,7 +567,12 @@ class InvoiceExtractState(SharedUploadState):
 
     @rx.event
     def set_upload_client(self, v: str):
-        self.upload_client_id = _to_int(v)
+        """Only a client this user may see — the id arrives from the event and
+        keys the uploads list."""
+        candidate = _to_int(v)
+        if candidate and candidate not in {o.client_id for o in self.client_options}:
+            return
+        self.upload_client_id = candidate
         self._load_uploads()
 
     @rx.event
@@ -728,6 +738,12 @@ class InvoiceExtractState(SharedUploadState):
     # ------------------------------------------------------------------
     @rx.event
     def open_upload(self, upload_id: int):
+        """Only an upload this user owns; the id comes from the event. Every
+        later action (fields, confirm, discard, re-extract) keys off the field
+        set here, so this is the one place it has to be checked."""
+        if ie.get_upload(upload_id, viewer=self._viewer()) is None:
+            self.error = "That upload isn't one you can open."
+            return
         self.selected_upload_id = upload_id
         self.field_inputs = {}
         self.editing_field = ""
@@ -892,6 +908,11 @@ class InvoiceExtractState(SharedUploadState):
     # ------------------------------------------------------------------
     @rx.event
     def toggle_export_select(self, upload_id: str, checked: bool):
+        """Only an upload from the (scoped) confirmed list may be selected for
+        export — the id arrives as a free string from the event."""
+        allowed = {str(u.upload_id) for u in self.confirmed_uploads}
+        if checked and upload_id not in allowed:
+            return
         if checked and upload_id not in self.export_selected:
             self.export_selected = self.export_selected + [upload_id]
         elif not checked and upload_id in self.export_selected:
@@ -905,7 +926,10 @@ class InvoiceExtractState(SharedUploadState):
     def generate_export(self):
         ids = [_to_int(u) for u in self.export_selected]
         try:
-            res = ie.generate_export(upload_ids=ids, actor=self.username, fmt=self.export_fmt)
+            res = ie.generate_export(
+                upload_ids=ids, actor=self.username, fmt=self.export_fmt,
+                viewer=self._viewer(),
+            )
             self.flash = (
                 f"Batch {res['batch_id']} generated — {res['row_count']} row(s), rows {res['row_range']}."
             )
@@ -928,7 +952,7 @@ class InvoiceExtractState(SharedUploadState):
     @rx.event
     def download_batch(self, batch_id: int, filename: str, fmt: str):
         try:
-            data = ie.regenerate_export_bytes(batch_id)
+            data = ie.regenerate_export_bytes(batch_id, viewer=self._viewer())
             mime = (
                 "text/csv" if fmt == "csv"
                 else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

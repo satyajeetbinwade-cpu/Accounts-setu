@@ -35,6 +35,7 @@ import io
 import pandas as pd
 
 from src import db as recon_db
+from src.auth import access
 from src.invoice_extract import db as idb
 from src.invoice_extract import extractor
 from src.invoice_extract import service as ie
@@ -111,7 +112,12 @@ def _reviewable(db_path, upload_id) -> list[str]:
 
 def _export_row(db_path, upload_id, fmt="xlsx") -> tuple[dict, dict]:
     ie.confirm_upload(upload_id, actor="admin", db_path=db_path)
-    result = ie.generate_export(upload_ids=[upload_id], actor="admin", fmt=fmt, db_path=db_path)
+    # Explicit internal viewer: this test drives the service directly, with no
+    # session. UI callers pass the signed-in user instead.
+    result = ie.generate_export(
+        upload_ids=[upload_id], actor="admin", fmt=fmt,
+        viewer=access.SYSTEM_VIEWER, db_path=db_path,
+    )
     if fmt == "csv":
         df = pd.read_csv(io.BytesIO(result["data"]), dtype=str, keep_default_na=False)
     else:
@@ -231,7 +237,11 @@ def test_recorded_batch_redownloads_in_same_layout(tmp_path):
                                           "igst_amount": ("0", 93)})
     _row, result = _export_row(db_path, upload_id)
     batch = ie.get_export_batch(result["batch_id"], db_path=db_path)
-    again = ie.regenerate_export_bytes(batch["batch_id"], db_path=db_path)
+    # Explicit internal viewer: this test exercises the service directly, with no
+    # session. UI callers pass the signed-in user instead.
+    again = ie.regenerate_export_bytes(
+        batch["batch_id"], viewer=access.SYSTEM_VIEWER, db_path=db_path
+    )
     df = pd.read_excel(io.BytesIO(again), dtype=str, keep_default_na=False)
     assert list(df.columns) == EXPECTED_HEADERS
     assert df.iloc[0]["CGST %"] == "9"

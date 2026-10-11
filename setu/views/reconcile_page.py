@@ -141,6 +141,44 @@ def _context_stage() -> rx.Component:
                                 value=ReconcileState.ctx_period,
                                 on_change=ReconcileState.set_ctx_period,
                             ),
+                            # A client created a moment ago has no periods yet, and
+                            # the engine reads its sources from data/<client>/<period>/
+                            # — so offer to open the first period here instead of
+                            # leaving the flow with nowhere to put an upload.
+                            rx.cond(
+                                ReconcileState.ctx_period == "",
+                                rx.form(
+                                    rx.hstack(
+                                        rx.input(
+                                            name="new_period",
+                                            placeholder="YYYY-MM",
+                                            width="110px",
+                                            size="2",
+                                        ),
+                                        rx.button(
+                                            "Open period",
+                                            type="submit",
+                                            size="2",
+                                            variant="soft",
+                                            disabled=ReconcileState.ctx_client == "",
+                                        ),
+                                        spacing="2",
+                                        align="center",
+                                    ),
+                                    on_submit=ReconcileState.add_period,
+                                    reset_on_submit=True,
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                ReconcileState.period_error != "",
+                                rx.text(
+                                    ReconcileState.period_error,
+                                    font_size="11px",
+                                    color=t.Color.DANGER.value,
+                                ),
+                                rx.fragment(),
+                            ),
                             spacing="1",
                             align="start",
                         ),
@@ -160,21 +198,40 @@ def _context_stage() -> rx.Component:
                         wrap="wrap",
                     ),
                     rx.vstack(
-                        c.warning_banner(
-                            "No client data folders exist on this server yet, so there is "
-                            "nothing to reconcile. Upload source files in Smart Ingestion, "
-                            "or seed the demo data (Meridian Fabrics / Test Client)."
+                        rx.cond(
+                            ReconcileState.can_manage_clients,
+                            rx.vstack(
+                                c.empty_state(
+                                    "You don't have any clients yet. Create your first "
+                                    "one to start reconciling.",
+                                    icon="building-2",
+                                ),
+                                rx.button(
+                                    "+ Create a client",
+                                    on_click=ReconcileState.add_new_client,
+                                    size="3",
+                                    background=t.Color.ACCENT.value,
+                                    color="#FFFFFF",
+                                    border_radius="10px",
+                                ),
+                                spacing="3",
+                                align="center",
+                                width="100%",
+                            ),
+                            c.empty_state(
+                                "No clients are assigned to you yet. Ask an Admin to "
+                                "set one up before you reconcile.",
+                                icon="building-2",
+                            ),
                         ),
-                        rx.box(height="6px"),
-                        c.empty_state(
-                            "Reconcile reads the folders under "
-                            "data/<client>/<period>/<source_type>/ on the server. "
-                            "None exist yet.",
-                            icon="folder-open",
+                        rx.text(
+                            "Once a client exists, pick it here, open a period, and "
+                            "upload its source files in Stage 2.",
+                            style=t.TEXT["micro"],
                         ),
-                        spacing="2",
+                        spacing="3",
                         width="100%",
-                        align="start",
+                        align="center",
                     ),
                 ),
                 rx.cond(

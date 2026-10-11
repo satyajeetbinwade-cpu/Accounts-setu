@@ -714,11 +714,11 @@ class IngestionAiState(SharedUploadState):
             return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self.client_label_map = {
             str(c["client_id"]): c["legal_name"]
-            for c in clients.list_clients(include_inactive=True)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=True)
         }
         self._load_all()
 
@@ -733,6 +733,7 @@ class IngestionAiState(SharedUploadState):
         rows = ingestion_ai.list_uploads_with_context(
             client_id=self.client_id or None,
             status=None,
+            viewer=self._viewer(),
         )
         threshold = ingestion_ai.get_preselect_threshold()
         auto = ingestion_ai.get_thresholds()["auto_apply"]
@@ -875,11 +876,18 @@ class IngestionAiState(SharedUploadState):
     # ------------------------------------------------------------------
     @rx.event
     def open_file_period(self, upload_id: int, filename: str):
+        """Only an upload this user owns — the id comes from the event, and the
+        confirm step MOVES the document's period and its bytes on disk."""
+        if ingestion_ai.get_upload(upload_id, viewer=self._viewer()) is None:
+            self.error = "That upload isn't one you can file."
+            return
         """Open the re-file dialog, pre-filled with the best suggestion."""
         self.file_period_upload_id = upload_id
         self.file_period_filename = filename
         self.file_period_error = ""
-        suggested, source = ingestion_ai.suggest_period_for_upload(upload_id)
+        suggested, source = ingestion_ai.suggest_period_for_upload(
+            upload_id, viewer=self._viewer()
+        )
         self.file_period_suggestion = suggested or ""
         self.file_period_source = source
         self.file_period_value = suggested or ""
@@ -902,6 +910,12 @@ class IngestionAiState(SharedUploadState):
         doing only some leaves the file half-visible.
         """
         self.file_period_error = ""
+        # A WRITE that moves bytes on disk: re-checked here as well as on open.
+        if ingestion_ai.get_upload(
+            self.file_period_upload_id or 0, viewer=self._viewer()
+        ) is None:
+            self.file_period_error = "That upload isn't one you can file."
+            return
         if not period_utils.is_valid_period(self.file_period_value):
             self.file_period_error = "Enter a period as YYYY-MM (for example 2026-08)."
             return
@@ -911,6 +925,7 @@ class IngestionAiState(SharedUploadState):
                 self.file_period_value.strip(),
                 actor=self.username,
                 client_ref=self._client_ref(),
+                viewer=self._viewer(),
             )
         except ingestion_ai.IngestionAIError as exc:
             self.file_period_error = str(exc)
@@ -1127,6 +1142,10 @@ class IngestionAiState(SharedUploadState):
     # ------------------------------------------------------------------
     @rx.event
     def open_upload(self, upload_id: int):
+        """Only an upload this user owns; the id comes from the event."""
+        if ingestion_ai.get_upload(upload_id, viewer=self._viewer()) is None:
+            self.error = "That upload isn't one you can open."
+            return
         self.selected_upload_id = upload_id
         self.overrides = {}
         self.column_overrides = {}
@@ -1200,7 +1219,7 @@ class IngestionAiState(SharedUploadState):
     @rx.var
     def history_record_id(self) -> str:
         try:
-            upload = ingestion_ai.get_upload(self.selected_upload_id)
+            upload = ingestion_ai.get_upload(self.selected_upload_id, viewer=self._viewer())
             if upload is None:
                 return ""
             return f"{upload['source_type']}:{upload['filename']}"
@@ -1212,6 +1231,11 @@ class IngestionAiState(SharedUploadState):
     # ------------------------------------------------------------------
     @rx.event
     def open_rerun(self, upload_id: int, filename: str):
+        """Only an upload this user owns — the id comes from the event, and the
+        confirm step clears the stored result and re-runs the model."""
+        if ingestion_ai.get_upload(upload_id, viewer=self._viewer()) is None:
+            self.error = "That upload isn't one you can re-run."
+            return
         """Open the confirm dialog for a per-file model re-run.
 
         A re-run is a live model call (~15-25s) and discards the cached
@@ -1239,6 +1263,12 @@ class IngestionAiState(SharedUploadState):
         if not self.rerun_target_id:
             self.rerun_open = False
             return
+        # A WRITE plus a live model call: ownership is re-checked here as well
+        # as on open, since this clears the stored result and spends tokens.
+        if ingestion_ai.get_upload(self.rerun_target_id, viewer=self._viewer()) is None:
+            self.rerun_open = False
+            self.error = "That upload isn't one you can re-run."
+            return
         self.rerun_busy = True
         self.busy_label = f"Re-running {self.rerun_target_name} through the model…"
         self.error = ""
@@ -1246,6 +1276,7 @@ class IngestionAiState(SharedUploadState):
         try:
             out = ingestion_ai.re_run_mapping(
                 self.rerun_target_id, actor=self.username, client_ref=self._client_ref(),
+                viewer=self._viewer(),
             )
             self.flash = (
                 f"Re-ran {self.rerun_target_name} through the model — "
@@ -1268,7 +1299,7 @@ class IngestionAiState(SharedUploadState):
     def _load_review(self) -> None:
         if not self.selected_upload_id:
             return
-        upload = ingestion_ai.get_upload(self.selected_upload_id)
+        upload = ingestion_ai.get_upload(self.selected_upload_id, viewer=self._viewer())
         if upload is None:
             self.selected_upload_id = 0
             return
@@ -1658,11 +1689,13 @@ class IngestionAiState(SharedUploadState):
             from src.documents import service as documents
             from src.ingestion_ai import normalizer
 
-            doc = documents.get_document(upload["document_id"])
+            doc = documents.find_document(upload["document_id"], viewer=self._viewer())
             if not doc or not doc.get("current_version_id"):
                 self.preview_note = "Source preview unavailable for this upload."
                 return
-            data = documents.get_version_bytes(doc["current_version_id"])
+            data = documents.get_version_bytes(
+                doc["current_version_id"], viewer=self._viewer()
+            )
             if not data:
                 self.preview_note = "Source preview unavailable for this upload."
                 return

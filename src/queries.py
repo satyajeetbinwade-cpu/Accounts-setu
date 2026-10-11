@@ -157,13 +157,14 @@ def _client_id_for_run(run_id: int, *, db_path=None) -> int:
         return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
     try:
+        from src.auth import access
         from src.clients import service as clients
 
         target = norm(folder)
-        for c in clients.list_clients(include_inactive=True):
+        for c in clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True):
             if norm(c["legal_name"]) == target:
                 return int(c["client_id"])
-        for c in clients.list_clients(include_inactive=True):
+        for c in clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True):
             n = norm(c["legal_name"])
             if target and (n.startswith(target) or target.startswith(n)):
                 return int(c["client_id"])

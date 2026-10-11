@@ -113,22 +113,44 @@ def portal_source_types(recon_type: str) -> list[str]:
     return [s for s in RECON_SOURCE_TYPES[recon_type] if s not in BOOKS_SOURCE_TYPES]
 
 
-def list_clients() -> list[str]:
-    """Clients with a data/ folder, plus any client already in the DB
-    (in case a run exists for a client whose source files were removed)."""
+def list_clients(viewer=None, *, db_path=None) -> list[str]:
+    """Clients the viewer may work on.
+
+    The union of three things, which is what makes the picker useful at every
+    stage of a client's life: the client's ``data/`` folder, any run recorded
+    for it (in case the source files were later removed), and **its client
+    record** — so a client created moments ago is selectable before anything
+    has been uploaded for it.
+
+    Scoped to ``viewer``: a standard user sees ONLY the clients they own. The
+    filter is applied here rather than in the UI, so no page, export or count
+    can be handed a client the user may not see. A client name with no owning
+    record counts as admin-only, so a folder created before ownership existed
+    can never leak.
+    """
+    from src.auth import access
+
     on_disk = set()
     if DATA_ROOT.exists():
         on_disk = {p.name for p in DATA_ROOT.iterdir() if p.is_dir()}
 
     in_db = set()
     try:
-        df = queries.list_runs()
+        df = queries.list_runs(db_path=db_path)
         if not df.empty:
             in_db = set(df["client"].unique())
     except Exception:
         pass
 
-    return sorted(on_disk | in_db)
+    owned = access.visible_client_names(viewer, db_path=db_path)
+    if owned is None:
+        # Admin: everything, including client records with no folder yet.
+        names = on_disk | in_db | access.all_client_record_names(db_path=db_path)
+    else:
+        # A standard user's world IS their owned records. Their folders/runs
+        # are a subset of those names, so no separate union is needed.
+        names = owned
+    return sorted(n for n in names if n)
 
 
 def list_periods(client: str) -> list[str]:
