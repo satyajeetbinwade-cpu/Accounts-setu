@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from src.data_paths import DATA_ROOT, client_data_root, data_dir
+from src.data_paths import DATA_ROOT, REPLACED_DIR_NAME, client_data_root, data_dir
 from src import queries
 from src.shared.periods import (
     PERIOD_UNFILED,
@@ -215,6 +215,11 @@ def period_has_source_data(client_id, period: str) -> bool:
     Used by read-only screens to show the "no data uploaded for this period
     yet" empty state instead of erroring when the period itself is valid but
     nothing has been filed against it.
+
+    ``_replaced/`` — the archive a same-name re-upload pushes copies into — is
+    a SIBLING of the slots, not one of them, and holds no CURRENT source file.
+    Reading it as data would make a period look populated on the strength of a
+    file the user already replaced.
     """
     if not (client_id and period):
         return False
@@ -222,7 +227,9 @@ def period_has_source_data(client_id, period: str) -> bool:
     if not period_dir.is_dir():
         return False
     for source_dir in period_dir.iterdir():
-        if source_dir.is_dir() and any(f.is_file() for f in source_dir.iterdir()):
+        if not source_dir.is_dir() or source_dir.name == REPLACED_DIR_NAME:
+            continue
+        if any(f.is_file() for f in source_dir.iterdir()):
             return True
     return False
 
