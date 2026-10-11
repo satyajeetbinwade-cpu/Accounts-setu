@@ -89,9 +89,13 @@ EXPOSE 8080
 # bundled demo folders (stashed at /app/seed_data) are seeded by
 # `python -m src.demo_seed`: it creates the demo clients (with their real
 # PAN/GSTIN) and files each folder under data/<client_id>/... via the shared
-# path builder — so no name-keyed folder is ever created. It is idempotent, so
-# it can never clobber real uploads (existing clients are reused and existing
-# files are skipped). `rm -rf /app/data` removes the image's real directory
+# path builder — so no name-keyed folder is ever created. It is FIRST-BOOT
+# ONLY: it refuses to run as soon as any client exists, and even then it reuses
+# existing clients and skips existing files. That refusal is load-bearing on a
+# MIGRATED volume, where the client this list looks for can be present under a
+# different name (`Test Client` in the bundled folders is `Test` in the live
+# roster) — name-matching alone would have created a SECOND client for it.
+# `rm -rf /app/data` removes the image's real directory
 # (or a stale symlink) so `ln -s` always yields a clean symlink.
 #
 # FAIL-LOUD: the CMD is one `&&` chain. `python main.py` runs the boot

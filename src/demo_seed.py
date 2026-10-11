@@ -8,9 +8,9 @@ the clients carry their real PAN/GSTIN), then copies each period/slot's files
 into place with ``source_data_path`` / ``exports_dir`` — the same functions the
 upload path uses. After this runs there is no name-keyed folder anywhere.
 
-Idempotent: existing clients are reused and destination files are skipped, so
-running it on an already-seeded volume is a no-op. It also does nothing when
-no seed data is present (a real customer volume).
+Idempotent, and first-boot ONLY: it does nothing at all once any client
+       exists, existing clients are reused and destination files are skipped. It
+also does nothing when no seed data is present (a real customer volume).
 
 Run:  python -m src.demo_seed
 """
@@ -48,6 +48,24 @@ def main() -> int:
         c["legal_name"]: int(c["client_id"])
         for c in clients.list_clients(include_inactive=True)
     }
+
+    # A volume that already has clients is NOT a fresh deployment, so this is
+    # not the first boot and there is nothing demo-shaped to add.
+    #
+    # This guard is what makes the docstring's "idempotent, never clobbers real
+    # data" actually true. Reuse below matches on legal_name, and a MIGRATED
+    # volume can hold the very client this list is looking for under a
+    # different name — the live roster has `Test`, not the bundled folder's
+    # `Test Client`. Name-matching alone therefore missed the existing row and
+    # created a SECOND client for a client that already had one (the GSTIN is
+    # no help either: the live row has none, so the unique index did not stop
+    # it). Refuse before touching anything.
+    if by_name:
+        print(
+            f"[demo_seed] {len(by_name)} client(s) already exist; "
+            "this is not a fresh volume, so no demo seeding"
+        )
+        return 0
 
     for legal_name, pan, gstin, team in DEMO_CLIENTS:
         src = SEED_ROOT / legal_name
