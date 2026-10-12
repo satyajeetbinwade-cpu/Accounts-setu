@@ -54,6 +54,19 @@ _BARE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._~:/-]+$")
 
 CATEGORIES = ["Ingestion", "Extraction", "Analysis"]
 
+# Touchpoints that SEND PAGE IMAGES to the model. Only these are subject to the
+# image-capability guard (save-time refusal + the image test call) — every other
+# touchpoint behaves exactly as before.
+VISION_TOUCHPOINTS: tuple[str, ...] = ("invoice_extraction_visual", "invoice_triage")
+
+# Optional, admin-editable override used when the catalogue has no modality for
+# a model: a comma-separated allowlist of model ids known to accept images.
+VISION_ALLOWLIST_KEY = "ai.vision.model_allowlist"
+
+# The word baked into the generated test image. The test passes only if the
+# model's reply contains it.
+VISION_TEST_WORD = "SETU"
+
 
 class AIModelsError(RuntimeError):
     """Raised for expected registry failures (bad model id, unknown
@@ -72,6 +85,100 @@ def init_ai_models(db_path=None) -> None:
 
 def _connect(db_path=None) -> sqlite3.Connection:
     return recon_db.get_connection(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Vision capability (shared by the registry's save guard AND the gateway's
+# runtime guard, so the two can never disagree)
+# ---------------------------------------------------------------------------
+
+
+def is_vision_touchpoint(touchpoint_key: str) -> bool:
+    """Does this touchpoint send page images to the model?"""
+    return (touchpoint_key or "").strip() in VISION_TOUCHPOINTS
+
+
+def vision_check(provider: Optional[str], model: Optional[str], *, db_path=None) -> tuple[bool, str]:
+    """Can this (provider, model) receive images? Returns ``(allowed, reason)``.
+
+    Primary source: the catalogue's ``modality`` (``ai_provider_models`` then
+    ``ai_model_catalog``). A model the catalogue says is text-only is REFUSED.
+    An UNKNOWN modality is ALLOWED — we never refuse what we cannot prove
+    (that would block a brand-new vision model). A non-empty
+    ``ai.vision.model_allowlist`` is additionally enforced as a belt-and-braces
+    override. ``reason`` is "" when allowed.
+    """
+    if not model:
+        return True, ""
+    try:
+        from src.settings import service as settings
+
+        allowlist = (settings.get_setting_str(VISION_ALLOWLIST_KEY, default=None, db_path=db_path) or "").strip()
+    except Exception:  # noqa: BLE001 — settings must never block a save
+        allowlist = ""
+    if allowlist:
+        allowed_models = {m.strip() for m in allowlist.split(",") if m.strip()}
+        if model not in allowed_models:
+            return False, f"model '{model}' is not in the vision allowlist ({VISION_ALLOWLIST_KEY})"
+    try:
+        modality = model_modality(provider, model, db_path=db_path)
+    except Exception:  # noqa: BLE001
+        modality = None
+    if prov.supports_images(modality) is False:
+        return False, (
+            f"model '{model}' ({provider or 'unknown provider'}) does not accept image "
+            f"input (catalogue modality {modality!r})"
+        )
+    return True, ""
+
+
+def _vision_refusals(
+    touchpoint_key: str, legs: list[tuple[str, Optional[str], Optional[str]]], db_path,
+) -> list[str]:
+    """The refusal messages for the legs of a vision touchpoint (empty when all
+    legs can take images). Returns [] for a non-vision touchpoint."""
+    if not is_vision_touchpoint(touchpoint_key):
+        return []
+    refusals: list[str] = []
+    for leg_name, provider_key, model in legs:
+        allowed, reason = vision_check(provider_key, model, db_path=db_path)
+        if not allowed:
+            refusals.append(f"{leg_name}: {reason}")
+    return refusals
+
+
+def _vision_override_required(touchpoint_key: str, refusals: list[str]) -> AIModelsError:
+    return AIModelsError(
+        f"\u201c{touchpoint_key}\u201d is a vision touchpoint — it sends page images to the "
+        "model. " + "; ".join(refusals) + ". Choose an image-capable model, or tick "
+        "\u201cI know this model accepts images\u201d to save it anyway."
+    )
+
+
+def _vision_test_image() -> tuple[bytes, str]:
+    """A small generated PNG (64x64) with the word ``VISION_TEST_WORD`` printed
+    on it — used by the per-leg test call on a vision touchpoint."""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (64, 64), "white")
+    draw = ImageDraw.Draw(img)
+    font = None
+    try:  # Pillow >= 10 takes a size; older versions do not.
+        font = ImageFont.load_default(size=16)
+    except Exception:  # noqa: BLE001
+        try:
+            font = ImageFont.load_default()
+        except Exception:  # noqa: BLE001
+            font = None
+    if font is not None:
+        draw.text((5, 24), VISION_TEST_WORD, fill="black", font=font)
+    else:  # pragma: no cover — no usable font on this box
+        draw.text((5, 24), VISION_TEST_WORD, fill="black")
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), "image/png"
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +287,7 @@ def set_assignment_models(
     primary_model: str,
     fallback_model: str,
     actor: str,
+    allow_non_vision_override: bool = False,
     db_path=None,
 ) -> dict[str, Any]:
     """Set a touchpoint's primary and fallback model.
@@ -187,6 +295,11 @@ def set_assignment_models(
     Validates both ids and rejects a fallback identical to the primary —
     a "fallback" that is the same model provides no resilience and would
     hide a real outage.
+
+    On a VISION touchpoint (see ``VISION_TOUCHPOINTS``) either model that the
+    catalogue says is text-only is refused unless the admin passes
+    ``allow_non_vision_override=True`` — and the override is recorded in the
+    change log. Every other touchpoint is unaffected.
     """
     primary = validate_model_id(primary_model)
     fallback = validate_model_id(fallback_model)
@@ -202,6 +315,18 @@ def set_assignment_models(
         if existing is None:
             raise AIModelsError(f"Unknown touchpoint '{touchpoint_key}'.")
 
+        # Vision guard FIRST, before any write, so a refused save changes nothing.
+        refusals = _vision_refusals(
+            touchpoint_key,
+            [
+                ("primary", existing.get("primary_provider") or "openrouter", primary),
+                ("fallback", existing.get("fallback_provider") or "openrouter", fallback),
+            ],
+            db_path,
+        )
+        if refusals and not allow_non_vision_override:
+            raise _vision_override_required(touchpoint_key, refusals)
+
         adb.set_assignment_models(
             conn, touchpoint_key,
             primary_model=primary, fallback_model=fallback, actor=actor,
@@ -213,7 +338,19 @@ def set_assignment_models(
                 f"fallback: {existing.get('fallback_model')} -> {fallback}"
             ),
             actor=actor,
+            db_path=db_path,
         )
+        if refusals:
+            adb.log_change(
+                conn, touchpoint_key=touchpoint_key, action="vision_override",
+                detail=(
+                    "saved an assignment the image-capability check refused, on the admin's "
+                    "explicit confirmation: " + "; ".join(refusals)
+                    + f"; primary={primary}; fallback={fallback}"
+                ),
+                actor=actor,
+                db_path=db_path,
+            )
     finally:
         conn.close()
 
@@ -615,6 +752,7 @@ def set_assignment_legs(
     fallback_provider: str,
     fallback_model: str,
     actor: str,
+    allow_non_vision_override: bool = False,
     db_path=None,
 ) -> dict[str, Any]:
     """Set both legs, each an independent (provider, model) pair.
@@ -622,6 +760,11 @@ def set_assignment_legs(
     The fallback provider MAY differ from the primary — that cross-provider
     fallback is the point of this extension. A fallback identical to the
     primary provides no resilience and is rejected.
+
+    On a VISION touchpoint, a leg whose model the catalogue says is text-only is
+    REFUSED (nothing is written) unless the admin passes
+    ``allow_non_vision_override=True``; the override is then recorded in the
+    change log. Every other touchpoint is unaffected.
     """
     pp = (primary_provider or "").strip().lower()
     fp = (fallback_provider or "").strip().lower()
@@ -640,6 +783,14 @@ def set_assignment_legs(
         existing = adb.get_assignment(conn, touchpoint_key)
         if existing is None:
             raise AIModelsError(f"Unknown touchpoint '{touchpoint_key}'.")
+
+        # Vision guard FIRST, before any write, so a refused save changes nothing.
+        refusals = _vision_refusals(
+            touchpoint_key, [("primary", pp, pm), ("fallback", fp, fm)], db_path,
+        )
+        if refusals and not allow_non_vision_override:
+            raise _vision_override_required(touchpoint_key, refusals)
+
         adb.set_assignment_legs(
             conn, touchpoint_key,
             primary_provider=pp, primary_model=pm,
@@ -648,7 +799,19 @@ def set_assignment_legs(
         adb.log_change(
             conn, touchpoint_key=touchpoint_key, action="model_assignment_changed",
             detail=f"primary: {pp}/{pm}; fallback: {fp}/{fm}", actor=actor,
+            db_path=db_path,
         )
+        if refusals:
+            adb.log_change(
+                conn, touchpoint_key=touchpoint_key, action="vision_override",
+                detail=(
+                    "saved a leg assignment the image-capability check refused, on the "
+                    "admin's explicit confirmation: " + "; ".join(refusals)
+                    + f"; primary={pp}/{pm}; fallback={fp}/{fm}"
+                ),
+                actor=actor,
+                db_path=db_path,
+            )
     finally:
         conn.close()
 
@@ -682,6 +845,10 @@ def test_leg(touchpoint_key: str, leg: str, *, actor: str, db_path=None) -> dict
     Returns latency + a truncated sample output for the leg tested, not merely
     pass/fail. Never raises for an expected provider failure — the reason is
     returned in ``error`` so the UI can show it.
+
+    On a VISION touchpoint the test sends a small generated IMAGE and checks the
+    reply read it (``kind == "image"``); every other touchpoint keeps the
+    original text ping (``kind == "text"``).
     """
     leg = (leg or "").strip().lower()
     if leg not in ("primary", "fallback"):
@@ -692,7 +859,11 @@ def test_leg(touchpoint_key: str, leg: str, *, actor: str, db_path=None) -> dict
 
     provider_key = (row.get(f"{leg}_provider") or "openrouter")
     model = row.get(f"{leg}_model") or ""
-    result_base = {"touchpoint_key": touchpoint_key, "leg": leg, "provider": provider_key, "model": model}
+    vision = is_vision_touchpoint(touchpoint_key)
+    result_base = {
+        "touchpoint_key": touchpoint_key, "leg": leg, "provider": provider_key,
+        "model": model, "kind": "image" if vision else "text",
+    }
     if not model:
         return {**result_base, "ok": False, "latency_ms": None, "sample": "",
                 "error": "No model is assigned to this leg yet."}
@@ -705,6 +876,11 @@ def test_leg(touchpoint_key: str, leg: str, *, actor: str, db_path=None) -> dict
     except AIModelsError as exc:
         return {**result_base, "ok": False, "latency_ms": None, "sample": "", "error": str(exc)}
 
+    if vision:
+        # A vision touchpoint's test must actually SEND AN IMAGE — a text-only
+        # model with a valid key would otherwise pass a text "ping" test.
+        return _vision_test_leg(spec, api_key, model, result_base)
+
     try:
         text, latency_ms = prov.call_provider(
             spec, api_key, model=model,
@@ -716,6 +892,39 @@ def test_leg(touchpoint_key: str, leg: str, *, actor: str, db_path=None) -> dict
                 "sample": (text or "").strip()[:300], "error": None}
     except prov.ProviderError as exc:
         return {**result_base, "ok": False, "latency_ms": None, "sample": "", "error": str(exc)}
+
+
+def _vision_test_leg(spec, api_key: str, model: str, result_base: dict[str, Any]) -> dict[str, Any]:
+    """Send a generated 64x64 image and check the model READ it.
+
+    Passes only when the reply contains the word printed in the image, so a
+    text-only model (or one that silently drops the image) FAILS here.
+    """
+    try:
+        png, mime = _vision_test_image()
+    except Exception as exc:  # noqa: BLE001 — no PIL / no font
+        return {**result_base, "ok": False, "latency_ms": None, "sample": "",
+                "error": f"could not generate the test image: {exc}"}
+    try:
+        text, latency_ms = prov.call_provider(
+            spec, api_key, model=model,
+            system="You are a connectivity test for the SETU platform.",
+            user="Reply with the single word printed in this image.",
+            images=[(mime, png)], max_tokens=16, temperature=0.0, timeout=30,
+        )
+    except prov.ProviderError as exc:
+        return {**result_base, "ok": False, "latency_ms": None, "sample": "", "error": str(exc)}
+
+    sample = (text or "").strip()
+    if VISION_TEST_WORD.lower() not in sample.lower():
+        return {
+            **result_base, "ok": False, "latency_ms": latency_ms, "sample": sample[:300],
+            "error": (
+                "the model replied without reading the test image — expected the word "
+                f"{VISION_TEST_WORD!r} in its reply"
+            ),
+        }
+    return {**result_base, "ok": True, "latency_ms": latency_ms, "sample": sample[:300], "error": None}
 
 
 def record_fallback_event(
@@ -770,6 +979,39 @@ def list_fallback_events(*, limit: int = 50, db_path=None) -> list[dict[str, Any
         return adb.list_fallback_events(conn, limit=limit)
     finally:
         conn.close()
+
+
+def fallback_stats(*, days: int = 7, db_path=None) -> list[dict[str, Any]]:
+    """Per-touchpoint fallback counts for the last ``days`` days.
+
+    Each row: ``{touchpoint_key, calls, fallbacks, fallback_rate, warn, days}``.
+    ``calls`` counts RESOLVED calls (``ai_call_log`` outcomes ``success`` +
+    ``fallback_used``), so the rate is the share of calls the fallback leg
+    actually served. ``warn`` is true only when MORE THAN HALF fell back
+    (``fallbacks > calls / 2``); zero calls never warns. Newest-first is not
+    meaningful here, so rows are ordered by fallback count then key.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = adb.ai_call_stats(conn, days=days)
+    finally:
+        conn.close()
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        calls = int(r.get("calls") or 0)
+        fallbacks = int(r.get("fallbacks") or 0)
+        rate = (fallbacks / calls) if calls else 0.0
+        out.append({
+            "touchpoint_key": r.get("touchpoint_key") or "",
+            "calls": calls,
+            "fallbacks": fallbacks,
+            "fallback_rate": rate,
+            "warn": calls > 0 and fallbacks > calls / 2,
+            "days": int(days),
+        })
+    out.sort(key=lambda r: (-r["fallbacks"], r["touchpoint_key"]))
+    return out
 
 
 # ---------------------------------------------------------------------------

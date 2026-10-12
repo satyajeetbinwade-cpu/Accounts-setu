@@ -124,7 +124,6 @@ def _call_leg(
 # ---------------------------------------------------------------------------
 
 _VISION_CONCURRENCY_KEY = "ai.vision.max_concurrency"
-_VISION_ALLOWLIST_KEY = "ai.vision.model_allowlist"
 _DEFAULT_VISION_CONCURRENCY = 4
 
 _vision_sem_lock = threading.Lock()
@@ -139,15 +138,6 @@ def _setting_int(key: str, default: int, db_path) -> int:
         return int(settings.get_setting_int(key, default=default, db_path=db_path))
     except Exception:  # noqa: BLE001
         return default
-
-
-def _setting_str(key: str, db_path) -> Optional[str]:
-    try:
-        from src.settings import service as settings
-
-        return settings.get_setting_str(key, default=None, db_path=db_path)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _vision_semaphore(db_path) -> threading.BoundedSemaphore:
@@ -168,30 +158,12 @@ def _vision_semaphore(db_path) -> threading.BoundedSemaphore:
 def _vision_allowed(provider: str, model: str, db_path) -> tuple[bool, str]:
     """Can this model receive images? (Step D — the vision capability guard.)
 
-    The catalog DOES store modalities (``ai_provider_models.modality`` /
-    ``ai_model_catalog.modality``), so the primary check reads them: a model
-    the catalogue says is text-only is REFUSED. An UNKNOWN modality is allowed
-    (we cannot prove it is text-only). A configurable allowlist
-    (``ai.vision.model_allowlist``, comma-separated) is additionally enforced
-    when set, as a belt-and-braces override.
+    Delegates to ``ai_models.vision_check`` so the RUNTIME guard here and the
+    REGISTRY's save-time guard can never disagree: the catalogue's modality is
+    the primary source (a known text-only model is refused), an unknown modality
+    is allowed, and ``ai.vision.model_allowlist`` is an extra override.
     """
-    allowlist = (_setting_str(_VISION_ALLOWLIST_KEY, db_path) or "").strip()
-    if allowlist:
-        allowed = {m.strip() for m in allowlist.split(",") if m.strip()}
-        if model not in allowed:
-            return False, (
-                f"model '{model}' is not in the vision allowlist (ai.vision.model_allowlist)"
-            )
-    try:
-        modality = ai_models.model_modality(provider, model, db_path=db_path)
-    except Exception:  # noqa: BLE001
-        modality = None
-    if prov.supports_images(modality) is False:
-        return False, (
-            f"model '{model}' ({provider}) does not accept image input "
-            f"(catalog modality {modality!r})"
-        )
-    return True, ""
+    return ai_models.vision_check(provider, model, db_path=db_path)
 
 
 def _normalize_policy(policy: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:

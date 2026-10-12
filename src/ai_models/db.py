@@ -10,7 +10,7 @@ directly.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 
@@ -185,16 +185,33 @@ def catalog_fetched_at(conn: sqlite3.Connection) -> Optional[str]:
 
 def log_change(
     conn: sqlite3.Connection, *, touchpoint_key: Optional[str], action: str, detail: str, actor: str,
+    db_path=None,
 ) -> None:
     """Record a model-routing change as a REAL F4 Edit History entry.
 
-    The signature is kept identical so every existing call site is
-    unchanged; the local ``ai_model_change_log`` table is retained (empty)
-    for backward compatibility but is no longer written. F4's record_type is
-    ``ai_model_assignment`` and record_id is the touchpoint key, so one View
-    History trigger per touchpoint shows its full routing history.
+    The signature is kept identical (plus an optional ``db_path``) so every
+    existing call site is unchanged; the local ``ai_model_change_log`` table is
+    retained (empty) for backward compatibility but is no longer written. F4's
+    record_type is ``ai_model_assignment`` and record_id is the touchpoint key,
+    so one View History trigger per touchpoint shows its full routing history.
+
+    ``db_path`` is threaded through so a caller operating on an explicit
+    database (tests, tooling) records the entry THERE rather than in the app
+    default. Omitting it preserves the historical behaviour exactly.
+
+    The F4 schema is ENSURED on the target connection first (idempotent
+    ``CREATE TABLE IF NOT EXISTS``) so the audit entry always lands in the same
+    database as the change it describes, even on a scratch/demo database that
+    never ran the full boot.
     """
     from src.f4 import service as f4  # local import avoids a hard circular dep
+
+    try:
+        from src.f4.schema import init_f4_schema
+
+        init_f4_schema(conn)
+    except Exception:  # noqa: BLE001 — never let the audit sink break the change
+        pass
 
     f4.record_edit(
         record_type="ai_model_assignment",
@@ -204,6 +221,7 @@ def log_change(
         new_value=detail,
         reason=None,
         actor=actor,
+        db_path=db_path,
     )
 
 
@@ -523,3 +541,31 @@ def model_modality(
     if row is None:
         return None
     return row[0]
+
+
+def ai_call_stats(conn: sqlite3.Connection, *, days: int = 7) -> list[dict[str, Any]]:
+    """Per-touchpoint call/fallback counts for the last ``days`` days.
+
+    The denominator is RESOLVED calls only — an ``ai_call_log`` row whose
+    terminal outcome is ``success`` (primary served it) or ``fallback_used``
+    (the fallback leg served it). Retry/parse-error/rejected rows are attempts,
+    not calls, so they are excluded and the ratio stays meaningful.
+
+    Returns ``[]`` when ``ai_call_log`` does not exist yet (a pre-Phase-1 DB).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
+    try:
+        return _rows_to_dicts(
+            conn,
+            """
+            SELECT touchpoint_key,
+                   SUM(CASE WHEN outcome IN ('success', 'fallback_used') THEN 1 ELSE 0 END) AS calls,
+                   SUM(CASE WHEN outcome = 'fallback_used' THEN 1 ELSE 0 END) AS fallbacks
+              FROM ai_call_log
+             WHERE created_at >= ?
+             GROUP BY touchpoint_key
+            """,
+            (cutoff,),
+        )
+    except sqlite3.OperationalError:
+        return []

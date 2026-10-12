@@ -76,6 +76,11 @@ class TouchpointRow:
     is_active: bool
     updated_at: str
     updated_by: str
+    # True for touchpoints that send page images (invoice_extraction_visual,
+    # invoice_triage). Only these show the image-capability warning + override.
+    is_vision: bool = False
+    # Non-empty when a SAVED leg on a vision touchpoint looks text-only.
+    vision_warning: str = ""
 
 
 @dataclass
@@ -85,6 +90,14 @@ class FallbackRow:
     provider: str
     model: str
     reason: str
+
+
+@dataclass
+class FallbackStatRow:
+    touchpoint_key: str
+    summary: str
+    rate_label: str
+    warn: bool
 
 
 def _short(value) -> str:
@@ -109,6 +122,26 @@ def _placeholder_module(description: str) -> str:
     return f"Module {digits}" if digits else ""
 
 
+def _vision_warning(assignment: dict) -> str:
+    """A warning sentence when a SAVED leg on a vision touchpoint looks
+    text-only (so an existing bad assignment is visible, not just refused at
+    save time). Empty for every other touchpoint."""
+    key = assignment.get("touchpoint_key") or ""
+    if not ai_models.is_vision_touchpoint(key):
+        return ""
+    problems: list[str] = []
+    for leg, provider_key, model in (
+        ("primary", assignment.get("primary_provider") or "openrouter", assignment.get("primary_model") or ""),
+        ("fallback", assignment.get("fallback_provider") or "openrouter", assignment.get("fallback_model") or ""),
+    ):
+        if not model:
+            continue
+        allowed, reason = ai_models.vision_check(provider_key, model)
+        if not allowed:
+            problems.append(f"{leg}: {reason}")
+    return "; ".join(problems)
+
+
 class AiModelsState(AuthState):
     """Multi-provider AI configuration state."""
 
@@ -128,6 +161,8 @@ class AiModelsState(AuthState):
     assignments: list[TouchpointRow] = []
     touchpoint_history: dict[str, list[HistoryEntry]] = {}
     fallback_events: list[FallbackRow] = []
+    # Per-touchpoint fallback counts for the last 7 days (Recent fallbacks).
+    fallback_stats: list[FallbackStatRow] = []
 
     # key entry buffer per provider (never persisted beyond the input)
     provider_key_input: dict[str, str] = {}
@@ -144,6 +179,9 @@ class AiModelsState(AuthState):
     test_primary_text: dict[str, str] = {}
     test_fallback_ok: dict[str, bool] = {}
     test_fallback_text: dict[str, str] = {}
+    # "I know this model accepts images" tick, per touchpoint (vision only).
+    # Gate for the save-time image-capability refusal.
+    ack_vision_override: dict[str, bool] = {}
 
     flash: str = ""
     error: str = ""
@@ -212,6 +250,8 @@ class AiModelsState(AuthState):
                 is_active=bool(a["is_active"]),
                 updated_at=_short(a.get("updated_at")),
                 updated_by=a.get("updated_by") or "",
+                is_vision=ai_models.is_vision_touchpoint(a["touchpoint_key"]),
+                vision_warning=_vision_warning(a),
             )
             for a in ai_models.list_assignments()
         ]
@@ -220,6 +260,7 @@ class AiModelsState(AuthState):
             self.edit_primary_model.setdefault(a.touchpoint_key, a.primary_model)
             self.edit_fallback_provider.setdefault(a.touchpoint_key, a.fallback_provider)
             self.edit_fallback_model.setdefault(a.touchpoint_key, a.fallback_model)
+            self.ack_vision_override.setdefault(a.touchpoint_key, False)
             self.test_primary_ok.setdefault(a.touchpoint_key, False)
             self.test_primary_text.setdefault(a.touchpoint_key, "")
             self.test_fallback_ok.setdefault(a.touchpoint_key, False)
@@ -250,6 +291,18 @@ class AiModelsState(AuthState):
                 reason=e.get("reason") or "",
             )
             for e in ai_models.list_fallback_events()
+        ]
+        self.fallback_stats = [
+            FallbackStatRow(
+                touchpoint_key=s["touchpoint_key"],
+                summary=(
+                    f"{s['fallbacks']} of {s['calls']} calls fell back "
+                    f"in the last {s['days']} days"
+                ),
+                rate_label=f"{round(s['fallback_rate'] * 100)}%",
+                warn=bool(s["warn"]),
+            )
+            for s in ai_models.fallback_stats()
         ]
 
     # ------------------------------------------------------------------
@@ -348,13 +401,21 @@ class AiModelsState(AuthState):
                 primary_provider=primary_provider, primary_model=primary_model,
                 fallback_provider=fallback_provider, fallback_model=fallback_model,
                 actor=self.username,
+                allow_non_vision_override=bool(self.ack_vision_override.get(key, False)),
             )
             self.flash = f"{key} now routes via {primary_provider} → {fallback_provider}."
             self.edit_custom_primary[key] = ""
             self.edit_custom_fallback[key] = ""
+            self.ack_vision_override[key] = False
         except ai_models.AIModelsError as exc:
+            # A refused save (including the image-capability refusal) leaves the
+            # tick in place so the admin can confirm and retry.
             self.error = str(exc)
         self._load_all()
+
+    @rx.event
+    def set_ack_vision_override(self, key: str, value: bool):
+        self.ack_vision_override[key] = bool(value)
 
     @rx.event
     def test_leg(self, key: str, leg: str):
@@ -362,13 +423,15 @@ class AiModelsState(AuthState):
         self.error = ""
         out = ai_models.test_leg(key, leg, actor=self.username)
         ok = bool(out.get("ok"))
+        prefix = "image test · " if out.get("kind") == "image" else ""
         if ok:
             text = (
-                f"{out.get('provider')} · {out.get('model')} · "
+                prefix
+                + f"{out.get('provider')} · {out.get('model')} · "
                 f"{int(out.get('latency_ms') or 0)} ms · “{out.get('sample') or ''}”"
             )
         else:
-            text = f"{out.get('provider')} · {out.get('model')} — {out.get('error') or 'failed'}"
+            text = prefix + f"{out.get('provider')} · {out.get('model')} — {out.get('error') or 'failed'}"
         if leg == "primary":
             self.test_primary_ok[key] = ok
             self.test_primary_text[key] = text

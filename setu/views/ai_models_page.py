@@ -275,6 +275,37 @@ def _touchpoint_card(row) -> rx.Component:
                         width="100%",
                         spacing="3",
                     ),
+                    rx.cond(
+                        row.is_vision,
+                        rx.vstack(
+                            c.inline_reason(
+                                "Vision touchpoint — every call sends page images. Saving a model the "
+                                "catalogue knows is text-only is refused unless you confirm it."
+                            ),
+                            rx.cond(
+                                row.vision_warning != "",
+                                c.warning_banner(
+                                    "⚠ A saved leg may not accept images — " + row.vision_warning
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.hstack(
+                                rx.checkbox(
+                                    checked=AiModelsState.ack_vision_override[row.touchpoint_key],
+                                    on_change=lambda v: AiModelsState.set_ack_vision_override(
+                                        row.touchpoint_key, v
+                                    ),
+                                ),
+                                rx.text("I know this model accepts images", style=t.TEXT["micro"]),
+                                spacing="2",
+                                align="center",
+                            ),
+                            spacing="2",
+                            align="start",
+                            width="100%",
+                        ),
+                        rx.fragment(),
+                    ),
                     rx.hstack(
                         rx.button(
                             "Save assignment",
@@ -351,6 +382,22 @@ def _fallback_row(r) -> rx.Component:
     )
 
 
+def _fallback_stat_row(s) -> rx.Component:
+    return rx.hstack(
+        rx.text(s.touchpoint_key, style=t.TEXT["body"], min_width="170px"),
+        rx.text(s.summary, style=t.TEXT["micro"], flex="1"),
+        rx.text(s.rate_label, style=t.TEXT["body"], min_width="44px"),
+        rx.cond(
+            s.warn,
+            c.pill("⚠ most calls fell back", variant="danger"),
+            c.pill("within tolerance", variant="rule"),
+        ),
+        spacing="3",
+        align="center",
+        width="100%",
+    )
+
+
 def _fallback_panel() -> rx.Component:
     return c.card(
         rx.vstack(
@@ -359,6 +406,26 @@ def _fallback_panel() -> rx.Component:
                 "When a touchpoint's primary leg fails, the call is retried on its fallback leg. "
                 "Each event records the provider that actually resolved the call.",
                 style=t.TEXT["micro"],
+            ),
+            rx.cond(
+                AiModelsState.fallback_stats.length() > 0,
+                rx.vstack(
+                    rx.text("Fallback rate · last 7 days", style=t.TEXT["label"]),
+                    rx.vstack(
+                        rx.foreach(AiModelsState.fallback_stats, _fallback_stat_row),
+                        spacing="1",
+                        width="100%",
+                    ),
+                    rx.text(
+                        "Share of resolved calls the fallback leg actually served. Flagged when more "
+                        "than half of the last 7 days' calls fell back.",
+                        style=t.TEXT["micro"],
+                    ),
+                    spacing="2",
+                    align="start",
+                    width="100%",
+                ),
+                rx.fragment(),
             ),
             rx.cond(
                 AiModelsState.fallback_events.length() > 0,
