@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 import tempfile
@@ -51,6 +52,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.ai_models import service as ai_models
 from src.invoice_extract import db as idb
 from src.invoice_extract.service import InvoiceExtractError, _connect
 
@@ -1615,6 +1617,257 @@ def _doc_category_ok(doc: dict[str, Any], expected: dict[str, Any]) -> bool:
     return doc["category"] == expected.get("category")
 
 
+# ---------------------------------------------------------------------------
+# Model-comparison scoring
+# ---------------------------------------------------------------------------
+#
+# ``score`` NEVER opens the database it is given for writing: it copies it
+# (source opened ``mode=ro``, SQLite backup API) into a temp folder PER
+# CANDIDATE and does all of its work there — migrations, the invoice_triage
+# assignment change, the upload, and the run. The app's database, screens and
+# touchpoint defaults are untouched.
+# ---------------------------------------------------------------------------
+
+SCORE_REPORT_NAME = "triage_score_report.md"
+COST_CAP_DEFAULT = 1.00
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _parse_leg(spec: str) -> tuple[str, str]:
+    """Parse a ``provider:model_id`` leg.
+
+    Split on the FIRST colon, so an OpenRouter variant suffix (``:free``,
+    ``:batch``) stays part of the model id. The model id is passed through
+    VERBATIM — a DeepSeek/Sarvam id is never translated or looked up in the
+    OpenRouter catalogue.
+    """
+    raw = (spec or "").strip()
+    if ":" not in raw:
+        raise InvoiceExtractError(
+            "Model legs are written 'provider:model_id' — for example "
+            f"openrouter:qwen/qwen3.7-flash or deepseek:deepseek-flash. Got {spec!r}."
+        )
+    provider, model = raw.split(":", 1)
+    provider, model = provider.strip().lower(), model.strip()
+    if not provider or not model:
+        raise InvoiceExtractError(f"A leg needs both a provider and a model id; got {spec!r}.")
+    return provider, model
+
+
+def _slug(text: str) -> str:
+    return _SLUG_RE.sub("-", (text or "candidate").lower()).strip("-") or "candidate"
+
+
+def _copy_db(source_db: Path, dest_db: Path) -> None:
+    """Copy the source database with SQLite's backup API.
+
+    The SOURCE is opened read-only (``mode=ro``), so the database handed to the
+    command is never opened for writing and its bytes cannot change.
+    """
+    src = sqlite3.connect(f"file:{Path(source_db)}?mode=ro", uri=True)
+    dst = sqlite3.connect(dest_db)
+    try:
+        src.backup(dst)
+    finally:
+        src.close()
+        dst.close()
+
+
+@dataclass
+class _Copy:
+    root: Path
+    db: Path
+    data: Path
+
+    def cleanup(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def _make_copy(source_db: Path, *, prefix: str, db_name: str = "poc.db") -> _Copy:
+    """A fresh temp copy of ``source_db`` with migrations applied to the COPY."""
+    from src import bootstrap
+
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    dest = root / db_name
+    _copy_db(source_db, dest)
+    bootstrap.run_migrations(db_path=dest, data_root=root / "data")
+    return _Copy(root=root, db=dest, data=root / "data")
+
+
+def _current_triage_legs(copy: _Copy) -> tuple[tuple[str, str], tuple[str, str]]:
+    """The invoice_triage legs already in the COPY (its seeded default when the
+    source database had none) — used to fill in a leg the caller did not give."""
+    row = ai_models.get_assignment("invoice_triage", db_path=str(copy.db)) or {}
+    return (
+        (row.get("primary_provider") or "openrouter", row.get("primary_model") or ""),
+        (row.get("fallback_provider") or "openrouter", row.get("fallback_model") or ""),
+    )
+
+
+def _catalogue_available(copy: _Copy, provider_key: str) -> bool:
+    try:
+        return bool(ai_models.models_for_provider(provider_key, db_path=str(copy.db)))
+    except Exception:  # noqa: BLE001 — treat an unreadable catalogue as "no catalogue"
+        return False
+
+
+def _apply_triage_assignment(
+    copy: _Copy, *, primary: tuple[str, str], fallback: tuple[str, str],
+    force_model: bool, actor: str = "triage:score",
+) -> dict[str, Any]:
+    """Set the invoice_triage legs **in the COPY ONLY**.
+
+    Refuses (before any write) when a leg is provably not image-capable — the
+    SAME ``ai_models.vision_check`` the AI Models screen uses — unless
+    ``force_model``. When a NON-OpenRouter provider has no catalogue in the copy
+    (its model list is empty), the catalogue check is SKIPPED for that leg and
+    the caller relies on the live image test instead; the id is never looked up
+    anywhere else.
+    """
+    notes: list[str] = []
+    refusals: list[str] = []
+    checked: list[str] = []
+    skipped: list[str] = []
+
+    for leg_name, (provider_key, model) in (("primary", primary), ("fallback", fallback)):
+        if provider_key != "openrouter" and not _catalogue_available(copy, provider_key):
+            notes.append(
+                f"{leg_name} ({provider_key}): no catalogue in this copy — catalogue image "
+                "check SKIPPED, relying on the live image test"
+            )
+            skipped.append(leg_name)
+            continue
+        allowed, reason = ai_models.vision_check(provider_key, model, db_path=str(copy.db))
+        checked.append(leg_name)
+        if not allowed:
+            refusals.append(f"{leg_name}: {reason}")
+
+    if refusals and not force_model:
+        raise InvoiceExtractError(
+            "Refusing to start — the image-capability check failed ("
+            + "; ".join(refusals)
+            + "). Pass --force-model to run it anyway, or choose an image-capable model."
+        )
+    if refusals and force_model:
+        notes.append("--force-model overrode the image-capability check: " + "; ".join(refusals))
+
+    # The internal guard must be told when we have deliberately decided to
+    # proceed (forced, or a leg whose catalogue could not be consulted).
+    ai_models.set_assignment_legs(
+        "invoice_triage",
+        primary_provider=primary[0], primary_model=primary[1],
+        fallback_provider=fallback[0], fallback_model=fallback[1],
+        actor=actor, allow_non_vision_override=bool(force_model or skipped),
+        db_path=str(copy.db),
+    )
+    return {
+        "primary": primary, "fallback": fallback,
+        "forced": bool(refusals and force_model),
+        "notes": notes, "checked": checked, "skipped": skipped,
+    }
+
+
+def _live_image_test(copy: _Copy, legs: list[str]) -> dict[str, Any]:
+    """The app's own per-leg image test, used in place of a catalogue check when
+    a provider has no catalogue in the copy."""
+    out: dict[str, Any] = {}
+    for leg in legs:
+        try:
+            out[leg] = ai_models.test_leg(
+                "invoice_triage", leg, actor="triage:score", db_path=str(copy.db),
+            )
+        except Exception as exc:  # noqa: BLE001 — reported, not raised
+            out[leg] = {"ok": False, "kind": "image", "error": f"{type(exc).__name__}: {exc}"}
+    return out
+
+
+def _key_preflight(copy: _Copy, providers: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Report per provider ONLY whether a key is available — the app's own
+    status check, which never decrypts, prints or copies a key."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for provider_key in providers:
+        if provider_key in seen:
+            continue
+        seen.add(provider_key)
+        try:
+            configured, source = ai_models.provider_key_configured(
+                provider_key, db_path=str(copy.db)
+            )
+        except Exception:  # noqa: BLE001
+            configured, source = False, None
+        rows.append({"provider": provider_key, "available": bool(configured), "source": source})
+    missing = [r["provider"] for r in rows if not r["available"]]
+    return rows, missing
+
+
+def _normalise_candidates(payload: list[Any]) -> list[dict[str, Any]]:
+    """``[{name, primary, fallback}]`` → legs as ``(provider, model)`` tuples."""
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise InvoiceExtractError(
+                f"Candidate {index} must be an object with name/primary/fallback."
+            )
+        name = str(item.get("name") or f"candidate-{index}")
+        prim = item.get("primary")
+        fb = item.get("fallback")
+        out.append({
+            "name": name,
+            "primary": _parse_leg(prim) if isinstance(prim, str) else prim,
+            "fallback": _parse_leg(fb) if isinstance(fb, str) else fb,
+        })
+    return out
+
+
+def _candidates_from_args(
+    *, primary: Optional[list[str]], fallback: Optional[list[str]],
+    candidates_file: Optional[str], candidates: Optional[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Build the candidate list from the CLI/JSON inputs.
+
+    Repeatable ``--primary`` values become one candidate each, paired with the
+    matching ``--fallback`` when present — so a single command can compare
+    several models.
+    """
+    if candidates_file and (primary or fallback or candidates):
+        raise InvoiceExtractError("Use either --candidates or --primary/--fallback, not both.")
+    if candidates_file:
+        try:
+            payload = json.loads(Path(candidates_file).read_text())
+        except (OSError, ValueError) as exc:
+            raise InvoiceExtractError(f"Could not read the candidates file: {exc}") from exc
+        if isinstance(payload, dict):
+            payload = payload.get("candidates")
+        if not isinstance(payload, list) or not payload:
+            raise InvoiceExtractError(
+                "The candidates file must be a non-empty JSON list of "
+                "{name, primary, fallback} objects."
+            )
+        return _normalise_candidates(payload)
+    if candidates:
+        return _normalise_candidates(candidates)
+
+    primaries = [_parse_leg(p) for p in (primary or [])]
+    fallbacks = [_parse_leg(f) for f in (fallback or [])]
+    if not primaries:
+        if fallbacks:
+            raise InvoiceExtractError("--fallback needs a matching --primary.")
+        return [{"name": "default", "primary": None, "fallback": None}]
+    if len(primaries) == 1:
+        return [{"name": "cli", "primary": primaries[0],
+                 "fallback": fallbacks[0] if fallbacks else None}]
+    if len(fallbacks) > len(primaries):
+        raise InvoiceExtractError("More --fallback values than --primary values.")
+    return [
+        {"name": f"cli-{i + 1}", "primary": p,
+         "fallback": fallbacks[i] if i < len(fallbacks) else None}
+        for i, p in enumerate(primaries)
+    ]
+
+
 def score(
     pdf_path: str,
     *,
@@ -1623,8 +1876,23 @@ def score(
     client_id: Optional[int] = None,
     keep: bool = False,
     db_name: str = "poc.db",
+    db_path: Optional[str] = None,
+    primary: Optional[list[str]] = None,
+    fallback: Optional[list[str]] = None,
+    candidates_file: Optional[str] = None,
+    candidates: Optional[list[dict[str, Any]]] = None,
+    repeat: int = 1,
+    max_cost_usd: float = COST_CAP_DEFAULT,
+    force_model: bool = False,
+    report_name: str = SCORE_REPORT_NAME,
 ) -> dict[str, Any]:
-    """LIVE scoring run against a COPY of the DB and a temporary data root."""
+    """Score one or more models against the fixture — on COPIES of the database.
+
+    ``--db`` names the database to COPY (default: the app database). Each
+    candidate gets its OWN fresh copy, so the invoice_triage assignment is only
+    ever changed in a temp copy. Provider keys are resolved only through the
+    app's own resolver; nothing here prints, logs, copies or writes a key.
+    """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
         raise InvoiceExtractError(f"Fixture PDF not found: {pdf_path}")
@@ -1632,68 +1900,254 @@ def score(
     out_dir.mkdir(parents=True, exist_ok=True)
     expected = _load_expected(Path(expected_path) if expected_path else DEFAULT_EXPECTED)
 
-    real_db = Path(recon_db.DB_PATH)
-    if not real_db.exists():
+    source_db = Path(db_path) if db_path else Path(recon_db.DB_PATH)
+    if not source_db.exists():
         raise InvoiceExtractError(
-            f"No database at {real_db}. Run `python main.py` once (so a copy exists) before scoring."
+            f"No database at {source_db}. Pass --db <path> or run `python main.py` once."
         )
+    repeats = max(1, int(repeat))
+    cap = float(max_cost_usd) if max_cost_usd is not None else None
+    wanted = _candidates_from_args(
+        primary=primary, fallback=fallback, candidates_file=candidates_file, candidates=candidates,
+    )
 
-    tmp = Path(tempfile.mkdtemp(prefix="triage_score_"))
-    tmp_db = tmp / db_name
-    tmp_data = tmp / "data"
-    # Copy via SQLite's backup API — safe with WAL, never writes the source.
-    src = sqlite3.connect(f"file:{real_db}?mode=ro", uri=True)
-    dst = sqlite3.connect(tmp_db)
+    pages_total = _pdf_page_count(pdf_path.read_bytes())
+
+    # ---- pre-flight, in a throwaway COPY: resolve legs, check capability + keys
+    pre = _make_copy(source_db, prefix="triage_preflight_", db_name=db_name)
     try:
-        src.backup(dst)
+        default_primary, default_fallback = _current_triage_legs(pre)
+        plan: list[dict[str, Any]] = []
+        for cand in wanted:
+            eff_primary = cand["primary"] or default_primary
+            eff_fallback = cand["fallback"] or default_fallback
+            notes: list[str] = []
+            if cand["primary"] is None:
+                notes.append(f"primary not given — using the copy's current primary "
+                             f"{eff_primary[0]}:{eff_primary[1]}")
+            if cand["fallback"] is None:
+                notes.append(f"fallback not given — using the copy's current fallback "
+                             f"{eff_fallback[0]}:{eff_fallback[1]}")
+            applied = _apply_triage_assignment(
+                pre, primary=eff_primary, fallback=eff_fallback, force_model=force_model,
+            )
+            applied["notes"] = notes + applied["notes"]
+            plan.append({
+                "name": cand["name"], "primary": eff_primary, "fallback": eff_fallback,
+                "applied": applied, "live_image_test": {}, "runs": [],
+                "cost_cap_reached": False, "error": None, "totals": {},
+            })
+
+        # Keys FIRST: report availability only, and stop before anything runs
+        # (or is even tested) when a provider a candidate needs has no key.
+        providers = sorted({p for c in plan for p in (c["primary"][0], c["fallback"][0])})
+        key_rows, missing_keys = _key_preflight(pre, providers)
+        print("Provider keys — resolved through the app's own resolver (vault, then environment):")
+        for row in key_rows:
+            print(f"  key available: {'yes' if row['available'] else 'no '}  [{row['provider']}]")
+        if missing_keys:
+            raise InvoiceExtractError(
+                "Missing API key for: " + ", ".join(missing_keys)
+                + ". Add one on the AI Models screen (or set the provider's environment "
+                "variable) — refusing to start so a half-run comparison is not produced."
+            )
+
+        # Only now (a key is known to exist) test the legs whose provider has no
+        # catalogue in the copy: the app's own live image test stands in for it.
+        for cand in plan:
+            if not cand["applied"]["skipped"] or force_model:
+                continue
+            live = _live_image_test(pre, cand["applied"]["skipped"])
+            cand["live_image_test"] = live
+            failed = [leg for leg, res in live.items() if not res.get("ok")]
+            if failed:
+                detail = "; ".join(
+                    f"{leg}: {live[leg].get('error') or 'the test image was not read'}"
+                    for leg in failed
+                )
+                raise InvoiceExtractError(
+                    "Refusing to start — no catalogue to check against and the live image "
+                    f"test failed ({detail}). Pass --force-model to run it anyway."
+                )
+
+        print("Resolved assignment for invoice_triage (in each candidate's own copy):")
+        for cand in plan:
+            print(f"  {cand['name']:22} primary={cand['primary'][0]}:{cand['primary'][1]}"
+                  f"   fallback={cand['fallback'][0]}:{cand['fallback'][1]}")
     finally:
-        src.close()
-        dst.close()
+        if not keep:
+            pre.cleanup()
 
-    from src import bootstrap
+    # ---- run each candidate, one after another, each in its own copy
+    for cand in plan:
+        slug = _slug(cand["name"])
+        cand_dir = out_dir / slug
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        spent = 0.0
+        for index in range(1, repeats + 1):
+            if cap is not None and spent > cap:
+                cand["cost_cap_reached"] = True
+                break
+            try:
+                result = _run_candidate_once(
+                    source_db=source_db, pdf_path=pdf_path, plan=cand, out_dir=cand_dir,
+                    slug=slug, expected=expected, client_id=client_id, db_name=db_name,
+                    keep=keep, force_model=force_model, index=index,
+                )
+            except InvoiceExtractError as exc:
+                cand["error"] = str(exc)
+                break
+            cand["runs"].append(result)
+            spent += float(result["cost_usd"] or 0.0)
+            if cap is not None and spent > cap:
+                cand["cost_cap_reached"] = True
+                break
+        cand["totals"] = {
+            "cost_usd": round(spent, 6) if any(r["cost_usd"] is not None for r in cand["runs"]) else None,
+            "runs": len(cand["runs"]),
+            "elapsed_ms": sum(int(r["elapsed_ms"]) for r in cand["runs"]),
+        }
 
-    bootstrap.run_migrations(db_path=tmp_db, data_root=tmp_data)
+    report_path = out_dir / report_name
+    report_path.write_text(_render_comparison_report({
+        "pdf": str(pdf_path), "pages_total": pages_total, "source_db": str(source_db),
+        "expected": expected, "repeats": repeats, "cap": cap, "force_model": force_model,
+        "key_rows": key_rows, "missing_keys": missing_keys, "out_dir": str(out_dir),
+        "candidates": plan,
+    }))
 
-    from src.clients import service as clients
+    failed = sum(
+        1 for c in plan for r in c["runs"] if r["analysis"].get("failed")
+    )
+    summary = {
+        "report_path": str(report_path),
+        "pdf": str(pdf_path),
+        "pages_total": pages_total,
+        "source_db": str(source_db),
+        "repeats": repeats,
+        "max_cost_usd": cap,
+        "force_model": force_model,
+        "key_rows": key_rows,
+        "candidates": [
+            {
+                "name": c["name"], "primary": ":".join(c["primary"]),
+                "fallback": ":".join(c["fallback"]),
+                "runs": len(c["runs"]), "cost_cap_reached": c["cost_cap_reached"],
+                "error": c["error"],
+                "checks_failed": sum(r["analysis"].get("failed", 0) for r in c["runs"]),
+            }
+            for c in plan
+        ],
+        "failed": failed,
+    }
+    return summary
 
-    conn = _connect(str(tmp_db))
+
+def _run_candidate_once(
+    *, source_db: Path, pdf_path: Path, plan: dict[str, Any], out_dir: Path, slug: str,
+    expected: _Expected, client_id: Optional[int], db_name: str, keep: bool,
+    force_model: bool, index: int,
+) -> dict[str, Any]:
+    """One scored run of one candidate, in its OWN fresh copy of the database."""
+    copy = _make_copy(source_db, prefix=f"triage_{slug}_{index}_", db_name=db_name)
     try:
-        if client_id is None:
-            row = conn.execute("SELECT client_id FROM end_clients ORDER BY client_id LIMIT 1").fetchone()
-            client_id = int(row[0]) if row else None
-    finally:
-        conn.close()
-    if client_id is None:
-        client_id = clients.create_client(
-            legal_name="Triage Score Client", actor="triage:score", db_path=str(tmp_db),
+        _apply_triage_assignment(
+            copy, primary=plan["primary"], fallback=plan["fallback"], force_model=force_model,
         )
+        from src.clients import service as clients
 
-    upload_id = _score_upload(tmp_db, pdf_path, client_id)
+        conn = _connect(str(copy.db))
+        try:
+            cid = client_id
+            if cid is None:
+                row = conn.execute(
+                    "SELECT client_id FROM end_clients ORDER BY client_id LIMIT 1"
+                ).fetchone()
+                cid = int(row[0]) if row else None
+        finally:
+            conn.close()
+        if cid is None:
+            try:
+                cid = clients.create_client(
+                    legal_name="Triage Score Client", actor="triage:score", db_path=str(copy.db),
+                )
+            except Exception as exc:  # noqa: BLE001 — reported as a clear stop, not a raw traceback
+                raise InvoiceExtractError(
+                    "The database copy has no client to attribute the run to, and a "
+                    f"placeholder one could not be created ({exc}). Pass --client-id <id>."
+                ) from exc
 
-    started = time.monotonic()
-    queued = run_triage(upload_id, actor="triage:score", db_path=str(tmp_db), include_disabled=True)
-    run = wait_for_run(int(queued["run_id"]), db_path=str(tmp_db)) or queued
-    elapsed_ms = int((time.monotonic() - started) * 1000)
+        upload_id = _score_upload(copy.db, pdf_path, cid)
+        started = time.monotonic()
+        queued = run_triage(upload_id, actor="triage:score", db_path=str(copy.db), include_disabled=True)
+        run = wait_for_run(int(queued["run_id"]), db_path=str(copy.db)) or queued
+        elapsed_ms = int((time.monotonic() - started) * 1000)
 
-    triage = get_triage(upload_id, db_path=str(tmp_db))
-    analysis = _compare(triage, run, expected)
-    analysis["elapsed_ms"] = elapsed_ms
-    analysis["upload_id"] = upload_id
-    analysis["client_id"] = client_id
-    analysis["db_copy"] = str(tmp_db)
+        triage = get_triage(upload_id, db_path=str(copy.db))
+        analysis = _compare(triage, run, expected)
+        analysis["disagreements"] = _disagreements(triage, expected)
+        pngs = _annotate_pngs(upload_id, out_dir, db_path=str(copy.db))
+        return {
+            "index": index,
+            "status": run.get("status"),
+            "cost_usd": run.get("cost_usd"),
+            "input_tokens": run.get("input_tokens"),
+            "output_tokens": run.get("output_tokens"),
+            "elapsed_ms": elapsed_ms,
+            "pages_total": run.get("pages_total"),
+            "pages_failed": run.get("pages_failed"),
+            "fallback_pages": run.get("fallback_pages"),
+            "documents": len(triage["documents"]),
+            "analysis": analysis,
+            "pngs": [str(p) for p in pngs],
+            "db_copy": str(copy.db),
+            "upload_id": upload_id,
+            "client_id": cid,
+        }
+    finally:
+        if not keep:
+            copy.cleanup()
 
-    pngs = _annotate_pngs(upload_id, out_dir, db_path=str(tmp_db))
-    report_path = out_dir / "triage_score_report.md"
-    report_path.write_text(_render_report(analysis, expected, run, pngs))
 
-    if not keep:
-        import shutil
+def _disagreements(triage: dict[str, Any], expected: _Expected) -> dict[str, Any]:
+    """Where the run differs from the expected bundle (ordinal-matched)."""
+    docs = sorted(triage["documents"], key=lambda d: d["ordinal"])
+    exp_docs = expected.data.get("documents", [])
+    by_ordinal = {int(e.get("ordinal", 0)): e for e in exp_docs}
+    found_ordinals = {d["ordinal"] for d in docs}
 
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    analysis["report_path"] = str(report_path)
-    analysis["png_count"] = len(pngs)
-    return analysis
+    page_mismatch, category_mismatch = [], []
+    for d in docs:
+        exp = by_ordinal.get(d["ordinal"])
+        if exp is None:
+            continue
+        got_pages = _doc_pages(d)
+        want_pages = sorted(exp.get("pages", []))
+        if got_pages != want_pages:
+            page_mismatch.append({
+                "ordinal": d["ordinal"], "label": d.get("label") or "",
+                "found": got_pages, "expected": want_pages,
+            })
+        if not _doc_category_ok(d, exp):
+            category_mismatch.append({
+                "ordinal": d["ordinal"], "label": d.get("label") or "",
+                "found": d["category"], "expected": exp.get("category") or exp.get("acceptable"),
+            })
+    return {
+        "page_mismatch": page_mismatch,
+        "category_mismatch": category_mismatch,
+        "extra_documents": [
+            {"ordinal": d["ordinal"], "label": d.get("label") or "", "category": d["category"],
+             "pages": _doc_pages(d)}
+            for d in docs if d["ordinal"] not in by_ordinal
+        ],
+        "missed_documents": [
+            {"ordinal": int(e.get("ordinal", 0)), "label": e.get("label") or "",
+             "category": e.get("category") or e.get("acceptable"), "pages": e.get("pages", [])}
+            for e in exp_docs if int(e.get("ordinal", 0)) not in found_ordinals
+        ],
+        "unassigned": triage.get("unassigned", []),
+    }
 
 
 def _score_upload(tmp_db: Path, pdf_path: Path, client_id: int) -> int:
@@ -1825,34 +2279,243 @@ def _compare(triage: dict[str, Any], result: dict[str, Any], expected: _Expected
     }
 
 
-def _render_report(
-    analysis: dict[str, Any], expected: _Expected, result: dict[str, Any], pngs: list[Path],
-) -> str:
+def _check_marks(analysis: dict[str, Any]) -> str:
+    return ", ".join(
+        f"{c['name']}=" + ("pass" if c["pass"] is True else ("FAIL" if c["pass"] is False else "n/a"))
+        for c in analysis["checks"]
+    )
+
+
+def _money(value: Any) -> str:
+    """A money cell that is honest about a copy whose catalogue has no price."""
+    if isinstance(value, (int, float)):
+        return f"{float(value):.6f} USD"
+    return "unknown (no price for this model in the copy's catalogue)"
+
+
+def _render_comparison_report(payload: dict[str, Any]) -> str:
+    """ONE Markdown report for every candidate. No images inside — annotated
+    page PNGs are referenced by path (they live in the git-ignored report dir)."""
+    expected = payload["expected"]
+    cands = payload["candidates"]
+    exp_total = expected.data.get("documents_total")
     lines: list[str] = []
-    lines.append("# Invoice triage — live score report")
+    lines.append("# Invoice triage — model comparison report")
     lines.append("")
-    lines.append(f"- Source bundle: `{expected.path}`")
-    lines.append(f"- Expected bundle provisional: **{'NO — awaiting verification' if not expected.verified else 'yes, verified'}**")
-    lines.append(f"- Run status: `{result.get('status')}`")
-    lines.append(f"- Documents found: **{analysis['documents']}**")
-    lines.append(f"- Total time: {analysis['elapsed_ms']} ms")
-    lines.append(f"- Tokens: in {result.get('input_tokens')}, out {result.get('output_tokens')}")
-    lines.append(f"- Cost: {result.get('cost_usd')}")
-    lines.append(f"- Passed {analysis['passed']} / failed {analysis['failed']} / unknown {analysis['unknown']}")
+    lines.append(f"- Fixture: `{payload['pdf']}` ({payload['pages_total']} pages)")
+    lines.append(f"- Source database: `{payload['source_db']}` — **copied**; the source is opened read-only and is never written to")
+    lines.append(f"- Expected bundle: `{expected.path}` — "
+                 + ("**provisional, not yet verified**" if not expected.verified else "verified"))
+    lines.append(f"- Candidates: **{len(cands)}** · repeats per candidate: **{payload['repeats']}**"
+                 f" · cost cap per candidate: **{'$' + format(payload['cap'], '.2f') if payload['cap'] is not None else 'none'}**")
+    lines.append(f"- `--force-model`: **{'used' if payload['force_model'] else 'not used'}**")
     lines.append("")
-    lines.append("## Checks")
+    lines.append("**Provider keys** (via the app's own resolver: vault first, then environment)."
+                 " Only availability is reported — no key is printed, logged or copied.")
     lines.append("")
-    lines.append("| check | result | detail |")
-    lines.append("|---|---|---|")
-    for c in analysis["checks"]:
-        mark = "PASS" if c["pass"] is True else ("FAIL" if c["pass"] is False else "n/a")
-        lines.append(f"| {c['name']} | {mark} | {c['detail']} |")
+    lines.append("| provider | key available |")
+    lines.append("|---|---|")
+    for row in payload["key_rows"]:
+        lines.append(f"| {row['provider']} | {'yes' if row['available'] else 'no'} |")
     lines.append("")
-    lines.append("## Annotated pages")
+    lines.append("## Resolved assignment (invoice_triage, set in each candidate's own copy)")
     lines.append("")
-    lines.append(f"{len(pngs)} page PNG(s) written alongside this report (boxes + labels drawn).")
+    lines.append("| candidate | primary | fallback | notes |")
+    lines.append("|---|---|---|---|")
+    for cand in cands:
+        notes = "; ".join(cand["applied"].get("notes") or []) or "—"
+        lines.append(
+            f"| {cand['name']} | `{cand['primary'][0]}:{cand['primary'][1]}` "
+            f"| `{cand['fallback'][0]}:{cand['fallback'][1]}` | {notes} |"
+        )
+    lines.append("")
+    lines.append("## Comparison")
+    lines.append("")
+    lines.append("| candidate | models (primary → fallback) | cost (USD) | time (ms) | pages failed "
+                 "| pages served by fallback | documents found"
+                 + (f" (expected {exp_total})" if exp_total else "") + " | checks |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for cand in cands:
+        models = f"`{cand['primary'][1]}` → `{cand['fallback'][1]}`"
+        if cand["error"]:
+            lines.append(f"| {cand['name']} | {models} | — | — | — | — | — | **error: {cand['error']}** |")
+            continue
+        runs = cand["runs"]
+        if not runs:
+            lines.append(f"| {cand['name']} | {models} | — | — | — | — | — | not run |")
+            continue
+        cost = cand["totals"].get("cost_usd")
+        cost_txt = f"{cost:.6f}" if isinstance(cost, (int, float)) else "unknown"
+        if cand["cost_cap_reached"]:
+            cost_txt += " **(cost cap reached)**"
+        totals = [f"{len(runs)} run(s)"]
+        for key in ("pages_failed", "fallback_pages", "documents"):
+            values = [r[key] for r in runs]
+            totals.append("—" if all(v is None for v in values) else "/".join(str(v) for v in values))
+        marks = "; ".join(_check_marks(r["analysis"]) for r in runs)
+        lines.append(
+            f"| {cand['name']} | {models} | {cost_txt} | {cand['totals'].get('elapsed_ms')} "
+            f"| {totals[1]} | {totals[2]} | {totals[3]} | {marks} |"
+        )
+    lines.append("")
+    lines.append("Cells with `a/b` are per-repeat when more than one run was made.")
+    lines.append("")
+
+    for cand in cands:
+        lines.append(f"## Candidate: {cand['name']}")
+        lines.append("")
+        lines.append(f"- Resolved primary: `{cand['primary'][0]}:{cand['primary'][1]}`")
+        lines.append(f"- Resolved fallback: `{cand['fallback'][0]}:{cand['fallback'][1]}`")
+        if cand["applied"].get("forced"):
+            lines.append("- **`--force-model` was used** — the image-capability check refused this "
+                         "assignment and it was overridden explicitly.")
+        for note in cand["applied"].get("notes") or []:
+            lines.append(f"- Note: {note}")
+        if cand.get("live_image_test"):
+            for leg, res in cand["live_image_test"].items():
+                state = "passed" if res.get("ok") else "FAILED"
+                extra = res.get("error") or res.get("sample") or ""
+                lines.append(f"- Live image test ({leg} leg): **{state}**"
+                             + (f" — {extra}" if extra else ""))
+        if cand["error"]:
+            lines.append(f"- **Stopped:** {cand['error']}")
+        if cand["cost_cap_reached"]:
+            lines.append(f"- **Cost cap reached** (cap "
+                         f"${format(payload['cap'], '.2f')}; spent "
+                         f"${cand['totals'].get('cost_usd')}) — this candidate was stopped.")
+        lines.append("")
+        if not cand["runs"]:
+            lines.append("_No run was produced for this candidate._")
+            lines.append("")
+            continue
+        for run in cand["runs"]:
+            analysis = run["analysis"]
+            lines.append(f"### {cand['name']} — repeat {run['index']}")
+            lines.append("")
+            lines.append(f"- Status: `{run['status']}` · documents found: **{run['documents']}**"
+                         + (f" (expected {exp_total})" if exp_total else ""))
+            lines.append(f"- Cost: {_money(run['cost_usd'])} · tokens: in {run['input_tokens']}, "
+                         f"out {run['output_tokens']} · time: {run['elapsed_ms']} ms")
+            lines.append(f"- Pages: {run['pages_total']} total · {run['pages_failed']} failed · "
+                         f"{run['fallback_pages']} served by the fallback leg")
+            lines.append(f"- Checks: passed {analysis['passed']} / failed {analysis['failed']} "
+                         f"/ n/a {analysis['unknown']}")
+            lines.append(f"- Worked in the copy `{run['db_copy']}`")
+            lines.append("")
+            lines.append("| check | result | detail |")
+            lines.append("|---|---|---|")
+            for check in analysis["checks"]:
+                mark = "PASS" if check["pass"] is True else ("FAIL" if check["pass"] is False else "n/a")
+                lines.append(f"| {check['name']} | {mark} | {check['detail']} |")
+            lines.append("")
+            for check in analysis["checks"]:
+                if check.get("ious"):
+                    lines.append("Page-1 region boxes (IoU, pass at ≥ 0.5):")
+                    lines.append("")
+                    lines.append("| expected box | IoU | matched label |")
+                    lines.append("|---|---|---|")
+                    for iou in check["ious"]:
+                        lines.append(f"| {iou['label']} | {iou['iou']} | {iou['matched'] or '—'} |")
+                    lines.append("")
+
+            disag = analysis.get("disagreements") or {}
+            lines.append("**Disagreements with the expected bundle**")
+            lines.append("")
+            if not any(disag.get(k) for k in ("page_mismatch", "category_mismatch")):
+                lines.append("None — every expected document matched on pages and category.")
+            for item in disag.get("page_mismatch", []):
+                pages = set(item["found"]) | set(item["expected"])
+                refs = ", ".join(_png_ref(run, p) for p in sorted(pages))
+                lines.append(f"- #{item['ordinal']} `{item['label']}` pages found {item['found']} "
+                             f"vs expected {item['expected']} — annotated page(s): {refs}")
+            for item in disag.get("category_mismatch", []):
+                refs = ", ".join(_png_ref(run, p) for p in _expected_pages(disag, item["ordinal"]))
+                lines.append(f"- #{item['ordinal']} `{item['label']}` category found "
+                             f"`{item['found']}` vs expected {item['expected']} — annotated page(s): {refs}")
+            lines.append("")
+            unassigned = disag.get("unassigned") or []
+            if unassigned:
+                lines.append("Pages with no document (each with its reason): "
+                             + ", ".join(f"p{u['page']} ({u['reason']})" for u in unassigned))
+                lines.append("")
+            lines.append("**Documents the run found that the expected bundle does not list**")
+            lines.append("")
+            extra = disag.get("extra_documents") or []
+            if not extra:
+                lines.append("None.")
+            for item in extra:
+                refs = ", ".join(_png_ref(run, p) for p in item["pages"])
+                lines.append(f"- #{item['ordinal']} `{item['label']}` `{item['category']}` "
+                             f"pages {item['pages']} — {refs}")
+            lines.append("")
+            lines.append("**Expected documents the run did not find**")
+            lines.append("")
+            missed = disag.get("missed_documents") or []
+            if not missed:
+                lines.append("None.")
+            for item in missed:
+                lines.append(f"- #{item['ordinal']} `{item['label']}` {item['category']} "
+                             f"pages {item['pages']}")
+            lines.append("")
+            lines.append("**Annotated pages** (PNG files, referenced by path — no images are embedded here)")
+            lines.append("")
+            if run["pngs"]:
+                lines.append(f"{len(run['pngs'])} file(s) in `{Path(run['pngs'][0]).parent}`:")
+                lines.append("")
+                for path in run["pngs"]:
+                    lines.append(f"- `{path}`")
+            else:
+                lines.append("None written.")
+            lines.append("")
+
+    lines.append("## What could not be checked")
+    lines.append("")
+    unable: list[str] = []
+    if payload["cap"] is not None:
+        unable.append(
+            "The cost cap is enforced per candidate between runs: a single run cannot be "
+            "interrupted mid-flight (the triage worker has no cancel path), so a run that "
+            "overshoots the cap finishes and the candidate is then stopped."
+        )
+    for cand in cands:
+        if cand["error"]:
+            unable.append(f"{cand['name']}: stopped early — {cand['error']}")
+        if cand["cost_cap_reached"]:
+            unable.append(f"{cand['name']}: remaining repeats skipped (cost cap reached).")
+        if cand.get("live_image_test") and any(
+            not r.get("ok") for r in cand["live_image_test"].values()
+        ):
+            unable.append(f"{cand['name']}: a live image test failed.")
+    if not expected.verified:
+        unable.append("The expected bundle is provisional (`\"verified\": false`), so every "
+                      "expectation compared against is unconfirmed.")
+    if not unable:
+        unable.append("Nothing — every requested check produced a result.")
+    for item in unable:
+        lines.append(f"- {item}")
     lines.append("")
     return "\n".join(lines)
+
+
+def _png_ref(run: dict[str, Any], page: int) -> str:
+    """The annotated PNG path for a page, so a disagreement points at its image."""
+    for path in run.get("pngs") or []:
+        if path.endswith(f"page_{page:03d}.png"):
+            return f"`{path}`"
+    return f"`(no annotated page for p{page})`"
+
+
+def _expected_pages(disagreements: dict[str, Any], ordinal: int) -> list[int]:
+    for item in (disagreements.get("missed_documents") or []):
+        if item.get("ordinal") == ordinal:
+            return list(item.get("pages") or [])
+    for item in (disagreements.get("extra_documents") or []):
+        if item.get("ordinal") == ordinal:
+            return list(item.get("pages") or [])
+    for item in (disagreements.get("page_mismatch") or []):
+        if item.get("ordinal") == ordinal:
+            return sorted(set(item.get("found") or []) | set(item.get("expected") or []))
+    return []
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -1863,13 +2526,40 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_p.add_argument("upload_id", type=int)
     run_p.add_argument("--db", default=None, help="database path (default: the app DB)")
 
-    score_p = sub.add_parser("score", help="live score against a PDF (uses a DB COPY)")
+    score_p = sub.add_parser("score", help="score one or more models against a PDF (uses DB COPIES)")
     score_p.add_argument("pdf")
     score_p.add_argument("--out", default=None)
     score_p.add_argument("--expected", default=None)
     score_p.add_argument("--client-id", type=int, default=None)
-    score_p.add_argument("--keep", action="store_true", help="keep the temporary DB/data root")
-    score_p.add_argument("--db", default=None, help="database path to copy (default: the app DB)")
+    score_p.add_argument("--keep", action="store_true", help="keep the temporary DB/data roots")
+    score_p.add_argument(
+        "--db", default=None,
+        help="database to COPY for the run (default: the app database). The source is opened "
+             "read-only and is never modified.",
+    )
+    score_p.add_argument(
+        "--primary", action="append", default=None, metavar="PROVIDER:MODEL",
+        help="invoice_triage primary leg, set in the COPY only (repeatable — each value becomes "
+             "its own candidate)",
+    )
+    score_p.add_argument(
+        "--fallback", action="append", default=None, metavar="PROVIDER:MODEL",
+        help="invoice_triage fallback leg, set in the COPY only (repeatable, paired with --primary)",
+    )
+    score_p.add_argument(
+        "--candidates", default=None, metavar="FILE.json",
+        help="JSON list of {name, primary, fallback}; each runs in its own copy",
+    )
+    score_p.add_argument("--repeat", type=int, default=1, help="runs per candidate (default 1)")
+    score_p.add_argument(
+        "--max-cost-usd", type=float, default=COST_CAP_DEFAULT, dest="max_cost_usd",
+        help=f"per-candidate cost cap in USD (default {COST_CAP_DEFAULT:.2f}); the candidate is "
+             "stopped and marked 'cost cap reached' when exceeded",
+    )
+    score_p.add_argument(
+        "--force-model", action="store_true",
+        help="run even when a leg is not image-capable (recorded in the report)",
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -1880,12 +2570,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 args.pdf,
                 out_dir=Path(args.out) if args.out else None,
                 expected_path=Path(args.expected) if args.expected else None,
-                client_id=args.client_id, keep=args.keep,
+                client_id=args.client_id, keep=args.keep, db_path=args.db,
+                primary=args.primary, fallback=args.fallback,
+                candidates_file=args.candidates, repeat=args.repeat,
+                max_cost_usd=args.max_cost_usd, force_model=args.force_model,
             )
-            print(json.dumps({k: v for k, v in result.items() if k not in ("checks",)}, indent=2))
-            for c in result["checks"]:
-                mark = "PASS" if c["pass"] is True else ("FAIL" if c["pass"] is False else "n/a")
-                print(f"  [{mark}] {c['name']}: {c['detail']}")
+            print(json.dumps(result, indent=2, default=str))
             print(f"\nReport: {result['report_path']}")
             return 0 if result["failed"] == 0 else 1
     except InvoiceExtractError as exc:
