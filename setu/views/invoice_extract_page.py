@@ -703,6 +703,14 @@ def _review_screen() -> rx.Component:
                     ),
                     rx.fragment(),
                 ),
+                rx.cond(
+                    InvoiceExtractState.coverage_incomplete,
+                    c.warning_banner(
+                        "⚠ " + InvoiceExtractState.coverage_warning
+                        + " Confirming this upload means accepting that the rest of it was not read."
+                    ),
+                    rx.fragment(),
+                ),
                 spacing="2",
                 align="start",
                 width="100%",
@@ -802,12 +810,34 @@ def _review_screen() -> rx.Component:
                     ),
                     rx.cond(
                         InvoiceExtractState.detail_status != "confirmed",
-                        rx.button(
-                            "Confirm upload",
-                            on_click=InvoiceExtractState.confirm_upload,
-                            size="3",
-                            background=t.Color.ACCENT.value,
-                            color="#FFFFFF",
+                        rx.vstack(
+                            rx.cond(
+                                InvoiceExtractState.coverage_incomplete,
+                                rx.hstack(
+                                    rx.checkbox(
+                                        checked=InvoiceExtractState.acknowledge_coverage,
+                                        on_change=InvoiceExtractState.set_acknowledge_coverage,
+                                    ),
+                                    rx.text(
+                                        "I understand only part of this file was read.",
+                                        style=t.TEXT["micro"],
+                                    ),
+                                    spacing="2",
+                                    align="center",
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.button(
+                                "Confirm upload",
+                                on_click=InvoiceExtractState.confirm_upload,
+                                disabled=InvoiceExtractState.coverage_incomplete
+                                & ~InvoiceExtractState.acknowledge_coverage,
+                                size="3",
+                                background=t.Color.ACCENT.value,
+                                color="#FFFFFF",
+                            ),
+                            spacing="2",
+                            align="start",
                         ),
                         c.confidence_badge("rule", label="Confirmed"),
                     ),

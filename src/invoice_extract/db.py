@@ -45,21 +45,37 @@ def create_upload(
     extraction_path: str, batch_id: Optional[str], status: str, duplicate_warning: bool, actor: str,
     file_bytes: Optional[bytes] = None, ai_used: bool = False, ai_model: Optional[str] = None,
     ai_latency_ms: Optional[int] = None, ai_error: Optional[str] = None,
+    pages_examined: Optional[int] = None, pages_total: Optional[int] = None,
+    text_truncated: bool = False, extraction_touchpoint: Optional[str] = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO invoice_uploads
             (document_id, client_id, filename, file_ext, file_bytes, source_format, extraction_path,
              batch_id, status, duplicate_warning, created_at, created_by,
-             ai_used, ai_model, ai_latency_ms, ai_error)
-        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ai_used, ai_model, ai_latency_ms, ai_error,
+             pages_examined, pages_total, text_truncated, extraction_touchpoint)
+        VALUES (NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (client_id, filename, file_ext, file_bytes, source_format, extraction_path, batch_id,
          status, int(duplicate_warning), _now(), actor,
-         int(ai_used), ai_model, ai_latency_ms, ai_error),
+         int(ai_used), ai_model, ai_latency_ms, ai_error,
+         pages_examined, pages_total, (1 if text_truncated else 0), extraction_touchpoint),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def set_upload_coverage(
+    conn: sqlite3.Connection, upload_id: int, *, pages_examined: int, pages_total: int,
+    text_truncated: bool, extraction_touchpoint: Optional[str] = None,
+) -> None:
+    conn.execute(
+        "UPDATE invoice_uploads SET pages_examined = ?, pages_total = ?, text_truncated = ?, "
+        "extraction_touchpoint = ? WHERE upload_id = ?",
+        (pages_examined, pages_total, 1 if text_truncated else 0, extraction_touchpoint, upload_id),
+    )
+    conn.commit()
 
 
 def get_upload(conn: sqlite3.Connection, upload_id: int) -> Optional[dict[str, Any]]:

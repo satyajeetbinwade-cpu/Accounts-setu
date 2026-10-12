@@ -16,6 +16,8 @@ rather than a new silo:
   * ``document_review``        — C5's placeholder touchpoint.
   * ``invoice_extraction_visual`` / ``invoice_extraction_structured`` —
                                  F3-B's two extraction paths.
+  * ``invoice_triage``         — F3-B Phase 1's page triage (find every
+                                 document on a page; no value extraction).
 
 Default model ids are real OpenRouter ids. Where a module previously used a
 human-readable label (F3-B's "Claude Sonnet (vision)"), the seed maps it to
@@ -108,6 +110,18 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
         "anthropic/claude-sonnet-4",
         "deepseek/deepseek-chat",
         8,
+    ),
+    (
+        "invoice_triage",
+        "Invoice triage — find every document on a page",
+        "Extraction",
+        "Reads ONE rendered page at a time and finds every separate document on it, "
+        "categorising each and returning boxes + a short label + a quoted evidence "
+        "snippet. No field values are extracted here. Defaults to the same models as "
+        "invoice_extraction_visual, since it is the same 'read the page' job.",
+        "anthropic/claude-sonnet-4",
+        "google/gemini-2.5-pro",
+        9,
     ),
 ]
 

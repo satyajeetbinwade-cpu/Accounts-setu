@@ -364,6 +364,7 @@ def _gateway_call(
     images: Optional[list[tuple[str, bytes]]] = None,
     model_override: Optional[str] = None,
     max_tokens: Optional[int] = None,
+    upload_id: Optional[int] = None,
     db_path=None,
 ) -> tuple[str, int, str]:
     """Call a touchpoint through the AI gateway.
@@ -371,6 +372,9 @@ def _gateway_call(
     The gateway owns provider resolution and Primary→Fallback failover; this
     layer no longer knows a provider URL or auth scheme. Returns
     ``(text, latency_ms, model_id)``.
+
+    ``upload_id`` (optional) attributes the call in ``ai_call_log`` so a
+    re-extract's history is preserved. It never changes behaviour.
 
     ``TouchpointUnavailableError`` is translated into the same typed-prefix
     ``LLMError`` contract callers already handle.
@@ -389,6 +393,9 @@ def _gateway_call(
             actor="system:ingestion",
             timeout=_setting_int(KEY_TIMEOUT, _FALLBACK_TIMEOUT),
             model_override=model_override,
+            upload_id=upload_id,
+            reference_type="invoice_upload" if upload_id is not None else None,
+            reference_id=upload_id,
             db_path=db_path,
         )
     except gateway.TouchpointUnavailableError as exc:
@@ -399,7 +406,7 @@ def _gateway_call(
 def call_llm(
     system_prompt: str, user_prompt: str, *, db_path=None,
     model_override: Optional[str] = None, touchpoint_key: str = "ingestion_mapping",
-    max_tokens: Optional[int] = None,
+    max_tokens: Optional[int] = None, upload_id: Optional[int] = None,
 ) -> tuple[str, int, str]:
     """Call the configured model with a plain-text prompt. Returns
     (raw_text, latency_ms, model_id).
@@ -409,7 +416,8 @@ def call_llm(
     """
     return _gateway_call(
         touchpoint_key, system_prompt, user_prompt,
-        model_override=model_override, max_tokens=max_tokens, db_path=db_path,
+        model_override=model_override, max_tokens=max_tokens, upload_id=upload_id,
+        db_path=db_path,
     )
 
 
@@ -422,6 +430,7 @@ def call_llm_vision(
     model_override: Optional[str] = None,
     touchpoint_key: str = "ingestion_mapping",
     max_tokens: Optional[int] = None,
+    upload_id: Optional[int] = None,
 ) -> tuple[str, int, str]:
     """Call a VISION-capable model with one or more images attached.
 
@@ -435,7 +444,8 @@ def call_llm_vision(
         raise LLMError("config_error|call_llm_vision requires at least one image.")
     return _gateway_call(
         touchpoint_key, system_prompt, user_prompt, images=images,
-        model_override=model_override, max_tokens=max_tokens, db_path=db_path,
+        model_override=model_override, max_tokens=max_tokens, upload_id=upload_id,
+        db_path=db_path,
     )
 
 
@@ -447,6 +457,7 @@ def call_llm_vision_json(
     db_path=None,
     model_override: Optional[str] = None,
     touchpoint_key: str = "ingestion_mapping",
+    upload_id: Optional[int] = None,
 ) -> tuple[dict[str, Any], int, str, str]:
     """Vision call + JSON parse. Returns (parsed, latency_ms, model_id, raw)."""
     last: dict[str, Any] = {}
@@ -455,7 +466,7 @@ def call_llm_vision_json(
         content, latency_ms, model_id = call_llm_vision(
             system_prompt, user_prompt, images, db_path=db_path,
             model_override=model_override, touchpoint_key=touchpoint_key,
-            max_tokens=budget,
+            max_tokens=budget, upload_id=upload_id,
         )
         last.update(latency_ms=latency_ms, model=model_id)
         return content
@@ -574,6 +585,7 @@ def _extract_message_content(raw: str) -> str:
 def call_llm_json(
     system_prompt: str, user_prompt: str, *, db_path=None,
     model_override: Optional[str] = None, touchpoint_key: str = "ingestion_mapping",
+    upload_id: Optional[int] = None,
 ) -> tuple[dict[str, Any], int, str, str]:
     """Call the model and parse its JSON reply.
 
@@ -586,7 +598,7 @@ def call_llm_json(
         raw, latency_ms, model_id = call_llm(
             system_prompt, user_prompt, db_path=db_path,
             model_override=model_override, touchpoint_key=touchpoint_key,
-            max_tokens=budget,
+            max_tokens=budget, upload_id=upload_id,
         )
         last.update(latency_ms=latency_ms, model=model_id)
         return raw

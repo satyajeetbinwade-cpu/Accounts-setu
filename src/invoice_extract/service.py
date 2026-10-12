@@ -276,6 +276,12 @@ def upload_invoice(
     reviewable = _reviewable_keys(tagged, threshold)
     status = STATUS_NEEDS_REVIEW if reviewable else STATUS_EXTRACTED
 
+    # HONESTY: record how much of the file the legacy path actually read.
+    coverage = ai_extractor.extraction_coverage(
+        filename=filename, file_bytes=file_bytes, source_format=source_format,
+        extraction_path=extraction_path,
+    )
+
     conn = _connect(db_path)
     try:
         # Duplicate detection uses the extracted invoice number + vendor GSTIN.
@@ -288,6 +294,9 @@ def upload_invoice(
             duplicate_warning=duplicate is not None, actor=actor, file_bytes=file_bytes,
             ai_used=ai_meta["ai_used"], ai_model=ai_meta["model_id"],
             ai_latency_ms=ai_meta["latency_ms"], ai_error=ai_meta["ai_error"],
+            pages_examined=coverage["pages_examined"], pages_total=coverage["pages_total"],
+            text_truncated=coverage["text_truncated"],
+            extraction_touchpoint=(ai_meta.get("touchpoint") if ai_meta["ai_used"] else None),
         )
         for f in field_results:
             idb.insert_field(conn, upload_id=upload_id, result=f)
@@ -297,6 +306,8 @@ def upload_invoice(
 
         idb.log_change(conn, upload_id=upload_id, action="upload_extracted",
                        detail=f"{source_format}/{extraction_path}; ai={ai_meta['ai_used']}; "
+                              f"pages={coverage['pages_examined']}/{coverage['pages_total']}; "
+                              f"truncated={coverage['text_truncated']}; "
                               f"{len(reviewable)} field(s) need review", actor=actor)
     finally:
         conn.close()
@@ -315,6 +326,8 @@ def upload_invoice(
         "ai_used": ai_meta["ai_used"],
         "ai_model": ai_meta["model_id"],
         "ai_error": ai_meta["ai_error"],
+        "extraction_touchpoint": ai_meta.get("touchpoint") if ai_meta["ai_used"] else None,
+        "coverage": coverage,
     }
 
 
@@ -345,6 +358,7 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
 
         field_results, extraction_path, ai_meta = ai_extractor.extract_with_ai(
             filename=filename, file_bytes=data, source_format=source_format, db_path=db_path,
+            upload_id=upload_id,
         )
         if not ai_meta["ai_used"]:
             field_results, extraction_path = extractor.extract(
@@ -363,17 +377,27 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
             idb.insert_field(conn, upload_id=upload_id, result=f)
 
         status = STATUS_NEEDS_REVIEW if reviewable else STATUS_EXTRACTED
+        coverage = ai_extractor.extraction_coverage(
+            filename=filename, file_bytes=data, source_format=source_format,
+            extraction_path=extraction_path,
+        )
         conn.execute(
             "UPDATE invoice_uploads SET status = ?, extraction_path = ?, ai_used = ?, ai_model = ?, "
             "ai_latency_ms = ?, ai_error = ?, confirmed_at = NULL, confirmed_by = NULL WHERE upload_id = ?",
             (status, extraction_path, int(ai_meta["ai_used"]), ai_meta["model_id"],
              ai_meta["latency_ms"], ai_meta["ai_error"], upload_id),
         )
+        idb.set_upload_coverage(
+            conn, upload_id, pages_examined=coverage["pages_examined"],
+            pages_total=coverage["pages_total"], text_truncated=coverage["text_truncated"],
+            extraction_touchpoint=(ai_meta.get("touchpoint") if ai_meta["ai_used"] else None),
+        )
         if reviewable:
             idb.create_queue_entry(conn, upload_id=upload_id, flagged_fields=reviewable)
         conn.commit()
         idb.log_change(conn, upload_id=upload_id, action="re_extracted",
                        detail=f"{source_format}/{extraction_path}; ai={ai_meta['ai_used']}; "
+                              f"pages={coverage['pages_examined']}/{coverage['pages_total']}; "
                               f"{len(reviewable)} field(s) need review", actor=actor)
     finally:
         conn.close()
@@ -385,7 +409,9 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
         "ai_used": ai_meta["ai_used"],
         "ai_model": ai_meta["model_id"],
         "ai_error": ai_meta["ai_error"],
+        "extraction_touchpoint": ai_meta.get("touchpoint") if ai_meta["ai_used"] else None,
         "reviewable_fields": reviewable,
+        "coverage": coverage,
     }
 
 
@@ -462,6 +488,39 @@ def get_upload_bytes(upload_id: int, *, db_path=None) -> Optional[bytes]:
         return idb.get_upload_bytes(conn, upload_id)
     finally:
         conn.close()
+
+
+def upload_coverage(upload_id: int, *, db_path=None) -> dict[str, Any]:
+    """How much of the file's pages/text the extraction actually READ.
+
+    ``incomplete`` is true when fewer pages were examined than the file has, or
+    the structured text was truncated. A confirmed upload with an incomplete
+    read needs an explicit acknowledgement (see ``confirm_upload``).
+    """
+    up = get_upload(upload_id, db_path=db_path)
+    if up is None:
+        return {"pages_examined": None, "pages_total": None, "text_truncated": False, "incomplete": False}
+    pe = up.get("pages_examined")
+    pt = up.get("pages_total")
+    tt = bool(up.get("text_truncated"))
+    incomplete = (pe is not None and pt is not None and int(pe) < int(pt)) or tt
+    return {
+        "pages_examined": int(pe) if pe is not None else None,
+        "pages_total": int(pt) if pt is not None else None,
+        "text_truncated": tt,
+        "incomplete": incomplete,
+    }
+
+
+def coverage_warning(upload_id: int, *, db_path=None) -> str:
+    """The exact sentence shown to the reviewer, or '' when the read was full."""
+    cov = upload_coverage(upload_id, db_path=db_path)
+    if not cov["incomplete"]:
+        return ""
+    pe, pt = cov["pages_examined"], cov["pages_total"]
+    if pe is not None and pt is not None and pe < pt:
+        return f"Only pages 1-{pe} of {pt} were read."
+    return "The full text of this file was not read (it was truncated before the model saw it)."
 
 
 def get_fields(upload_id: int, *, db_path=None) -> list[dict[str, Any]]:
@@ -756,20 +815,38 @@ def resolve_field(
     finally:
         conn.close()
 
-    # Auto-flip to Confirmed when nothing remains reviewable.
+    # Auto-flip to Confirmed when nothing remains reviewable — but NEVER
+    # silently confirm a partially-read file: that needs the explicit
+    # acknowledgement the review screen collects (see confirm_upload).
     remaining = get_reviewable_fields(upload_id, db_path=db_path)
-    if not remaining:
+    if not remaining and not upload_coverage(upload_id, db_path=db_path)["incomplete"]:
         _confirm_upload(upload_id, actor=actor, db_path=db_path)
     return {"remaining": remaining, "status": get_upload(upload_id, db_path=db_path)["status"]}
 
 
-def confirm_upload(upload_id: int, *, actor: str, db_path=None) -> None:
+def confirm_upload(
+    upload_id: int, *, actor: str, acknowledge_coverage: bool = False, db_path=None,
+) -> None:
     """Explicit reviewer confirmation. Refuses if any flagged field is
-    still unresolved — the gate is enforced here, not in the UI."""
+    still unresolved — the gate is enforced here, not in the UI.
+
+    When the extraction only read PART of the file, confirmation also requires
+    ``acknowledge_coverage=True`` — the reviewer must have seen and accepted
+    the "only pages 1-5 of 31 were read" warning. This is the honesty fix: a
+    partial read can never be confirmed by accident.
+    """
     remaining = get_reviewable_fields(upload_id, db_path=db_path)
     if remaining:
         names = ", ".join(r["label"] for r in remaining)
         raise InvoiceExtractError(f"Can't confirm — {len(remaining)} field(s) still need resolution: {names}.")
+
+    cov = upload_coverage(upload_id, db_path=db_path)
+    if cov["incomplete"] and not acknowledge_coverage:
+        warning = coverage_warning(upload_id, db_path=db_path)
+        raise InvoiceExtractError(
+            f"{warning} This upload was only partially read — tick the acknowledgement "
+            "to confirm it anyway."
+        )
     _confirm_upload(upload_id, actor=actor, db_path=db_path)
 
 

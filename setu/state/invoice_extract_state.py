@@ -161,6 +161,13 @@ class InvoiceExtractState(SharedUploadState):
     detail_ai_model: str = ""
     detail_ai_error: str = ""
     detail_ai_latency_ms: int = 0
+    # Honesty about how much of the file the extraction actually read.
+    detail_pages_examined: int = 0
+    detail_pages_total: int = 0
+    detail_text_truncated: bool = False
+    coverage_incomplete: bool = False
+    coverage_warning: str = ""
+    acknowledge_coverage: bool = False
     fields: list[FieldRow] = []
     remaining_count: int = 0
     preview_kind: str = ""          # "image" | "table" | "text" | ""
@@ -358,6 +365,13 @@ class InvoiceExtractState(SharedUploadState):
         self.detail_ai_model = up.get("ai_model") or ""
         self.detail_ai_error = up.get("ai_error") or ""
         self.detail_ai_latency_ms = int(up.get("ai_latency_ms") or 0)
+        coverage = ie.upload_coverage(self.selected_upload_id)
+        self.detail_pages_examined = coverage["pages_examined"] or 0
+        self.detail_pages_total = coverage["pages_total"] or 0
+        self.detail_text_truncated = bool(coverage["text_truncated"])
+        self.coverage_incomplete = bool(coverage["incomplete"])
+        self.coverage_warning = ie.coverage_warning(self.selected_upload_id)
+        self.acknowledge_coverage = False
         self.detail_threshold = ie.get_threshold()
         self.remaining_count = len(ie.get_reviewable_fields(self.selected_upload_id))
         self.fields = [self._to_field_row(f) for f in ie.get_fields(self.selected_upload_id)]
@@ -852,12 +866,19 @@ class InvoiceExtractState(SharedUploadState):
     @rx.event
     def confirm_upload(self):
         try:
-            ie.confirm_upload(self.selected_upload_id, actor=self.username)
+            ie.confirm_upload(
+                self.selected_upload_id, actor=self.username,
+                acknowledge_coverage=self.acknowledge_coverage,
+            )
             self.flash = "Confirmed — now eligible for export."
             self.selected_upload_id = 0
         except ie.InvoiceExtractError as exc:
             self.error = str(exc)
         self._load_all()
+
+    @rx.event
+    def set_acknowledge_coverage(self, value: bool):
+        self.acknowledge_coverage = bool(value)
 
     @rx.event
     async def re_extract_upload(self):

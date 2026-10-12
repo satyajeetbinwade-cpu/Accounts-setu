@@ -163,6 +163,73 @@ CREATE INDEX IF NOT EXISTS idx_ai_fallback_events_created
     ON ai_fallback_events(created_at);
 """
 
+# ---------------------------------------------------------------------------
+# Token + cost accounting (non-intrusive side effect of the gateway).
+#
+# One row per resolved model call. Populated best-effort by
+# src/ai_models/gateway.py AFTER a successful leg: capturing usage must never
+# change a model call's result, so a logging failure is swallowed. When the
+# provider response carries no usage block the token columns stay NULL (an
+# honest "unknown", never a fabricated 0).
+#
+# Declared as its own constant so the numbered triage migration and
+# init_ai_models create the SAME table from ONE definition.
+#
+# A statement LIST (not one executescript string) because the migration
+# framework runs each migration inside an explicit transaction — see
+# src/invoice_extract/triage_schema.py for the full explanation.
+# ---------------------------------------------------------------------------
+AI_CALL_LOG_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS ai_call_log (
+        call_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        touchpoint_key TEXT    NOT NULL,
+        provider       TEXT,
+        model          TEXT,
+        input_tokens   INTEGER,
+        output_tokens  INTEGER,
+        latency_ms     INTEGER,
+        cost_usd       REAL,
+        -- success | parse_error | rejected | transport_error | fallback_used
+        outcome        TEXT,
+        attempt        INTEGER,
+        upload_id      INTEGER,                 -- nullable; set when the call is tied to an upload
+        reference_type TEXT,
+        reference_id   INTEGER,
+        actor          TEXT,
+        created_at     TEXT    NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ai_call_log_touchpoint
+        ON ai_call_log(touchpoint_key, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ai_call_log_reference
+        ON ai_call_log(reference_type, reference_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_ai_call_log_upload
+        ON ai_call_log(upload_id)
+    """,
+)
+
+
+def execute_ai_call_log_schema(conn: sqlite3.Connection) -> None:
+    """Create ai_call_log without committing (for the numbered migration)."""
+    for statement in AI_CALL_LOG_STATEMENTS:
+        conn.execute(statement)
+
+
+def ensure_ai_call_log(conn: sqlite3.Connection) -> None:
+    """Create the ai_call_log table (and its indexes) if missing. Idempotent.
+
+    Also called from the numbered triage migration so an existing DB gets the
+    table through the version-gated path, not only through ``init_ai_models``.
+    """
+    execute_ai_call_log_schema(conn)
+    conn.commit()
+
 
 def _migrate(conn: sqlite3.Connection) -> None:
     """Additive column migrations for pre-existing databases.
@@ -191,5 +258,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
 def init_ai_models_schema(conn: sqlite3.Connection) -> None:
     """Create the AI model registry tables if missing. Idempotent."""
     conn.executescript(AI_MODELS_SCHEMA)
+    execute_ai_call_log_schema(conn)
     _migrate(conn)
     conn.commit()

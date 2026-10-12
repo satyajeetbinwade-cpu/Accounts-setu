@@ -60,6 +60,9 @@ _BOOT_STEPS: list[tuple[str, str, str]] = [
     ("F6  format registry", "src.f6.service", "init_f6"),
     ("F3-AI ingestion", "src.ingestion_ai.service", "init_ingestion_ai"),
     ("F3-B invoice extract", "src.invoice_extract.service", "init_invoice_extract"),
+    # Marks any triage run left "running" by a previous process as
+    # "interrupted", so a restart never leaves a run looking live forever.
+    ("F3-B invoice triage", "src.invoice_extract.triage", "init_triage"),
     ("F5  data integrity", "src.f5.service", "init_f5"),
     ("C2  filing", "src.filing.service", "init_filing"),
     ("F4  edit history", "src.f4.service", "init_f4"),

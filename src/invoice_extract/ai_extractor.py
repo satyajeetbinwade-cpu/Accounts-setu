@@ -166,6 +166,7 @@ def _user_prompt(
 
 def extract_with_ai(
     *, filename: str, file_bytes: bytes, source_format: str, db_path=None,
+    upload_id: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     """Extract every canonical field using the AI layer.
 
@@ -176,7 +177,11 @@ def extract_with_ai(
           "model_id": str | None,
           "latency_ms": int | None,
           "ai_error": str | None,   # human-readable reason AI was not used
+          "touchpoint": str,        # the touchpoint key this path routed to
         }
+
+    ``upload_id`` (optional) attributes the model call in ``ai_call_log`` so a
+    re-extract preserves the previous model/touchpoint/latency history.
 
     Never raises for a model failure — the caller decides whether to fall
     back to the deterministic extractor.
@@ -185,6 +190,9 @@ def extract_with_ai(
 
     path = _route(source_format, file_bytes)
     touchpoint = touchpoint_for_path(path)
+    # Only forward upload_id when we actually have one (re-extract), so the
+    # initial-upload path is byte-for-byte the call existing callers make.
+    extra = {"upload_id": upload_id} if upload_id is not None else {}
 
     try:
         if path == "visual":
@@ -197,6 +205,7 @@ def extract_with_ai(
                 images,
                 db_path=db_path,
                 touchpoint_key=touchpoint,
+                **extra,
             )
         else:
             text = _text_for(filename, file_bytes, source_format)
@@ -205,6 +214,7 @@ def extract_with_ai(
                 _user_prompt(filename=filename, source_format=source_format, text=text),
                 db_path=db_path,
                 touchpoint_key=touchpoint,
+                **extra,
             )
     except Exception as exc:  # noqa: BLE001 — any failure => caller falls back
         return [], path, {
@@ -212,6 +222,7 @@ def extract_with_ai(
             "model_id": None,
             "latency_ms": None,
             "ai_error": _humanize_error(exc),
+            "touchpoint": touchpoint,
         }
 
     results = _normalize_results(parsed, with_bbox=(path == "visual"))
@@ -225,12 +236,53 @@ def extract_with_ai(
         "model_id": model_id,
         "latency_ms": latency_ms,
         "ai_error": None,
+        "touchpoint": touchpoint,
     }
 
 
 # ---------------------------------------------------------------------------
 # Routing + content preparation
 # ---------------------------------------------------------------------------
+
+
+def extraction_coverage(
+    *, filename: str, file_bytes: bytes, source_format: str, extraction_path: str,
+) -> dict[str, Any]:
+    """How much of this file the LEGACY extraction path actually read.
+
+    The visual path still rasterises only the first ``_MAX_PDF_PAGES`` pages,
+    and the structured path truncates text at ``_MAX_TEXT_CHARS``. Recording
+    this lets the review header say so plainly instead of implying the whole
+    file was read. Best-effort: a probe failure reports the safe default (1/1,
+    no truncation) rather than breaking the upload.
+    """
+    pages_total = 1
+    pages_examined = 1
+    text_truncated = False
+    try:
+        if source_format == "pdf":
+            import fitz
+
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            try:
+                pages_total = int(doc.page_count)
+            finally:
+                doc.close()
+            if extraction_path == "visual":
+                pages_examined = min(pages_total, _MAX_PDF_PAGES)
+            else:
+                pages_examined = pages_total
+                text_truncated = len(extractor._pdf_text(file_bytes)) > _MAX_TEXT_CHARS
+        elif source_format in ("word", "excel"):
+            text = _text_for(filename, file_bytes, source_format)
+            text_truncated = len(text) > _MAX_TEXT_CHARS
+    except Exception:  # noqa: BLE001 — coverage is advisory, never fatal
+        pass
+    return {
+        "pages_total": pages_total,
+        "pages_examined": pages_examined,
+        "text_truncated": bool(text_truncated),
+    }
 
 
 def _route(source_format: str, file_bytes: bytes) -> str:

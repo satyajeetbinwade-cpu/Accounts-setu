@@ -35,6 +35,7 @@ from __future__ import annotations
 import base64
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -46,6 +47,77 @@ _PROBE_TIMEOUT = 20
 
 # Anthropic requires an explicit API version header on every request.
 _ANTHROPIC_VERSION = "2023-06-01"
+
+
+# ---------------------------------------------------------------------------
+# Optional, additive token-usage channel.
+#
+# ``call_provider``'s signature is deliberately UNCHANGED — token accounting is
+# a side effect, and adding a keyword argument would break every existing
+# caller/test double. Instead the gateway (and only the gateway) pushes a
+# per-thread sink for the duration of one provider call; the adapter fills it
+# if the response envelope carries a usage block. A caller that stubs
+# ``call_provider`` simply never fills the sink — which is fine.
+# ---------------------------------------------------------------------------
+_usage_local = threading.local()
+
+
+def push_usage_sink(sink: Optional[dict[str, Any]]) -> None:
+    _usage_local.sink = sink
+
+
+def pop_usage_sink() -> None:
+    _usage_local.sink = None
+
+
+def _current_usage_sink() -> Optional[dict[str, Any]]:
+    return getattr(_usage_local, "sink", None)
+
+
+# A thread-local slot for the most recent ``Retry-After`` (seconds) reported by
+# a provider. The gateway reads it to pace a same-leg retry. Kept out of the
+# error string so existing typed-error matching is unchanged.
+_retry_after_local = threading.local()
+
+
+def push_retry_after(seconds: Optional[float]) -> None:
+    _retry_after_local.seconds = seconds
+
+
+def take_retry_after() -> Optional[float]:
+    """Return and clear the last Retry-After seen on this thread."""
+    value = getattr(_retry_after_local, "seconds", None)
+    _retry_after_local.seconds = None
+    return value
+
+
+def _capture_retry_after(exc: urllib.error.HTTPError) -> None:
+    try:
+        raw = exc.headers.get("Retry-After") if exc.headers else None
+        push_retry_after(float(raw) if raw is not None else None)
+    except (TypeError, ValueError):
+        push_retry_after(None)
+
+
+def supports_images(modality: Optional[str]) -> Optional[bool]:
+    """Does a model whose ``modality`` string is ``modality`` accept image input?
+
+    Returns ``True`` / ``False`` when the catalogue tells us, and ``None`` when
+    it does not (an unknown modality is NOT treated as a refusal — the guard
+    only fires on a model we KNOW is text-only). Examples:
+    ``"text+image->text"`` -> True, ``"text->text"`` -> False.
+    """
+    if not modality:
+        return None
+    text = str(modality).strip().lower()
+    if not text:
+        return None
+    inputs = text.split("->", 1)[0] if "->" in text else text
+    if "image" in inputs or "vision" in inputs:
+        return True
+    if inputs.strip():
+        return False
+    return None
 
 
 class ProviderError(RuntimeError):
@@ -214,6 +286,7 @@ def _http_post_json(
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = _read_error_body(exc)
+        _capture_retry_after(exc)
         if exc.code in (401, 403):
             raise ProviderError(f"auth_error|HTTP {exc.code} {detail}") from exc
         if exc.code == 429:
@@ -412,6 +485,45 @@ def build_chat_request(
     return spec.chat_url, headers, payload
 
 
+def extract_usage(spec: ProviderSpec, raw: str) -> dict[str, int]:
+    """Token usage from a provider's response envelope, normalised.
+
+    Returns ``{"input_tokens": int, "output_tokens": int}`` with whichever
+    values the envelope actually carries (``{}`` when it carries none). This is
+    a best-effort, NON-FATAL side channel: a malformed envelope yields ``{}``
+    rather than raising, because token accounting must never break a call.
+
+    Both conventions are accepted:
+      * OpenAI-compatible (OpenRouter / Deepseek / Sarvam) — ``usage.prompt_tokens``
+        and ``usage.completion_tokens``.
+      * Anthropic — ``usage.input_tokens`` and ``usage.output_tokens``.
+    """
+    try:
+        envelope = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(envelope, dict):
+        return {}
+    usage = envelope.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+
+    def _int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    out: dict[str, int] = {}
+    inp = _int(usage.get("input_tokens", usage.get("prompt_tokens")))
+    outp = _int(usage.get("output_tokens", usage.get("completion_tokens")))
+    if inp is not None:
+        out["input_tokens"] = inp
+    if outp is not None:
+        out["output_tokens"] = outp
+    return out
+
+
 def parse_chat_response(spec: ProviderSpec, raw: str) -> str:
     """Extract the assistant text from a provider's response envelope."""
     try:
@@ -453,10 +565,21 @@ def call_provider(
     """One-shot call to a specific provider. Returns ``(text, latency_ms)``.
 
     Raises ProviderError (typed) on any transport/parse failure.
+
+    Token usage, when the envelope carries it, is written to the per-thread
+    sink the gateway installed (``push_usage_sink``) — a purely additive side
+    channel that never changes this function's signature or result.
     """
     url, headers, payload = build_chat_request(
         spec, api_key, model=model, system=system, user=user, images=images,
         max_tokens=max_tokens, temperature=temperature,
     )
     raw, latency_ms = _http_post_json(url, headers, payload, timeout=timeout)
-    return parse_chat_response(spec, raw), latency_ms
+    text = parse_chat_response(spec, raw)
+    sink = _current_usage_sink()
+    if sink is not None:
+        try:
+            sink.update(extract_usage(spec, raw))
+        except Exception:  # noqa: BLE001 — accounting must never break a call
+            pass
+    return text, latency_ms

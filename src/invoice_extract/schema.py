@@ -138,6 +138,12 @@ def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     """Create F3-B tables if missing. Idempotent."""
     conn.executescript(INVOICE_EXTRACT_SCHEMA)
     _migrate(conn)
+    # Phase-1 triage foundation (one file → many documents) + the legacy
+    # coverage columns. Same DDL the numbered migration applies, so a fresh DB
+    # and a migrated DB are identical.
+    from src.invoice_extract.triage_schema import ensure_triage_schema
+
+    ensure_triage_schema(conn)
     conn.commit()
 
 
@@ -152,6 +158,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "invoice_uploads", "ai_model", "TEXT")
     _add_column(conn, "invoice_uploads", "ai_latency_ms", "INTEGER")
     _add_column(conn, "invoice_uploads", "ai_error", "TEXT")
+    # The touchpoint key that ACTUALLY produced this upload's values (NULL when
+    # the offline parser produced them). Overwritten on re-extract; the history
+    # lives in ai_call_log.
+    _add_column(conn, "invoice_uploads", "extraction_touchpoint", "TEXT")
     # Bounding boxes for click-to-highlight on the source document. Only the
     # VISUAL touchpoint (image / scanned PDF) can populate these — the
     # structured path has no image to localize against, so they stay NULL

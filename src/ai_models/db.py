@@ -401,3 +401,125 @@ def list_fallback_events(conn: sqlite3.Connection, *, limit: int = 50) -> list[d
         "SELECT * FROM ai_fallback_events ORDER BY event_id DESC LIMIT ?",
         (int(limit),),
     )
+
+
+# ---------------------------------------------------------------------------
+# Token / cost accounting (non-intrusive side effect of the gateway)
+# ---------------------------------------------------------------------------
+
+
+def insert_ai_call_log(
+    conn: sqlite3.Connection,
+    *,
+    touchpoint_key: str,
+    provider: Optional[str],
+    model: Optional[str],
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
+    latency_ms: Optional[int],
+    cost_usd: Optional[float],
+    outcome: Optional[str],
+    attempt: Optional[int],
+    upload_id: Optional[int],
+    reference_type: Optional[str],
+    reference_id: Optional[int],
+    actor: Optional[str],
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO ai_call_log
+            (touchpoint_key, provider, model, input_tokens, output_tokens, latency_ms,
+             cost_usd, outcome, attempt, upload_id, reference_type, reference_id, actor, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            touchpoint_key, provider, model, input_tokens, output_tokens, latency_ms,
+            cost_usd, outcome, attempt, upload_id, reference_type, reference_id, actor, _now(),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_ai_call_log(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None,
+    upload_id: Optional[int] = None,
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM ai_call_log WHERE 1=1"
+    params: list[Any] = []
+    if reference_type is not None:
+        sql += " AND reference_type = ?"
+        params.append(reference_type)
+    if reference_id is not None:
+        sql += " AND reference_id = ?"
+        params.append(int(reference_id))
+    if upload_id is not None:
+        sql += " AND upload_id = ?"
+        params.append(int(upload_id))
+    sql += " ORDER BY call_id DESC LIMIT ?"
+    params.append(int(limit))
+    return _rows_to_dicts(conn, sql, tuple(params))
+
+
+def model_prices(
+    conn: sqlite3.Connection, provider_key: Optional[str], model_id: Optional[str],
+) -> tuple[Optional[float], Optional[float]]:
+    """(prompt_price, completion_price) per 1M tokens, or (None, None).
+
+    Prefers the per-provider cache (``ai_provider_models``), then the legacy
+    single-provider cache (``ai_model_catalog``) — the same preference the rest
+    of the registry uses. Never raises: an absent price is a NULL cost.
+    """
+    if not model_id:
+        return None, None
+    try:
+        row = None
+        if provider_key:
+            row = conn.execute(
+                "SELECT prompt_price, completion_price FROM ai_provider_models "
+                "WHERE provider_key = ? AND model_id = ?",
+                (provider_key, model_id),
+            ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT prompt_price, completion_price FROM ai_model_catalog WHERE model_id = ?",
+                (model_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None, None
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
+def model_modality(
+    conn: sqlite3.Connection, provider_key: Optional[str], model_id: Optional[str],
+) -> Optional[str]:
+    """A model's ``modality`` string ('text->text', 'text+image->text', ...).
+
+    Prefers ``ai_provider_models``, then ``ai_model_catalog``. None when the
+    catalogue has no entry — the vision guard treats "unknown" as "do not
+    refuse". Never raises.
+    """
+    if not model_id:
+        return None
+    try:
+        row = None
+        if provider_key:
+            row = conn.execute(
+                "SELECT modality FROM ai_provider_models WHERE provider_key = ? AND model_id = ?",
+                (provider_key, model_id),
+            ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT modality FROM ai_model_catalog WHERE model_id = ?", (model_id,)
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if row is None:
+        return None
+    return row[0]

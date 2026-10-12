@@ -770,3 +770,104 @@ def list_fallback_events(*, limit: int = 50, db_path=None) -> list[dict[str, Any
         return adb.list_fallback_events(conn, limit=limit)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Token / cost accounting (Step 4)
+#
+# ``estimate_cost_usd`` and ``log_ai_call`` are called by the gateway as a
+# NON-INTRUSIVE side effect after a call resolves. They never change a call's
+# result: a pricing miss stores a NULL cost, and the gateway wraps the call so
+# any failure here is swallowed.
+# ---------------------------------------------------------------------------
+
+
+def estimate_cost_usd(
+    provider: Optional[str],
+    model: Optional[str],
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
+    *,
+    db_path=None,
+) -> Optional[float]:
+    """USD cost for a call, from the model catalogue's per-1M-token prices.
+
+    Returns ``None`` (an honest "unknown") when either the tokens or the
+    prices are missing — never a fabricated 0.
+    """
+    if input_tokens is None and output_tokens is None:
+        return None
+    conn = _connect(db_path)
+    try:
+        prompt_price, completion_price = adb.model_prices(conn, provider, model)
+    finally:
+        conn.close()
+    if prompt_price is None and completion_price is None:
+        return None
+    cost = 0.0
+    if input_tokens is not None and prompt_price is not None:
+        cost += (input_tokens / 1_000_000.0) * float(prompt_price)
+    if output_tokens is not None and completion_price is not None:
+        cost += (output_tokens / 1_000_000.0) * float(completion_price)
+    return round(cost, 6)
+
+
+def log_ai_call(
+    *,
+    touchpoint_key: str,
+    provider: Optional[str],
+    model: Optional[str],
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
+    latency_ms: Optional[int] = None,
+    outcome: Optional[str] = None,
+    attempt: Optional[int] = None,
+    upload_id: Optional[int] = None,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None,
+    actor: Optional[str] = None,
+    db_path=None,
+) -> int:
+    """Record one model call attempt in ``ai_call_log``.
+
+    Called for EVERY attempt, including failures — a call that was billed but
+    whose reply was unusable still appears, with its ``outcome`` and tokens.
+    ``cost_usd`` is derived from the model catalogue when the tokens are known
+    (else NULL). Raises only on a genuine DB error — the caller (the gateway)
+    wraps this so accounting can never break a model call.
+    """
+    cost = estimate_cost_usd(provider, model, input_tokens, output_tokens, db_path=db_path)
+    conn = _connect(db_path)
+    try:
+        return adb.insert_ai_call_log(
+            conn, touchpoint_key=touchpoint_key, provider=provider, model=model,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            latency_ms=latency_ms, cost_usd=cost, outcome=outcome, attempt=attempt,
+            upload_id=upload_id, reference_type=reference_type, reference_id=reference_id,
+            actor=actor,
+        )
+    finally:
+        conn.close()
+
+
+def list_ai_call_log(
+    *, limit: int = 200, reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None, upload_id: Optional[int] = None, db_path=None,
+) -> list[dict[str, Any]]:
+    conn = _connect(db_path)
+    try:
+        return adb.list_ai_call_log(
+            conn, limit=limit, reference_type=reference_type, reference_id=reference_id,
+            upload_id=upload_id,
+        )
+    finally:
+        conn.close()
+
+
+def model_modality(provider: Optional[str], model: Optional[str], *, db_path=None) -> Optional[str]:
+    """The catalogued ``modality`` of a model (e.g. 'text->text'), or None."""
+    conn = _connect(db_path)
+    try:
+        return adb.model_modality(conn, provider, model)
+    finally:
+        conn.close()

@@ -38,6 +38,14 @@ db/
 .env
 *.pem
 
+# ---- Real client document bundles used as triage fixtures (PII) ----
+# The triage fixture PDF is a real client's bundle. It is NEVER committed;
+# read its path from the SETU_TRIAGE_FIXTURE_PDF environment variable instead.
+tests/fixtures/**/*.pdf
+
+# ---- Invoice triage live-score output (annotated page PNGs + report) ----
+reports/invoice_triage/
+
 # ---- IDE / OS ----
 .vscode/
 .idea/

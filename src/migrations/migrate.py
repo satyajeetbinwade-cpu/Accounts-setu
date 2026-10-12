@@ -27,8 +27,9 @@ from src.migrations import folders as folders_mod
 from src.migrations import framework
 from src.migrations.identity import Mapping, resolve_mapping
 from src.migrations.m0001_client_id_identity import MIGRATION
+from src.migrations.m0002_invoice_triage import MIGRATION as MIGRATION_2
 
-MIGRATIONS = [MIGRATION]
+MIGRATIONS = [MIGRATION, MIGRATION_2]
 
 
 def _now_stamp() -> str:
