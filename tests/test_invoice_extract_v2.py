@@ -495,6 +495,131 @@ def test_handwriting_guard_fires_when_boxes_overlap_and_not_otherwise():
     assert ex._handwriting_guard("invoice_number", "KMAP/1", page_box, overlapping) is None
 
 
+def test_handwriting_guard_needs_a_substantial_overlap_not_a_merest_touch():
+    """A figure written in the NEIGHBOURING column shares a sliver of the value's
+    box and says nothing about it. Only a real covering counts."""
+    page_box = (0.10, 0.10, 0.30, 0.05)
+    # Covers the value almost completely → fires.
+    assert ex._handwriting_guard(
+        "line.1.amount", "6,825.00", page_box,
+        [{"text": "6,825", "page_box": (0.10, 0.10, 0.30, 0.05)}],
+    ) == "6,825"
+    # Overlaps a third of the value → fires (exactly at the threshold).
+    third = crops_mod.overlap_ratio_of(page_box, (0.30, 0.10, 0.30, 0.05))
+    assert third >= crops_mod.HANDWRITING_OVERLAP_MIN
+    assert ex._handwriting_guard(
+        "line.1.amount", "6,825.00", page_box,
+        [{"text": "6,825", "page_box": (0.30, 0.10, 0.30, 0.05)}],
+    ) == "6,825"
+    # Overlaps a sliver → does NOT fire.
+    sliver = crops_mod.overlap_ratio_of(page_box, (0.38, 0.10, 0.30, 0.05))
+    assert sliver < crops_mod.HANDWRITING_OVERLAP_MIN
+    assert ex._handwriting_guard(
+        "line.1.amount", "6,825.00", page_box,
+        [{"text": "6,825", "page_box": (0.38, 0.10, 0.30, 0.05)}],
+    ) is None
+    # A degenerate box can never reach the threshold.
+    assert crops_mod.overlap_ratio_of(page_box, (0.20, 0.10, 0.0, 0.0)) == 0.0
+
+
+def test_printed_amount_with_the_handwritten_figure_elsewhere_stays_read(tmp_path, monkeypatch, v2_on):
+    """p24: the printed 6,825.00 and the handwritten 6,825 are the same figure,
+    but written apart — the printed value is NOT a question for anyone."""
+    pdf = _mk_pdf(tmp_path / "p24_apart.pdf", 1)
+    field_box = {"x": 0.10, "y": 0.10, "w": 0.30, "h": 0.05}
+    read = {
+        "fields": [
+            {"key": "line.1.amount", "value": "6,825.00", "handwritten": False,
+             "region": 1, "box": field_box},
+        ],
+        "annotations": [
+            {"text": "6,825", "kind_guess": "payment", "region": 1,
+             "box": {"x": 0.60, "y": 0.60, "w": 0.30, "h": 0.05}},
+        ],
+    }
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    row = {r["field_key"]: r for r in outcome.fields}["line.1.amount"]
+    assert row["status"] == fv2.STATUS_READ
+    assert row["guard_hit"] is None
+    # The annotation is still recorded — it was seen, it just is not this value's problem.
+    assert outcome.annotations[0]["text"] == "6,825"
+
+
+def test_printed_amount_covered_by_the_handwritten_figure_is_flagged(tmp_path, monkeypatch, v2_on):
+    """The p24 case the guard exists for: the same figure written OVER the value."""
+    pdf = _mk_pdf(tmp_path / "p24_over.pdf", 1)
+    field_box = {"x": 0.10, "y": 0.10, "w": 0.30, "h": 0.05}
+    read = {
+        "fields": [
+            {"key": "line.1.amount", "value": "6,825.00", "handwritten": False,
+             "region": 1, "box": field_box},
+        ],
+        "annotations": [
+            {"text": "6,825", "kind_guess": "payment", "region": 1, "box": dict(field_box)},
+        ],
+    }
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    row = {r["field_key"]: r for r in outcome.fields}["line.1.amount"]
+    assert row["status"] == fv2.STATUS_NEEDS_PRINTED
+    assert row["guard_hit"] == "6,825"
+    # Flagged, never replaced: the printed value is still the value.
+    assert row["value_a"] == "6,825.00"
+
+
+def test_model_flagged_handwritten_monetary_value_is_flagged(tmp_path, monkeypatch, v2_on):
+    """The other half of the rule: the model's OWN handwritten flag on a
+    monetary value is enough on its own — no annotation and no overlap needed."""
+    pdf = _mk_pdf(tmp_path / "hw_flag.pdf", 1)
+    box = {"x": 0.30, "y": 0.30, "w": 0.20, "h": 0.05}
+    read_a = {
+        "fields": [{"key": "invoice_total", "value": "7,370", "handwritten": True,
+                    "region": 1, "box": box}],
+        "annotations": [],
+    }
+    read_b = {
+        "fields": [{"key": "invoice_total", "value": "7,370", "handwritten": True,
+                    "region": 1, "box": box}],
+    }
+    _stub_reads(monkeypatch, read_a, read_b)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    row = {r["field_key"]: r for r in outcome.fields}["invoice_total"]
+    assert row["status"] == fv2.STATUS_NEEDS_PRINTED
+    assert row["is_handwritten"] == 1
+    # The model's flag fired it, not the box guard.
+    assert row["guard_hit"] is None
+
+
+def test_model_flagged_handwritten_NON_monetary_value_is_not_flagged(tmp_path, monkeypatch, v2_on):
+    """`needs_printed` means 'a handwritten amount where a printed one is
+    required'. A non-monetary field is never one of those."""
+    pdf = _mk_pdf(tmp_path / "hw_nonmoney.pdf", 1)
+    read = {
+        "fields": [{"key": "invoice_number", "value": "KMAP/1", "handwritten": True,
+                    "region": 1, "box": {"x": 0.10, "y": 0.10, "w": 0.30, "h": 0.05}}],
+        "annotations": [],
+    }
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    row = {r["field_key"]: r for r in outcome.fields}["invoice_number"]
+    assert row["status"] == fv2.STATUS_READ
+    # The fact is still on record, which is what calibration reads.
+    assert row["is_handwritten"] == 1
+
+
 def test_excluded_and_other_categories_are_skipped_with_a_reason(scratch_db):
     conn = sqlite3.connect(scratch_db)
     try:
@@ -770,6 +895,87 @@ def test_provider_preflight_reports_availability_and_blocks_a_single_provider(sc
     monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter", "anthropic"])
     _rows, problems = ex.provider_preflight(db_path=scratch_db)
     assert problems == []
+
+
+def test_provider_preflight_names_the_read_provider_model_and_reason(scratch_db, monkeypatch):
+    """A pre-flight refusal must say WHICH read, WHICH provider, WHICH model and
+    WHY — otherwise the human cannot tell what to change."""
+    # Everything keyed: no problems, but BOTH reads are still named, with the
+    # provider and model each leg would use.
+    monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter", "anthropic"])
+    rows, problems = ex.provider_preflight(db_path=scratch_db)
+    assert problems == []
+    by_provider = {row["provider"]: row for row in rows}
+    a_legs = [u for u in by_provider["openrouter"]["used_by"] if u["read"] == "read A"]
+    assert a_legs and all(u["touchpoint"] == ex.TOUCHPOINT_READ_A for u in a_legs)
+    assert {u["leg"] for u in a_legs} == {"primary", "fallback"}
+    assert any(u["model"] == "anthropic/claude-sonnet-4" for u in a_legs)
+    assert {u["read"] for u in by_provider["anthropic"]["used_by"]} == {"read B"}
+    assert {u["model"] for u in by_provider["anthropic"]["used_by"]} == {"claude-sonnet-4"}
+
+    # Read B refused for a MISSING KEY: read, touchpoint, provider, model, reason.
+    monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter"])
+    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    blob = "\n".join(problems)
+    assert "read B" in blob and ex.TOUCHPOINT_READ_B in blob
+    assert "anthropic" in blob and "claude-sonnet-4" in blob
+    assert "no usable API key" in blob
+    assert "different provider" in blob
+
+    # Read A refused as well: read A is named too, with its own model.
+    monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["anthropic"])
+    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    blob = "\n".join(problems)
+    assert "read A" in blob and ex.TOUCHPOINT_READ_A in blob
+    assert "openrouter" in blob and "anthropic/claude-sonnet-4" in blob
+
+
+def test_provider_preflight_refuses_a_text_only_model_by_name(scratch_db, monkeypatch):
+    """The third refusal reason: the read sends page images, so a text-only
+    model is refused — naming the read, the provider and the model."""
+    monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter", "anthropic"])
+    monkeypatch.setattr(
+        "src.ai_models.service.vision_check",
+        lambda provider, model, **kwargs: (
+            model != "claude-sonnet-4",
+            "" if model != "claude-sonnet-4"
+            else f"model '{model}' ({provider}) does not accept image input",
+        ),
+    )
+    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    blob = "\n".join(problems)
+    assert "read B" in blob and ex.TOUCHPOINT_READ_B in blob
+    assert "claude-sonnet-4" in blob and "anthropic" in blob
+    assert "does not accept image input" in blob
+    # It is a vision refusal, not a key problem — both legs are keyed here.
+    assert not any("No usable API key" in p for p in problems)
+
+
+def test_provider_preflight_refuses_read_b_on_read_as_own_provider(scratch_db, monkeypatch):
+    """Both primaries on one provider is the failure the second read exists to
+    prevent, so it is refused up front with both legs named."""
+    monkeypatch.setattr(
+        ex, "configured_providers", lambda db_path=None: ["openrouter", "anthropic"],
+    )
+    monkeypatch.setattr(ex, "configured_reads", lambda db_path=None: [
+        {"read": "read A", "touchpoint": ex.TOUCHPOINT_READ_A, "leg": "primary",
+         "provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        {"read": "read A", "touchpoint": ex.TOUCHPOINT_READ_A, "leg": "fallback",
+         "provider": "openrouter", "model": "google/gemini-2.5-pro"},
+        {"read": "read B", "touchpoint": ex.TOUCHPOINT_READ_B, "leg": "primary",
+         "provider": "openrouter", "model": "anthropic/claude-sonnet-4"},
+        {"read": "read B", "touchpoint": ex.TOUCHPOINT_READ_B, "leg": "fallback",
+         "provider": "anthropic", "model": "claude-sonnet-4"},
+    ])
+    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    blob = "\n".join(problems)
+    assert "SAME provider" in blob
+    assert "read A" in blob and "read B" in blob
+    assert "anthropic/claude-sonnet-4" in blob
+    assert "different provider" in blob
+    # Both legs ARE keyed, so nothing here is about a missing key.
+    assert not any("No usable API key" in p for p in problems)
+
 
 
 def test_resume_only_picks_up_unfinished_documents(tmp_path, monkeypatch, scratch_db):

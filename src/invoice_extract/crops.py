@@ -337,6 +337,35 @@ def boxes_overlap(a: tuple[float, float, float, float], b: tuple[float, float, f
     return not (ax + aw < bx or bx + bw < ax or ay + ah < by or by + bh < ay)
 
 
+#: How much of a VALUE's own box an annotation must cover before the annotation
+#: is treated as written ON that value rather than merely near it. Deliberately
+#: generous: a handwritten figure scribbled over a printed amount shares only
+#: part of its box with it, while a figure written in the next column shares
+#: none.
+HANDWRITING_OVERLAP_MIN = 0.3
+
+
+def overlap_ratio_of(
+    box: tuple[float, float, float, float], other: tuple[float, float, float, float],
+) -> float:
+    """The fraction of ``box``'s own area that ``other`` covers (0.0 - 1.0).
+
+    Zero when they do not intersect, and zero for a degenerate box. Asymmetric
+    on purpose: the question is "how much of THIS value is covered?", so a
+    large annotation over a small value can reach 1.0 while the same pair
+    scores low the other way round.
+    """
+    ax, ay, aw, ah = box
+    bx, by, bw, bh = other
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    dx = min(ax + aw, bx + bw) - max(ax, bx)
+    dy = min(ay + ah, by + bh) - max(ay, by)
+    if dx <= 0 or dy <= 0:
+        return 0.0
+    return (dx * dy) / (aw * ah)
+
+
 def _grow(box: tuple[float, float, float, float], tol: float) -> tuple[float, float, float, float]:
     x, y, w, h = box
     return clamp_box((x - tol, y - tol, w + 2 * tol, h + 2 * tol))

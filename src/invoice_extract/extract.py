@@ -64,6 +64,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TOUCHPOINT_READ_A = "invoice_extraction_visual"     # the same 'read the page' job as Phase 1
 TOUCHPOINT_READ_B = "invoice_extraction_verify"     # the independent second read
 
+#: The two reads, IN ORDER, with the human name the pre-flight report uses.
+#: Read B must never be served by read A's provider — that is the whole point
+#: of paying for a second read.
+READS: tuple[tuple[str, str], ...] = (
+    ("read A", TOUCHPOINT_READ_A),
+    ("read B", TOUCHPOINT_READ_B),
+)
+
 # --- settings --------------------------------------------------------------
 KEY_ENABLED = "invoice_extract.v2.enabled"
 KEY_DPI = "invoice_extract.v2.dpi"
@@ -388,12 +396,20 @@ def _handwriting_guard(
     annotations: list[dict[str, Any]],
 ) -> Optional[str]:
     """The deterministic guard: a numeric value that EQUALS an annotation's
-    amount and whose box OVERLAPS that annotation needs the printed value.
+    amount, and whose box the annotation actually COVERS, needs the printed one.
 
     Returns the matching annotation text when the guard fires, else None. This
     catches the case the prompt alone cannot: a handwritten total scribbled over
     the printed block, where the model reports the printed number but the page
     is genuinely ambiguous.
+
+    BOTH halves are required. Equal amounts alone are not enough — the same
+    figure appears many times on a real invoice and a handwritten "6,825" in
+    the margin says nothing about a printed 6,825.00 elsewhere. Overlap alone is
+    not enough either (the amount must actually be the same figure). And the
+    overlap must be SUBSTANTIAL: at least
+    ``crops_mod.HANDWRITING_OVERLAP_MIN`` of the value's own box, so a figure
+    written in the neighbouring column cannot flag a value it merely touches.
     """
     if value is None or page_box is None:
         return None
@@ -407,7 +423,7 @@ def _handwriting_guard(
         ann_box = ann.get("page_box")
         if ann_box is None:
             continue
-        if crops_mod.boxes_overlap(page_box, ann_box):
+        if crops_mod.overlap_ratio_of(page_box, ann_box) >= crops_mod.HANDWRITING_OVERLAP_MIN:
             return str(ann.get("text"))
     return None
 
@@ -808,8 +824,9 @@ def extract_document(
             status = fv2.STATUS_OUT_OF_REGION
         elif a is None and b is None:
             status = fv2.STATUS_NOT_PRINTED
-        elif a is not None and a.is_handwritten:
-            # A handwritten value is not a field value: require the printed one.
+        elif a is not None and a.is_handwritten and spec.monetary:
+            # The model itself says it read the amount by hand. A monetary value
+            # must come from the printed block, so require the printed one.
             status = fv2.STATUS_NEEDS_PRINTED
         else:
             status = fv2.STATUS_READ
@@ -1358,30 +1375,99 @@ def fields_by_key(extraction: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(f["field_key"]): f for f in extraction.get("fields") or []}
 
 
+def configured_reads(*, db_path=None) -> list[dict[str, Any]]:
+    """What each read is configured to USE, in read-then-leg order.
+
+    One record per (read, leg): ``{read, touchpoint, leg, provider, model}``.
+    Read-only — it resolves the assignment and nothing else.
+    """
+    from src.ai_models import service as ai_models
+
+    out: list[dict[str, Any]] = []
+    for read, touchpoint in READS:
+        legs = ai_models.effective_leg(touchpoint, db_path=db_path) or {}
+        for leg_name in ("primary", "fallback"):
+            leg = legs.get(leg_name) or {}
+            out.append({
+                "read": read,
+                "touchpoint": touchpoint,
+                "leg": leg_name,
+                "provider": leg.get("provider") or "(unassigned)",
+                "model": leg.get("model"),
+            })
+    return out
+
+
+def _describe(record: dict[str, Any]) -> str:
+    """'read B (invoice_extraction_verify) primary leg anthropic / claude-sonnet-4'."""
+    return (
+        f"{record['read']} ({record['touchpoint']}) {record['leg']} leg '"
+        f"{record['provider']}' / '{record['model'] or 'no model assigned'}'"
+    )
+
+
 def provider_preflight(*, db_path=None) -> tuple[list[dict[str, Any]], list[str]]:
     """What the two reads need, and whether the platform can supply it.
 
     Reports per provider ONLY whether a key is available — never a key, never a
-    decrypted secret. Returns ``(rows, problems)``; each problem is a sentence
-    naming what is missing, so a caller can stop BEFORE spending anything.
+    decrypted secret. Returns ``(rows, problems)``; each row names the read(s),
+    the leg and the model behind that provider, and each problem names the READ,
+    its configured PROVIDER and MODEL, and the reason it is refused:
+
+    * no usable API key for the leg's provider,
+    * a model the catalogue says is text-only (the read sends page images),
+    * read B configured on the same provider as read A, so it could not be an
+      independent second opinion.
+
+    A caller can therefore stop BEFORE spending anything, and a human can see
+    what to change and where. Defaults are never altered here.
     """
     from src.ai_models import service as ai_models
 
     available = configured_providers(db_path=db_path)
-    needed: list[str] = []
-    for touchpoint in (TOUCHPOINT_READ_A, TOUCHPOINT_READ_B):
-        legs = ai_models.effective_leg(touchpoint, db_path=db_path) or {}
-        for leg in ("primary", "fallback"):
-            provider = (legs.get(leg) or {}).get("provider")
-            if provider and provider not in needed:
-                needed.append(provider)
-    ordered = sorted(set(needed) | set(available))
-    rows = [{"provider": key, "available": key in available} for key in ordered]
+    configured = configured_reads(db_path=db_path)
+
+    uses: dict[str, list[dict[str, Any]]] = {}
+    for record in configured:
+        uses.setdefault(record["provider"], []).append(record)
+    rows = [
+        {"provider": key, "available": key in available, "used_by": uses[key]}
+        for key in sorted(set(uses) | set(available))
+    ]
 
     problems: list[str] = []
-    missing = [row["provider"] for row in rows if not row["available"] and row["provider"] in needed]
+
+    # 1. No usable key for a leg's provider — that read cannot be served.
+    unkeyed = [r for r in configured if r["provider"] not in available]
+    missing = sorted({r["provider"] for r in unkeyed})
     if missing:
         problems.append("No usable API key for: " + ", ".join(missing) + ".")
+        problems.extend(
+            f"{_describe(record)} — refused: no usable API key for "
+            f"'{record['provider']}'."
+            for record in unkeyed
+        )
+
+    # 2. A text-only model cannot receive the page images a read sends.
+    for record in configured:
+        allowed, reason = ai_models.vision_check(
+            record["provider"], record["model"], db_path=db_path,
+        )
+        if not allowed:
+            problems.append(f"{_describe(record)} — refused: {reason}.")
+
+    # 3. Read B must be a genuinely independent second opinion.
+    legs_by_read = {
+        read: {r["leg"]: r for r in configured if r["read"] == read} for read, _ in READS
+    }
+    primary_a = (legs_by_read.get("read A") or {}).get("primary") or {}
+    primary_b = (legs_by_read.get("read B") or {}).get("primary") or {}
+    if primary_a and primary_b and primary_a.get("provider") == primary_b.get("provider"):
+        problems.append(
+            f"{_describe(primary_b)} is the SAME provider as {_describe(primary_a)} — "
+            "read B must come from a different provider, because two reads from one "
+            "provider are not an independent second opinion."
+        )
     if len(available) < 2:
         problems.append(
             "Read B must come from a different provider than read A (two reads from one "
@@ -1850,9 +1936,12 @@ def _render_score_report(payload: dict[str, Any]) -> str:
     lines.append("## Handwriting guard")
     lines.append("")
     lines.append(
-        "The guard is deterministic: a monetary field whose value EQUALS an annotation's "
-        "amount and whose box OVERLAPS that annotation is marked `needs_printed`, so the "
-        "printed value is confirmed rather than a scribble trusted."
+        "The guard is deterministic and fires on EITHER of two things. (1) A monetary field "
+        "whose value EQUALS an annotation's amount AND whose box the annotation actually "
+        "COVERS — at least HANDWRITING_OVERLAP_MIN of the value's own box, so the same figure "
+        "written in the next column cannot flag a printed value it merely touches. (2) A "
+        "monetary value the model itself reported as handwritten, whatever its box. Either "
+        "way the printed value is confirmed rather than a scribble trusted."
     )
     lines.append("")
     for page in (23, 24, 25):
@@ -1994,10 +2083,19 @@ def score(
         # Key pre-flight IN THE COPY: report availability only, never a key,
         # and stop before anything runs when a leg has no usable provider.
         key_rows, problems = provider_preflight(db_path=str(copy.db))
+        print("Reads, as assigned (Phase 2 requires the second read on a different provider):")
+        for record in configured_reads(db_path=str(copy.db)):
+            print(
+                f"  {record['read']:6} [{record['touchpoint']}] {record['leg']:8} "
+                f"{record['provider']} / {record['model'] or '(no model)'}"
+            )
         print("Provider keys — through the app's own resolver (vault, then environment):")
         for row in key_rows:
             print(f"  key available: {'yes' if row['available'] else 'no '}  [{row['provider']}]")
         if problems:
+            print("Pre-flight refusals:")
+            for problem in problems:
+                print(f"  - {problem}")
             raise InvoiceExtractError(
                 " ".join(problems)
                 + " Add a key on the AI Models screen (or set the provider's environment "
