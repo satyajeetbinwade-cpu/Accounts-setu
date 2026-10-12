@@ -171,6 +171,9 @@ def _with_key(db):
 
 def test_image_test_fails_on_a_stub_that_rejects_images(db, monkeypatch):
     _with_key(db)
+    # The seed no longer supplies a model for a vision touchpoint (it refuses to
+    # guess one), so a test that needs one assigns it.
+    _valid_legs(db, VISION_TP, primary="acme/vision-ok", fallback="acme/vision-other")
     seen: dict = {}
 
     def _call(spec, api_key, *, model, system, user, images=None, **kw):
@@ -188,6 +191,7 @@ def test_image_test_fails_on_a_stub_that_rejects_images(db, monkeypatch):
 
 def test_image_test_passes_only_when_the_reply_reads_the_word(db, monkeypatch):
     _with_key(db)
+    _valid_legs(db, VISION_TP, primary="acme/vision-ok", fallback="acme/vision-other")
     monkeypatch.setattr(prov, "call_provider", lambda spec, api_key, **kw: ("I can read SETU", 9))
     ok = ai_models.test_leg(VISION_TP, "primary", actor="admin", db_path=db)
     assert ok["ok"] is True and ok["kind"] == "image" and ok["latency_ms"] == 9

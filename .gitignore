@@ -66,3 +66,6 @@ Thumbs.db
 .web/
 .states/
 reflex.lock/
+
+# ---- Derived data (re-renderable, never committed) ----
+data/_page_cache/

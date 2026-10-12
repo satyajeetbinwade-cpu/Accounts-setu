@@ -749,26 +749,50 @@ def test_job_runs_queued_to_complete_and_persists_fields(tmp_path, monkeypatch, 
         len(fv2.INVOICE_KEYS)
 
 
-def test_provider_preflight_reports_availability_and_blocks_a_single_provider(scratch_db, monkeypatch):
-    rows, problems = ex.provider_preflight(db_path=scratch_db)
+def test_provider_preflight_reports_availability_and_blocks_a_single_provider(tmp_path, monkeypatch):
+    """The pre-flight's key and independence logic.
+
+    Its OWN database, because the legs are stated explicitly here: the seed no
+    longer guesses a vision model, so a test that needs one must assign it —
+    and doing that on the shared scratch DB would leak into other tests.
+    """
+    from src.ai_models import service as ai_models
+
+    db = str(tmp_path / "preflight.db")
+    bootstrap.run_migrations(db_path=db, data_root=tmp_path / "data")
+    ai_models.set_assignment_legs(
+        ex.TOUCHPOINT_READ_A, primary_provider="openrouter", primary_model="acme/vision-a",
+        fallback_provider="openrouter", fallback_model="acme/vision-a2",
+        actor="test", db_path=db,
+    )
+    ai_models.set_assignment_legs(
+        ex.TOUCHPOINT_READ_B, primary_provider="anthropic", primary_model="acme/vision-b",
+        fallback_provider="anthropic", fallback_model="acme/vision-b2",
+        actor="test", db_path=db,
+    )
+
+    rows, problems = ex.provider_preflight(db_path=db)
     providers = {row["provider"] for row in rows}
-    # The two reads' default legs name more than one provider (read B is NOT
-    # allowed to be the same vendor as read A).
+    # The two reads' legs name more than one provider (read B is NOT allowed to
+    # be the same vendor as read A).
     assert "openrouter" in providers
+    assert "anthropic" in providers
     assert len(providers) >= 2
     # With nothing configured, it says so and refuses to start.
+    monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: [])
+    rows, problems = ex.provider_preflight(db_path=db)
     assert all(row["available"] is False for row in rows)
     assert any("No usable API key" in p for p in problems)
     assert any("different provider" in p for p in problems)
 
     # One provider only is still not enough — read B needs a second one.
     monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter"])
-    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    _rows, problems = ex.provider_preflight(db_path=db)
     assert any("different provider" in p for p in problems)
 
     # Two providers, both of them keyed → no problems at all.
     monkeypatch.setattr(ex, "configured_providers", lambda db_path=None: ["openrouter", "anthropic"])
-    _rows, problems = ex.provider_preflight(db_path=scratch_db)
+    _rows, problems = ex.provider_preflight(db_path=db)
     assert problems == []
 
 

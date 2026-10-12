@@ -159,6 +159,11 @@ def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     from src.invoice_extract.confidence_schema import ensure_confidence_schema
 
     ensure_confidence_schema(conn)
+    # The review screen's backend services (document actions log + the reviewed
+    # flag). Same DDL the numbered migration applies.
+    from src.invoice_extract.review_schema import ensure_review_schema
+
+    ensure_review_schema(conn)
     conn.commit()
 
 

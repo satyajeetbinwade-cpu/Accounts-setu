@@ -1172,6 +1172,22 @@ def _restitch_and_persist(
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="triage-worker")
 
 
+def _run_chain(run_id: int, *, actor: str, db_path=None) -> None:
+    """Hand a FINISHED run to the pipeline's chain, if one is registered.
+
+    A no-op unless someone called ``pipeline.start_v2_pipeline``. Called on
+    every exit of ``_execute_run``, so it may never raise: a chain failure must
+    not turn a completed triage run into a failed one — the extraction simply
+    does not start, and ``resume_extraction`` can still pick it up.
+    """
+    try:
+        from src.invoice_extract import pipeline
+
+        pipeline.run_chain(run_id, actor=actor, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"warning: the pipeline chain for run {run_id} failed: {exc}", file=sys.stderr)
+
+
 def _execute_run(run_id: int, *, actor: str, db_path=None, pages: Optional[list[int]] = None) -> None:
     """The worker body. Never raises — a failure is recorded on the run row."""
     conn = _connect(db_path)
@@ -1202,6 +1218,7 @@ def _execute_run(run_id: int, *, actor: str, db_path=None, pages: Optional[list[
                           error=f"{type(exc).__name__}: {exc}", finished_at=_now())
         finally:
             conn.close()
+        _run_chain(run_id, actor=actor, db_path=db_path)
         return
 
     conn = _connect(db_path)
@@ -1250,6 +1267,11 @@ def _execute_run(run_id: int, *, actor: str, db_path=None, pages: Optional[list[
         )
     finally:
         conn.close()
+
+    # THE CHAIN: triage is done, so the documents it found can be read. Runs on
+    # THIS worker, so closing the browser cannot stop the pair. A no-op when no
+    # chain was registered for this run.
+    _run_chain(run_id, actor=actor, db_path=db_path)
 
 
 def run_triage(

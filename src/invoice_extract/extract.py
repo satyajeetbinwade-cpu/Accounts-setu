@@ -170,6 +170,20 @@ def get_config(*, db_path=None) -> ExtractConfig:
     )
 
 
+def require_enabled(db_path=None) -> None:
+    """Refuse when the v2 pipeline is off — the ONE gate every v2 service uses.
+
+    ``start_extraction`` keeps its own message (it can be forced past the flag,
+    which is how the scoring harness runs); everything else that reads or writes
+    v2 data calls this instead of re-reading the setting itself.
+    """
+    if not get_config(db_path=db_path).enabled:
+        raise InvoiceExtractError(
+            f"The v2 invoice extraction is OFF ({KEY_ENABLED} is false). The legacy "
+            "extraction path is unaffected; turn the setting on to use it."
+        )
+
+
 # ---------------------------------------------------------------------------
 # The prompt (PRINTED values only — the model never computes or infers)
 # ---------------------------------------------------------------------------
@@ -1008,6 +1022,16 @@ def start_extraction(
             )
         doc_ids = [int(d["document_id"]) for d in documents]
         placeholders = ",".join("?" for _ in doc_ids)
+        # Documents that ALREADY had an active pass: a re-extraction replaces
+        # what a reviewer may have signed off, so their standing review is
+        # cleared below (inside the log, after this transaction closes).
+        superseded = [
+            int(r[0]) for r in conn.execute(
+                f"SELECT DISTINCT document_id FROM invoice_doc_extractions "
+                f"WHERE is_active = 1 AND document_id IN ({placeholders})",
+                tuple(doc_ids),
+            ).fetchall()
+        ]
         # Supersede: deactivate the previous rows (never delete — history kept).
         conn.execute(
             f"UPDATE invoice_doc_extractions SET is_active = 0 "
@@ -1039,6 +1063,17 @@ def start_extraction(
         conn.commit()
     finally:
         conn.close()
+
+    # A re-extraction un-signs any standing review: the earlier sign-off was
+    # about a different set of values. Logged, never silent. Done AFTER the
+    # transaction above so the two writers never hold the same file at once.
+    if superseded:
+        from src.invoice_extract import doc_actions
+
+        doc_actions.clear_reviewed_for_upload(
+            upload_id, actor=actor, triggered_by="re_extraction",
+            reason="the document was extracted again", document_ids=superseded, db_path=db_path,
+        )
 
     if created:
         state = _register_job(upload_id)
@@ -1295,6 +1330,15 @@ def is_extracting(upload_id: int, *, db_path=None) -> bool:
         conn.close()
 
 
+def extraction_status_counts(upload_id: int, *, db_path=None) -> dict[str, int]:
+    """How many ACTIVE extractions of this upload are in each status.
+
+    The public form of the counter the progress panel needs; a status with no
+    rows is simply absent from the mapping.
+    """
+    return _status_counts(upload_id, db_path=db_path)
+
+
 def wait_for_extraction(
     upload_id: int, *, db_path=None, timeout: float = 900.0, poll: float = 0.05,
 ) -> dict[str, int]:
@@ -1392,16 +1436,29 @@ def provider_preflight(*, db_path=None) -> tuple[list[dict[str, Any]], list[str]
 
     available = configured_providers(db_path=db_path)
     needed: list[str] = []
-    for touchpoint in (TOUCHPOINT_READ_A, TOUCHPOINT_READ_B):
+    # (read label, touchpoint, the model its PRIMARY leg would use)
+    reads: list[tuple[str, str, Optional[str]]] = []
+    for read, touchpoint in (("read A", TOUCHPOINT_READ_A), ("read B", TOUCHPOINT_READ_B)):
         legs = ai_models.effective_leg(touchpoint, db_path=db_path) or {}
         for leg in ("primary", "fallback"):
             provider = (legs.get(leg) or {}).get("provider")
             if provider and provider not in needed:
                 needed.append(provider)
+        reads.append((read, touchpoint, (legs.get("primary") or {}).get("model")))
     ordered = sorted(set(needed) | set(available))
     rows = [{"provider": key, "available": key in available} for key in ordered]
 
     problems: list[str] = []
+    # A read with NO model assigned cannot run at all. Reported plainly, and
+    # FIRST: a fresh database legitimately starts here, because the seed refuses
+    # to guess a model — "no vision model assigned" is the honest report, and
+    # quietly falling back to an expensive one is what this replaces.
+    for read, touchpoint, model in reads:
+        if not model:
+            problems.append(
+                f"{read} ({touchpoint}) — refused: no vision model assigned for this read. "
+                "Choose an image-capable model for it on the AI Models screen."
+            )
     missing = [row["provider"] for row in rows if not row["available"] and row["provider"] in needed]
     if missing:
         problems.append("No usable API key for: " + ", ".join(missing) + ".")

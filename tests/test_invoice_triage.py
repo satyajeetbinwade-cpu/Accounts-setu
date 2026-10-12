@@ -449,11 +449,28 @@ def test_migration_is_idempotent_and_leaves_uploads_untouched(tmp_path):
 # ===========================================================================
 
 
+def _assign_triage_leg(db_path, *, provider="openrouter", model="acme/triage-model"):
+    """Assign the triage touchpoint a model for this test.
+
+    The seed deliberately leaves a page-reading touchpoint UNASSIGNED when the
+    catalogue cannot price a vision model, so a test that actually calls the
+    gateway has to say which model it is calling.
+    """
+    from src.ai_models import service as ams
+
+    ams.set_assignment_legs(
+        "invoice_triage", primary_provider=provider, primary_model=model,
+        fallback_provider=provider, fallback_model=f"{model}-fallback",
+        actor="test", db_path=db_path,
+    )
+
+
 def test_usage_logged_with_nulls_when_provider_reports_none(monkeypatch, tmp_path):
     from src.ai_models import service as ams, gateway, providers as prov
 
     db_path = str(tmp_path / "ai.db")
     ams.init_ai_models(db_path)
+    _assign_triage_leg(db_path)
 
     def fake_call_provider(spec, api_key, *, model, system, user, images=None, max_tokens=0,
                            temperature=0.0, timeout=120, usage_sink=None):
@@ -473,6 +490,7 @@ def test_usage_captured_through_the_real_provider_adapter(monkeypatch, tmp_path)
 
     db_path = str(tmp_path / "ai4.db")
     ams.init_ai_models(db_path)
+    _assign_triage_leg(db_path)
     monkeypatch.setattr(
         prov, "_http_post_json",
         lambda url, headers, payload, *, timeout: (
@@ -492,6 +510,7 @@ def test_logging_failure_never_breaks_a_call(monkeypatch, tmp_path):
 
     db_path = str(tmp_path / "ai2.db")
     ams.init_ai_models(db_path)
+    _assign_triage_leg(db_path)
     monkeypatch.setattr(prov, "call_provider",
                         lambda spec, api_key, **k: ('{"ok": true}', 3))
     monkeypatch.setattr(ams, "resolve_provider_secret", lambda *a, **k: "sk-test")

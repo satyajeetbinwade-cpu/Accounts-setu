@@ -63,6 +63,16 @@ def _ai_db(tmp_path, name="ai.db") -> str:
     from src.settings import service as settings
 
     settings.init_settings(db_path)
+    # The seed deliberately leaves a page-reading touchpoint UNASSIGNED when the
+    # catalogue cannot price a vision model, so a test that calls the gateway
+    # states the legs it is testing. These tests read them back with
+    # `effective_leg`, so one assignment here covers them all.
+    ams.set_assignment_legs(
+        "invoice_triage",
+        primary_provider="openrouter", primary_model="acme/triage-primary",
+        fallback_provider="openrouter", fallback_model="acme/triage-fallback",
+        actor="test", db_path=db_path,
+    )
     return db_path
 
 

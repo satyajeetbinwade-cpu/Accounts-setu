@@ -30,6 +30,7 @@ from __future__ import annotations
 import sqlite3
 
 from src.ai_models import db as adb
+from src.ai_models import defaults
 
 # (touchpoint_key, label, category, description, primary_model, fallback_model, sort_order)
 SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
@@ -117,8 +118,10 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
         "Extraction",
         "Reads ONE rendered page at a time and finds every separate document on it, "
         "categorising each and returning boxes + a short label + a quoted evidence "
-        "snippet. No field values are extracted here. Defaults to the same models as "
-        "invoice_extraction_visual, since it is the same 'read the page' job.",
+        "snippet. No field values are extracted here. Same job as "
+        "invoice_extraction_visual, so it starts on the same model: the cheapest "
+        "image-capable one the catalogue can price (see ai_models.defaults). A fresh "
+        "database leaves it UNASSIGNED rather than guessing an expensive model.",
         "anthropic/claude-sonnet-4",
         "google/gemini-2.5-pro",
         9,
@@ -131,10 +134,11 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
         "the same prompt and schema as invoice_extraction_visual but NEVER sees that "
         "read's values. Its SERVING provider must differ from invoice_extraction_visual's "
         "— two reads from one provider are not an independent second opinion — so the "
-        "default here is Anthropic's own API while invoice_extraction_visual goes through "
-        "OpenRouter. If this leg falls back to OpenRouter too, the run fails that document "
-        "with a clear message rather than pretending it verified anything. A vision-capable "
-        "model is required: the assignment guard refuses a text-only one.",
+        "seed gives it the cheapest image-capable model on a DIFFERENT provider from "
+        "read A's primary (see ai_models.defaults). If this leg is served by read A's "
+        "provider anyway, the run fails that document with a clear message rather than "
+        "pretending it verified anything. A vision-capable model is required: the "
+        "assignment guard refuses a text-only one.",
         "claude-sonnet-4",
         "google/gemini-2.5-pro",
         10,
@@ -209,18 +213,36 @@ def run_seed(conn: sqlite3.Connection) -> None:
                 conn, spec.key, prov.static_models(spec), source="static",
             )
 
+    # What the page-reading touchpoints should default to, decided from the
+    # catalogue that exists ON THIS BOOT (see defaults.py for the rules).
+    vision_defaults = defaults.choose_vision_defaults(conn)
+
     for key, label, category, description, primary, fallback, order in SEED_ASSIGNMENTS:
         primary_provider, fallback_provider = SEED_PROVIDER_LEGS.get(
             key, ("openrouter", "openrouter")
         )
+        if key in defaults.VISION_SEED_TOUCHPOINTS:
+            # A page-reading touchpoint does NOT get a hardcoded flagship. The
+            # catalogue decides, by price, from the models it knows accept
+            # images; when it cannot decide, the legs are left EMPTY and the
+            # pre-flight says "no vision model assigned".
+            chosen = vision_defaults.get(key) or {"primary": None, "fallback": None}
+            primary_leg = chosen.get("primary") or {}
+            fallback_leg = chosen.get("fallback") or {}
+            primary_model = primary_leg.get("model")
+            fallback_model = fallback_leg.get("model")
+            primary_provider = primary_leg.get("provider")
+            fallback_provider = fallback_leg.get("provider")
+        else:
+            primary_model, fallback_model = primary, fallback
         adb.upsert_assignment(
             conn,
             touchpoint_key=key,
             label=label,
             category=category,
             description=description,
-            primary_model=primary,
-            fallback_model=fallback,
+            primary_model=primary_model,
+            fallback_model=fallback_model,
             primary_provider=primary_provider,
             fallback_provider=fallback_provider,
             is_active=True,

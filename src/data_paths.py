@@ -24,6 +24,37 @@ from src.shared.vocab import SOURCE_TYPES, is_valid_source_type
 
 DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 
+#: A RESERVED folder under the data root for machine-made artefacts — currently
+#: the review screen's rendered page images. The leading underscore keeps it out
+#: of the client-id namespace (no client id is ever ``_page_cache``), and
+#: ``list_unmapped_folders`` skips reserved names, so a cache can never be
+#: reported as a stray client folder. It is git-ignored: it is derived data that
+#: can always be re-rendered, and it must never enter the repository.
+PAGE_CACHE_DIRNAME = "_page_cache"
+
+# A cache key is built by the caller from an upload id, a page number, a
+# rotation, a dpi and a content hash — all digits and hex. Nothing else is
+# accepted, so a key cannot carry a path separator or a traversal.
+_CACHE_KEY_RE = re.compile(r"[A-Za-z0-9_.-]{1,120}")
+
+
+def page_cache_dir() -> Path:
+    """``<data root>/_page_cache/`` (NOT created)."""
+    return DATA_ROOT / PAGE_CACHE_DIRNAME
+
+
+def page_cache_path(key: str) -> Path:
+    """The cache file for one validated ``key``.
+
+    The key is checked against a conservative allowlist BEFORE it is joined, so
+    a hostile key (``../../etc/passwd``, an absolute path, a separator) can
+    never leave the cache folder.
+    """
+    text = str(key or "")
+    if not _CACHE_KEY_RE.fullmatch(text):
+        raise ValueError(f"Unsafe cache key {key!r}")
+    return page_cache_dir() / f"{text}.png"
+
 # Back-compat re-export: older imports read this set.
 VALID_SOURCE_TYPES = set(SOURCE_TYPES)
 
@@ -187,9 +218,14 @@ def sanitize_filename(filename: str, *, max_len: int = 200) -> str:
 
 def list_unmapped_folders() -> list[str]:
     """Read-only health helper: ``data/`` folders whose name is NOT a valid
-    client id (a leftover from before the migration, or a stray upload)."""
+    client id (a leftover from before the migration, or a stray upload).
+
+    Reserved names (a leading ``_`` or ``.``) are skipped: those are the
+    platform's own folders, not client folders somebody forgot to migrate.
+    """
     if not DATA_ROOT.exists():
         return []
     return sorted(
-        p.name for p in DATA_ROOT.iterdir() if p.is_dir() and not p.name.isdigit()
+        p.name for p in DATA_ROOT.iterdir()
+        if p.is_dir() and not p.name.isdigit() and not p.name.startswith(("_", "."))
     )

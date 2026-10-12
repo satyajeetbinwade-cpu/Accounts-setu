@@ -1037,5 +1037,11 @@ def _replace_input(f: FieldRow, field_name: str, value: str) -> FieldRow:
 def read_only_for_status(status: str) -> bool:
     """An upload that is part of an immutable export batch is read-only on the
     review screen. Kept as a plain function so the single condition the view
-    branches on is unit-testable."""
-    return status == "exported"
+    branches on is unit-testable.
+
+    The rule itself lives in ONE place — ``src.invoice_extract.immutable`` — so
+    the screen, the correction log and the legacy service can never drift apart.
+    """
+    from src.invoice_extract.immutable import is_immutable_status
+
+    return is_immutable_status(status)

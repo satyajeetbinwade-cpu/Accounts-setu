@@ -67,6 +67,7 @@ from typing import Any, Optional
 
 from src.invoice_extract import fields_v2 as fv2
 from src.invoice_extract import gst_identifiers as gst_ids
+from src.invoice_extract import immutable as immutable_mod
 from src.invoice_extract import normalisers as nz
 from src.invoice_extract.confidence_schema import (
     ACTION_EDITED,
@@ -82,10 +83,11 @@ from src.invoice_extract.service import InvoiceExtractError, _connect
 
 FORMULA_VERSION = "v1"
 
-#: The upload statuses that are immutable. A correction on one of these is
-#: rejected: the document has been filed, and history must not move underneath
-#: it.
-IMMUTABLE_UPLOAD_STATUSES = ("exported",)
+#: Re-exported for callers that already import it from here. The rule itself
+#: lives in exactly one place — ``src/invoice_extract/immutable.py`` — which the
+#: legacy service and the review screen consult too.
+IMMUTABLE_UPLOAD_STATUSES = immutable_mod.IMMUTABLE_UPLOAD_STATUSES
+is_immutable_status = immutable_mod.is_immutable_status
 
 # --- settings keys --------------------------------------------------------
 KEY_THRESHOLD = "invoice_extract.review_threshold"
@@ -698,7 +700,9 @@ def record_correction(
             raise InvoiceExtractError(f"Unknown field {field_id}.")
 
         upload_status = str(row.get("upload_status") or "")
-        if upload_status in IMMUTABLE_UPLOAD_STATUSES:
+        # ONE definition of "this upload must not change any more" — the legacy
+        # service and the review screen consult the same rule (immutable.py).
+        if is_immutable_status(upload_status):
             raise InvoiceExtractError(
                 f"This upload is {upload_status} — it has been filed, so its history is "
                 "immutable and a correction cannot be recorded against it."
@@ -732,6 +736,16 @@ def record_correction(
         conn.commit()
     finally:
         conn.close()
+
+    # A new correction UN-SIGNS any standing review: the reviewer signed off a
+    # document whose value has now changed. Recorded in the document log.
+    from src.invoice_extract import doc_actions
+
+    doc_actions.clear_reviewed(
+        int(row["document_id"]), actor=actor, triggered_by="field_correction",
+        reason=f"correction on {row['field_key']} ({action})",
+        field_key=str(row["field_key"]), db_path=db_path,
+    )
 
     return {
         "correction_id": correction_id,

@@ -74,6 +74,7 @@ from src.invoice_extract.seed import (
     RATE_FIELD_KEYS,
     run_seed,
 )
+from src.invoice_extract.immutable import is_immutable_status
 from src.invoice_extract.schema import init_invoice_extract_schema
 
 # Admin-configurable confidence threshold (per the build prompt: read from
@@ -347,7 +348,7 @@ def re_extract_upload(upload_id: int, *, actor: str, db_path=None) -> dict[str, 
         upload = idb.get_upload(conn, upload_id)
         if upload is None:
             raise InvoiceExtractError("Upload not found.")
-        if upload["status"] == STATUS_EXPORTED:
+        if is_immutable_status(upload["status"]):
             raise InvoiceExtractError("This upload is part of an immutable export batch — re-extract would need a new upload.")
         data = idb.get_upload_bytes(conn, upload_id)
         if not data:
@@ -807,7 +808,7 @@ def resolve_field(
         upload = idb.get_upload(conn, upload_id)
         if upload is None:
             raise InvoiceExtractError("Upload not found.")
-        if upload["status"] == STATUS_EXPORTED:
+        if is_immutable_status(upload["status"]):
             raise InvoiceExtractError("This upload is already part of an immutable export batch and can't be edited.")
         idb.resolve_field(conn, upload_id=upload_id, field_name=field_name, resolved_value=resolved_value, actor=actor)
         idb.log_change(conn, upload_id=upload_id, action="field_resolved",
@@ -856,7 +857,7 @@ def _confirm_upload(upload_id: int, *, actor: str, db_path=None) -> None:
         upload = idb.get_upload(conn, upload_id)
         if upload is None:
             raise InvoiceExtractError("Upload not found.")
-        if upload["status"] == STATUS_EXPORTED:
+        if is_immutable_status(upload["status"]):
             return
         idb.set_upload_status(conn, upload_id, STATUS_CONFIRMED, confirmed_by=actor)
         idb.resolve_queue_entry(conn, upload_id, resolved_by=actor)
@@ -874,7 +875,7 @@ def discard_upload(upload_id: int, *, actor: str, db_path=None) -> None:
         upload = idb.get_upload(conn, upload_id)
         if upload is None:
             raise InvoiceExtractError("Upload not found.")
-        if upload["status"] == STATUS_EXPORTED:
+        if is_immutable_status(upload["status"]):
             raise InvoiceExtractError("This upload is part of an immutable export batch and can't be discarded.")
         conn.execute("DELETE FROM extracted_invoice_fields WHERE upload_id = ?", (upload_id,))
         conn.execute("DELETE FROM invoice_review_queue_entries WHERE upload_id = ?", (upload_id,))
@@ -892,7 +893,7 @@ def is_exportable(upload_id: int, *, db_path=None) -> tuple[bool, str]:
     upload = get_upload(upload_id, db_path=db_path)
     if upload is None:
         return False, "Upload not found."
-    if upload["status"] == STATUS_EXPORTED:
+    if is_immutable_status(upload["status"]):
         return True, ""
     remaining = get_reviewable_fields(upload_id, db_path=db_path)
     if remaining:
