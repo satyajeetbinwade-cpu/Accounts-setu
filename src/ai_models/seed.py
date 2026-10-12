@@ -123,10 +123,39 @@ SEED_ASSIGNMENTS: list[tuple[str, str, str, str, str, str, int]] = [
         "google/gemini-2.5-pro",
         9,
     ),
+    (
+        "invoice_extraction_verify",
+        "Invoice extraction — independent verify (Phase 2 read B)",
+        "Extraction",
+        "The SECOND, independent read of a document's region crops (Phase 2). It gets "
+        "the same prompt and schema as invoice_extraction_visual but NEVER sees that "
+        "read's values. Its SERVING provider must differ from invoice_extraction_visual's "
+        "— two reads from one provider are not an independent second opinion — so the "
+        "default here is Anthropic's own API while invoice_extraction_visual goes through "
+        "OpenRouter. If this leg falls back to OpenRouter too, the run fails that document "
+        "with a clear message rather than pretending it verified anything. A vision-capable "
+        "model is required: the assignment guard refuses a text-only one.",
+        "claude-sonnet-4",
+        "google/gemini-2.5-pro",
+        10,
+    ),
 ]
 
 # The touchpoint whose model the ingestion layer actually reads at runtime.
 INGESTION_TOUCHPOINT = "ingestion_mapping"
+
+# Touchpoints whose default legs must NOT both sit on OpenRouter.
+# (touchpoint_key, primary_provider, fallback_provider)
+#
+# Every seeded touchpoint otherwise defaults to OpenRouter, which is correct for
+# a normal touchpoint but wrong for the Phase-2 VERIFY read: that read exists to
+# be an INDEPENDENT second opinion, so its primary must go through a different
+# provider than ``invoice_extraction_visual``. Additive-upsert means an existing
+# row is never overwritten — this only decides what a FRESH database starts
+# with, and an admin can change it on the AI Models screen at any time.
+SEED_PROVIDER_LEGS: dict[str, tuple[str, str]] = {
+    "invoice_extraction_verify": ("anthropic", "openrouter"),
+}
 
 # Placeholder touchpoints from C3-extended's routing table. They are seeded
 # INACTIVE and carry NO model assignment — they must never be presented as if
@@ -181,6 +210,9 @@ def run_seed(conn: sqlite3.Connection) -> None:
             )
 
     for key, label, category, description, primary, fallback, order in SEED_ASSIGNMENTS:
+        primary_provider, fallback_provider = SEED_PROVIDER_LEGS.get(
+            key, ("openrouter", "openrouter")
+        )
         adb.upsert_assignment(
             conn,
             touchpoint_key=key,
@@ -189,6 +221,8 @@ def run_seed(conn: sqlite3.Connection) -> None:
             description=description,
             primary_model=primary,
             fallback_model=fallback,
+            primary_provider=primary_provider,
+            fallback_provider=fallback_provider,
             is_active=True,
             sort_order=order,
         )

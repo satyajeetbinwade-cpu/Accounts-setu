@@ -63,6 +63,9 @@ _BOOT_STEPS: list[tuple[str, str, str]] = [
     # Marks any triage run left "running" by a previous process as
     # "interrupted", so a restart never leaves a run looking live forever.
     ("F3-B invoice triage", "src.invoice_extract.triage", "init_triage"),
+    # Phase 2: a document extraction left "running" by a stopped process goes
+    # back to "queued" so resume_extraction can pick it up.
+    ("F3-B doc extraction v2", "src.invoice_extract.extract", "init_extract"),
     ("F5  data integrity", "src.f5.service", "init_f5"),
     ("C2  filing", "src.filing.service", "init_filing"),
     ("F4  edit history", "src.f4.service", "init_f4"),

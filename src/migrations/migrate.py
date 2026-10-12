@@ -28,8 +28,9 @@ from src.migrations import framework
 from src.migrations.identity import Mapping, resolve_mapping
 from src.migrations.m0001_client_id_identity import MIGRATION
 from src.migrations.m0002_invoice_triage import MIGRATION as MIGRATION_2
+from src.migrations.m0003_invoice_doc_extraction import MIGRATION as MIGRATION_3
 
-MIGRATIONS = [MIGRATION, MIGRATION_2]
+MIGRATIONS = [MIGRATION, MIGRATION_2, MIGRATION_3]
 
 
 def _now_stamp() -> str:

@@ -45,6 +45,7 @@ tests/fixtures/**/*.pdf
 
 # ---- Invoice triage live-score output (annotated page PNGs + report) ----
 reports/invoice_triage/
+reports/invoice_extract_v2/
 
 # ---- IDE / OS ----
 .vscode/

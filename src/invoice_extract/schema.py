@@ -144,6 +144,11 @@ def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     from src.invoice_extract.triage_schema import ensure_triage_schema
 
     ensure_triage_schema(conn)
+    # Phase-2 document extraction (region crops → two independent reads). Off
+    # by default; the tables exist so a disabled run and a migrated DB match.
+    from src.invoice_extract.doc_extract_schema import ensure_doc_extract_schema
+
+    ensure_doc_extract_schema(conn)
     conn.commit()
 
 

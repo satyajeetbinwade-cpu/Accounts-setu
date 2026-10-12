@@ -1,0 +1,152 @@
+{
+  "verified": false,
+  "_note": "PROVISIONAL. The printed values below were transcribed BY HAND from the client's real bundle PDF and have NOT been confirmed against the paper. The PDF itself is a real client's document and is deliberately NOT committed: the scorer reads it from the environment variable SETU_TRIAGE_FIXTURE_PDF and tests that need it SKIP when that is unset. Business data only — no names, addresses or phone numbers of natural persons appear here. Keys are the Phase-2 canonical field keys (see src/invoice_extract/fields_v2.py). 'not_printed' lists fields the invoice genuinely does NOT print; the only correct outcome for those is a NULL value from BOTH reads. 'handwritten_amounts' lists figures written by hand on the page, which must NEVER be used as a field value. 'doubts' records where the transcription itself is uncertain — the scorer reports these rather than bending to them.",
+  "source_env": "SETU_TRIAGE_FIXTURE_PDF",
+  "documents": [
+    {
+      "label": "p2 — KMAP/2026-27/003",
+      "page": 2,
+      "expect": {
+        "issuer_gstin": "07AAECK9054D1ZK",
+        "invoice_date": "27-Apr-26",
+        "place_of_supply": "Uttar Pradesh",
+        "line.1.hsn_sac": "997112",
+        "line.1.amount": "1,000.00",
+        "igst_amount": "180.00",
+        "invoice_total": "1,180.00",
+        "reference_no_date": "KMAP/2025-06/003 dt. 27-Apr-26"
+      },
+      "not_printed": ["buyers_order_no"],
+      "handwritten_amounts": [],
+      "doubts": [
+        "igst_rate: the task notes it may not be printed. NOT asserted either way — the scorer reports what the reads returned for it.",
+        "taxable_value: the task gives 'taxable (line amount) 1,000.00'; whether the summary block prints a separate taxable value is unconfirmed, so only line.1.amount is asserted."
+      ]
+    },
+    {
+      "label": "p3 — KMAP/2026-27/002",
+      "page": 3,
+      "expect": {
+        "invoice_date": "13-Apr-26",
+        "line.1.hsn_sac": "997112",
+        "line.1.amount": "24,000.00",
+        "line.2.hsn_sac": "9971",
+        "line.2.amount": "2,000.00",
+        "taxable_value": "26,000.00",
+        "igst_rate": "18",
+        "igst_amount": "4,680.00",
+        "invoice_total": "30,680.00"
+      },
+      "not_printed": [],
+      "handwritten_amounts": [],
+      "doubts": []
+    },
+    {
+      "label": "p4 — KMAP/2026-27/001",
+      "page": 4,
+      "expect": {
+        "invoice_date": "6-Apr-26",
+        "line.1.amount": "10,947.00",
+        "igst_amount": "1,970.46",
+        "round_off": "-0.46",
+        "invoice_total": "12,917.00"
+      },
+      "not_printed": ["line.1.hsn_sac", "igst_rate", "taxable_value"],
+      "handwritten_amounts": [],
+      "doubts": [
+        "The task states hsn_sac, igst_rate and taxable_value are NOT printed on this invoice, yet igst_amount 1,970.46 over 10,947.00 is 18%. Those three are asserted as not_printed exactly as the task describes."
+      ]
+    },
+    {
+      "label": "p10-p11 — Airtel fixed line (ONE document across TWO pages)",
+      "page": 10,
+      "pages": [10, 11],
+      "expect": {
+        "invoice_total": "1,295.64",
+        "line.1.hsn_sac": "998412",
+        "taxable_value": "1,098.00",
+        "cgst_rate": "9",
+        "cgst_amount": "98.82",
+        "sgst_rate": "9",
+        "sgst_amount": "98.82",
+        "issuer_gstin": "07AAACB2894G1ZP",
+        "place_of_supply": "Delhi"
+      },
+      "not_printed": [],
+      "handwritten_amounts": [],
+      "doubts": [
+        "The task splits this document's facts across p10 (bill total) and p11 (HSN, taxable, tax, GSTIN, place of supply). It is asserted as ONE document with regions on both pages — if triage splits it into two documents this scoring entry will not match."
+      ]
+    },
+    {
+      "label": "p23 — Jelux Solutions 01 (no GST, no tax)",
+      "page": 23,
+      "expect": {
+        "invoice_date": "1-Apr-26",
+        "line.1.amount": "9,000.00",
+        "invoice_total": "9,000.00"
+      },
+      "not_printed": [
+        "issuer_gstin",
+        "recipient_gstin",
+        "cgst_rate",
+        "cgst_amount",
+        "sgst_rate",
+        "sgst_amount",
+        "igst_rate",
+        "igst_amount",
+        "total_tax"
+      ],
+      "handwritten_amounts": [],
+      "doubts": [
+        "The task says only 'amount 9,000.00' with no GSTIN and no tax lines. invoice_total is asserted as 9,000.00 on the assumption that the bill's single amount IS the total — if the page prints no total line this assertion is wrong and the scorer will show it.",
+        "The task lists no handwritten amounts for p23, so the handwriting guard is expected to fire ZERO times here."
+      ]
+    },
+    {
+      "label": "p24 — ASAP 197 (handwritten total beside the printed one)",
+      "page": 24,
+      "expect": {
+        "issuer_gstin": "09AADFA5221A1Z6",
+        "recipient_gstin": "07AAECK9054D1ZK",
+        "invoice_date": "25-Mar-26",
+        "line.1.hsn_sac": "9982",
+        "line.1.amount": "6,825.00",
+        "igst_rate": "18",
+        "igst_amount": "1,228.50",
+        "round_off": "-0.50",
+        "invoice_total": "8,053.00"
+      },
+      "not_printed": [],
+      "handwritten_amounts": ["6,825", "683", "6,142", "1,228", "7,370"],
+      "doubts": [
+        "6,825 is BOTH the printed line amount AND a handwritten figure used as a 'total'. The deterministic handwriting guard is expected to flag the printed line.1.amount as needs_printed because a handwritten 6,825 overlaps it — that flag is correct behaviour, not a defect, and is reported explicitly."
+      ]
+    },
+    {
+      "label": "p25 — ASAP 336 (handwritten working beside the printed block)",
+      "page": 25,
+      "expect": {
+        "issuer_gstin": "07AADFA5221A1ZA",
+        "recipient_gstin": "07AAECK9054D1ZK",
+        "invoice_date": "25-Mar-26",
+        "line.1.hsn_sac": "998221",
+        "line.1.amount": "10,490.00",
+        "line.2.hsn_sac": "99823",
+        "line.2.amount": "3,686.00",
+        "taxable_value": "14,176.00",
+        "cgst_rate": "9",
+        "cgst_amount": "1,275.84",
+        "sgst_rate": "9",
+        "sgst_amount": "1,275.84",
+        "round_off": "0.32",
+        "invoice_total": "16,728.00"
+      },
+      "not_printed": [],
+      "handwritten_amounts": ["14,176", "1,418", "12,758", "2,552", "15,310"],
+      "doubts": [
+        "14,176 is BOTH the printed taxable value AND a handwritten figure. As on p24 the guard is expected to flag the printed taxable_value as needs_printed, which is correct behaviour and is reported explicitly."
+      ]
+    }
+  ]
+}

@@ -57,7 +57,11 @@ CATEGORIES = ["Ingestion", "Extraction", "Analysis"]
 # Touchpoints that SEND PAGE IMAGES to the model. Only these are subject to the
 # image-capability guard (save-time refusal + the image test call) — every other
 # touchpoint behaves exactly as before.
-VISION_TOUCHPOINTS: tuple[str, ...] = ("invoice_extraction_visual", "invoice_triage")
+VISION_TOUCHPOINTS: tuple[str, ...] = (
+    "invoice_extraction_visual",
+    "invoice_extraction_verify",
+    "invoice_triage",
+)
 
 # Optional, admin-editable override used when the catalogue has no modality for
 # a model: a comma-separated allowlist of model ids known to accept images.
