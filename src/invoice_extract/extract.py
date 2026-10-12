@@ -1225,6 +1225,8 @@ def _execute_extraction(upload_id: int, *, actor: str, db_path=None) -> dict[str
         ))
 
     conn = _connect(db_path)
+    ruled: list[int] = []
+    rules_failed: list[dict[str, Any]] = []
     try:
         for extraction_id, document_id, outcome, blocked in outcomes:
             if blocked or (outcome.status == STATUS_QUEUED and outcome.attempts == 0):
@@ -1240,12 +1242,33 @@ def _execute_extraction(upload_id: int, *, actor: str, db_path=None) -> dict[str
     finally:
         conn.close()
 
+    # Phase 3: the deterministic layer runs for every document that produced a
+    # read, so the review model is ready without a second pass. A rules failure
+    # is recorded and reported — it never hides an extraction that DID succeed,
+    # and re-running the rules is always possible (`rules --rerun`).
+    for extraction_id, document_id, outcome, blocked in outcomes:
+        if blocked or outcome.attempts == 0:
+            continue
+        try:
+            from src.invoice_extract import rules as rules_mod
+
+            rules_mod.run_rules(extraction_id, actor=actor, db_path=db_path)
+            ruled.append(extraction_id)
+        except Exception as exc:  # noqa: BLE001 — reported, never silent
+            rules_failed.append({
+                "extraction_id": extraction_id, "document_id": document_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            print(f"warning: rules did not run for document {document_id}: {exc}", file=sys.stderr)
+
     summary = {
         "upload_id": upload_id,
         "documents": len(outcomes),
         "budget": budget.as_json(),
         "elapsed_ms": int((time.monotonic() - start) * 1000),
         "statuses": _status_counts(upload_id, db_path=db_path),
+        "rules_run": len(ruled),
+        "rules_failed": rules_failed,
     }
     return summary
 

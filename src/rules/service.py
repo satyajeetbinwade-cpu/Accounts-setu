@@ -64,6 +64,97 @@ def _today() -> str:
 
 
 # ---------------------------------------------------------------------------
+# GST state codes + the dated GST rate slabs (Invoice Extraction reads these)
+# ---------------------------------------------------------------------------
+
+
+def list_state_codes(*, db_path=None) -> list[dict[str, Any]]:
+    """Every GST state/UT code with its aliases and its UTGST flag."""
+    from src.rules import gst_state_codes as codes
+
+    conn = _connect(db_path)
+    try:
+        return codes.list_state_codes(conn)
+    finally:
+        conn.close()
+
+
+def resolve_state(text: Optional[str], *, db_path=None) -> Optional[dict[str, Any]]:
+    """The state row a printed place-of-supply value refers to, or None.
+
+    The one entry point for "is this a state, and which one" — nothing else in
+    the codebase should re-implement state-name matching.
+    """
+    from src.rules import gst_state_codes as codes
+
+    conn = _connect(db_path)
+    try:
+        return codes.resolve_state_code(conn, text)
+    finally:
+        conn.close()
+
+
+def state_code_of_gstin(gstin: Optional[str]) -> Optional[str]:
+    """The 2-digit state code a GSTIN starts with (pure — no DB)."""
+    from src.rules import gst_state_codes as codes
+
+    return codes.state_code_of_gstin(gstin)
+
+
+def is_utgst_state(code: Optional[str], *, db_path=None) -> bool:
+    """Does this code levy UTGST instead of SGST (a UT without a legislature)?"""
+    from src.rules import gst_state_codes as codes
+
+    conn = _connect(db_path)
+    try:
+        return codes.is_utgst_code(conn, code)
+    finally:
+        conn.close()
+
+
+def is_special_state_code(code: Optional[str], *, db_path=None) -> bool:
+    """96 Other Country / 97 Other Territory / 99 Centre Jurisdiction — not a
+    state, so no tax-type expectation can be derived from it."""
+    from src.rules import gst_state_codes as codes
+
+    conn = _connect(db_path)
+    try:
+        return codes.is_special_code(conn, code)
+    finally:
+        conn.close()
+
+
+def gst_rate_slabs(as_of: Optional[str] = None, *, db_path=None) -> list[float]:
+    """The valid GST rate slabs IN FORCE ON ``as_of`` (an ISO date).
+
+    Dated rows: the slab set changed on 2025-09-22, so the answer for an invoice
+    depends on the invoice's own date. Returns [] when ``as_of`` is None — an
+    empty list means "cannot say", never "no slabs are valid".
+    """
+    if not as_of:
+        return []
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT rate_or_rule FROM regulatory_rules "
+            "WHERE domain = 'GST' AND section IS NULL AND name LIKE 'GST rate slab%' "
+            "AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?) "
+            "ORDER BY CAST(REPLACE(REPLACE(rate_or_rule, '%', ''), ' ', '') AS REAL)",
+            (as_of, as_of),
+        ).fetchall()
+    finally:
+        conn.close()
+    out: list[float] = []
+    for (raw,) in rows:
+        text = str(raw or "").replace("%", "").strip()
+        try:
+            out.append(float(text))
+        except ValueError:
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Rules Workspace — categories + rules
 # ---------------------------------------------------------------------------
 

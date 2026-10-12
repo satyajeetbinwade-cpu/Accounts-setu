@@ -149,6 +149,11 @@ def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     from src.invoice_extract.doc_extract_schema import ensure_doc_extract_schema
 
     ensure_doc_extract_schema(conn)
+    # Phase-3 deterministic layer (derived values, checks, applicability,
+    # direction, client aliases). Also only ever READS the Phase-2 tables.
+    from src.invoice_extract.rules_schema import ensure_rules_schema
+
+    ensure_rules_schema(conn)
     conn.commit()
 
 

@@ -66,6 +66,10 @@ _BOOT_STEPS: list[tuple[str, str, str]] = [
     # Phase 2: a document extraction left "running" by a stopped process goes
     # back to "queued" so resume_extraction can pick it up.
     ("F3-B doc extraction v2", "src.invoice_extract.extract", "init_extract"),
+    # Phase 3: the deterministic rules layer (derived values, checks,
+    # applicability, direction). Marks documents whose stored field set has
+    # changed since the rules last ran, without recomputing them at boot.
+    ("F3-B invoice rules v1", "src.invoice_extract.rules", "init_rules_v1"),
     ("F5  data integrity", "src.f5.service", "init_f5"),
     ("C2  filing", "src.filing.service", "init_filing"),
     ("F4  edit history", "src.f4.service", "init_f4"),

@@ -164,6 +164,12 @@ def init_rules_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(RULES_SCHEMA)
     conn.commit()
     _migrate(conn)
+    # GST state codes — the C1 vocabulary the Invoice Extraction checks resolve a
+    # printed place of supply against. Same DDL the numbered migration applies.
+    from src.rules.gst_state_codes import execute_state_code_schema
+
+    execute_state_code_schema(conn)
+    conn.commit()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
