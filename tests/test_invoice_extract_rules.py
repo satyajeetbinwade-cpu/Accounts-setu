@@ -791,10 +791,15 @@ def test_cli_show_prints_the_review_model(scratch, capsys):
     out = capsys.readouterr().out
     assert "NEEDS YOU" in out and "CHECKS" in out and "DIRECTION" in out
     assert "totals_reconcile" in out
+    # Phase 4 added a fourth kind of needs-you item; the printer must know it.
+    assert "[missing]" in out
 
     assert R.main(["show", str(document_id), "--db", db, "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["document_id"] == document_id
+    assert {item["kind"] for item in payload["needs_you"]} <= {
+        "missing_required", "check_failed", "below_threshold", "direction_unsettled",
+    }
 
     assert R.main(["show", "999999", "--db", db]) == 2
     assert "Unknown document" in capsys.readouterr().err

@@ -43,6 +43,10 @@ SEED_CATEGORIES: list[tuple[str, str, str, int]] = [
      "Rules the Invoice Extraction deterministic layer reads: the service/SAC prefix, the "
      "totals and tax tolerances, and the legal-form suffixes stripped when matching a "
      "client's own name.", 7),
+    ("invoice_confidence", "Invoice Extraction — Confidence & Review",
+     "The Phase-4 review threshold, the bulk-approve gate's limits, and the confidence "
+     "formula's weights and caps. The weights live here so the formula can be tuned from "
+     "this screen without a code change.", 8),
 ]
 
 # ---------------------------------------------------------------------------
@@ -139,6 +143,86 @@ SEED_RULES: list[tuple] = [
      "hospital,hotels,pharma,pharmaceuticals,textiles,apparels,garments,constructions,"
      "builders,infra,logistics,transport,shipping,printing,press,energies,power,steel,"
      "cement,chemicals,foods,agro,auto,motors,electricals,engineering,equipments,systems"),
+
+    # --- Invoice Extraction confidence & review (Phase 4) ---
+    #
+    # The review threshold is the line between "settled" and "needs you", so it
+    # is a firm default with the usual per-client override. The weights and caps
+    # BELOW IT are the formula itself, kept as editable numbers so the formula
+    # can be tuned from this screen rather than in a code change. Each one is a
+    # unitless point value except the threshold.
+    ("invoice_confidence", "invoice_extract.review_threshold", "Review threshold (0-100)", "number", "",
+     True,
+     "A field scoring below this is never settled: it stays a question for a reviewer. "
+     "Changing it changes what the review screen asks about, so it is flagged high-impact.", 1, "90"),
+    ("invoice_confidence", "invoice_extract.score.formula_version", "Confidence formula version",
+     "text", "", False,
+     "Which formula produced a score. Stored on every score row, because a score is only "
+     "meaningful alongside the version that produced it.", 2, "v1"),
+    ("invoice_confidence", "invoice_extract.bulk_approve_enabled", "Bulk approve enabled",
+     "boolean", "", True,
+     "Off by default. Bulk approval is only ever allowed when the recorded history supports "
+     "it AND someone has deliberately turned it on.", 3, "false"),
+    ("invoice_confidence", "invoice_extract.bulk_approve.min_fields", "Bulk approve — minimum "
+     "reviewed fields at 90+", "number", "", False,
+     "How many reviewed fields must already sit at 90 or above before the band can be "
+     "trusted enough to approve in bulk.", 4, "300"),
+    ("invoice_confidence", "invoice_extract.bulk_approve.max_edit_rate_pct", "Bulk approve — "
+     "maximum edit rate (percent)", "number", "%", False,
+     "The highest percentage of 90+ fields that may have been corrected for the band to be "
+     "treated as trustworthy.", 5, "0.5"),
+    ("invoice_confidence", "invoice_extract.bulk_approve.min_months", "Bulk approve — minimum "
+     "months of history", "number", "months", False,
+     "How many distinct months the reviewed history must span, so one unusual period cannot "
+     "open the gate on its own.", 6, "3"),
+
+    # The formula, as numbers. Base + the four signals sum to a perfect 100 with
+    # the defaults below (40 + 30 + 15 + 10 + 5).
+    ("invoice_confidence", "invoice_extract.score.base", "Formula — base points", "number", "",
+     False, "Every read field starts here.", 10, "40"),
+    ("invoice_confidence", "invoice_extract.score.read.exact", "Formula — reads agree exactly",
+     "number", "", False, "Awarded when two independent reads produced the same value.", 11, "30"),
+    ("invoice_confidence", "invoice_extract.score.read.near", "Formula — reads agree nearly (text)",
+     "number", "", False,
+     "Awarded when two independent reads produced nearly the same TEXT. Never awarded for "
+     "numbers, dates or identifiers.", 12, "20"),
+    ("invoice_confidence", "invoice_extract.score.format.pass", "Formula — format rule passes",
+     "number", "", False,
+     "Awarded when the field has a format rule (GSTIN checksum, date, number, HSN length) and "
+     "the value passes it.", 13, "15"),
+    ("invoice_confidence", "invoice_extract.score.format.no_rule", "Formula — no format rule",
+     "number", "", False,
+     "Awarded when no format rule applies. Deliberately the same as a rule that passes: a "
+     "field must not be punished for the app not knowing how to validate it.", 14, "15"),
+    ("invoice_confidence", "invoice_extract.score.cross.pass", "Formula — involved checks pass",
+     "number", "", False,
+     "Awarded when every check that involves the field passed.", 15, "10"),
+    ("invoice_confidence", "invoice_extract.score.cross.none", "Formula — no check involves it",
+     "number", "", False, "Awarded when no check involves the field.", 16, "10"),
+    ("invoice_confidence", "invoice_extract.score.text_layer", "Formula — text-layer match",
+     "number", "", False,
+     "Awarded when the PDF's own text layer contains the value inside its box. Only possible "
+     "for a native-text page.", 17, "5"),
+    ("invoice_confidence", "invoice_extract.score.cap.disagree", "Cap — reads disagree",
+     "number", "", False, "The two reads disagree, so a person must choose.", 20, "60"),
+    ("invoice_confidence", "invoice_extract.score.cap.arithmetic_fail",
+     "Cap — an arithmetic check failed", "number", "", False,
+     "A check that adds the document up failed, and this field is part of the sum.", 21, "60"),
+    ("invoice_confidence", "invoice_extract.score.cap.gstin_invalid",
+     "Cap — GSTIN check character invalid", "number", "", False,
+     "The GSTIN's check character does not match its own first 14 characters.", 22, "50"),
+    ("invoice_confidence", "invoice_extract.score.cap.out_of_region", "Cap — out of region",
+     "number", "", False, "The value's box lies outside the document's own regions.", 23, "85"),
+    ("invoice_confidence", "invoice_extract.score.cap.single_reader", "Cap — single reader",
+     "number", "", False,
+     "Only one reader ran, so there is no independent second opinion to agree with.", 24, "70"),
+    ("invoice_confidence", "invoice_extract.score.cap.handwritten_monetary",
+     "Cap — handwritten monetary value", "number", "", False,
+     "A handwritten MONETARY value never scores above this, even when both reads agree.", 25, "80"),
+    ("invoice_confidence", "invoice_extract.score.cap.needs_printed", "Cap — needs printed",
+     "number", "", False,
+     "The value is handwritten or illegible where a printed value is required: it needs a "
+     "person, so it scores zero rather than being quietly trusted.", 26, "0"),
 ]
 
 # ---------------------------------------------------------------------------

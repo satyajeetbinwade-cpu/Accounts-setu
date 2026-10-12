@@ -439,6 +439,21 @@ def run_rules(
     finally:
         conn.close()
 
+    # Phase 4 runs straight after the rules, in the same call: the score reads
+    # the check rows this pass just wrote, so scoring anywhere else would be
+    # scoring yesterday's evidence. A scoring failure is reported, never silent,
+    # and never takes the rules result down with it.
+    scoring: Optional[dict[str, Any]] = None
+    scoring_error: Optional[str] = None
+    try:
+        from src.invoice_extract import confidence as confidence_mod
+
+        scoring = confidence_mod.score_extraction(extraction_id, db_path=db_path)
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal
+        scoring_error = f"{type(exc).__name__}: {exc}"
+        print(f"warning: confidence scoring failed for extraction {extraction_id}: {exc}",
+              file=sys.stderr)
+
     return {
         "extraction_id": extraction_id,
         "document_id": document_id,
@@ -450,6 +465,8 @@ def run_rules(
         "direction": decided.direction,
         "direction_basis": decided.basis,
         "needs_a_human": decided.needs_a_human,
+        "scores": scoring,
+        "scoring_error": scoring_error,
     }
 
 
@@ -493,12 +510,20 @@ def init_rules_v1(db_path=None) -> int:
 # ---------------------------------------------------------------------------
 
 
-def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
-    """The sections the review screen needs — no confidence scores yet.
+def get_review_model(
+    document_id: int, *, order: str = "confidence", db_path=None,
+) -> dict[str, Any]:
+    """The sections the review screen needs.
 
-    ``needs_you`` lists missing REQUIRED fields first (a real gap outranks a
-    failed check), then failed checks, then a question about direction when the
-    direction is not settled.
+    ``order`` picks how the SETTLED list is ordered: ``"confidence"`` (the
+    default) puts the strongest values first, ``"document"`` follows the
+    invoice's own reading order. The needs_you list has a fixed order of its own
+    — see below — and is never re-ordered by this argument.
+
+    WHAT IS IN HERE, AND WHAT IS NOT: this model carries the values, the checks,
+    the derived figures and the Phase-4 SCORE per field. The score is computed
+    by the app from the stored evidence (see ``confidence.py``) — the model was
+    never asked how sure it was, and nothing here reports a model's own opinion.
     """
     conn = _connect(db_path)
     try:
@@ -535,8 +560,12 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
         direction_row = _dict_row(cur, cur.fetchone())
 
         cur = conn.execute(
-            "SELECT field_key, status, value_a, value_b, reads_agree FROM invoice_doc_fields "
-            "WHERE extraction_id = ?", (extraction_id,),
+            "SELECT f.field_key, f.status, f.value_a, f.value_b, f.reads_agree, f.field_id, "
+            "s.score, s.signals_json, s.caps_json, s.threshold_used, s.formula_version "
+            "FROM invoice_doc_fields f "
+            "LEFT JOIN invoice_doc_field_scores s ON s.field_id = f.field_id "
+            "WHERE f.extraction_id = ?",
+            (extraction_id,),
         )
         fields = {str(r["field_key"]): r for r in (_dict_row(cur, row) for row in cur.fetchall())}
     finally:
@@ -564,6 +593,38 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
                 ),
             })
 
+    # ------------------------------------------------------------------ fields
+    # Each field carries its Phase-4 score, its signals and its caps, so the
+    # screen explains the number instead of asserting it. A field with a NULL
+    # score has one BY RULE (never printed, or derived) and says so in its
+    # signals.
+    def _field_view(key: str) -> dict[str, Any]:
+        record = fields.get(key) or {}
+        score = record.get("score")
+        return {
+            "field_key": key,
+            "field_id": record.get("field_id"),
+            "value": record.get("value_a") or record.get("value_b"),
+            "value_a": record.get("value_a"),
+            "value_b": record.get("value_b"),
+            "status": record.get("status"),
+            "reads_agree": record.get("reads_agree"),
+            "score": score,
+            "threshold_used": record.get("threshold_used"),
+            "formula_version": record.get("formula_version"),
+            "signals": json.loads(record.get("signals_json") or "[]"),
+            "caps": json.loads(record.get("caps_json") or "[]"),
+            "below_threshold": (
+                score is not None and record.get("threshold_used") is not None
+                and float(score) < float(record["threshold_used"])
+            ),
+        }
+
+    # needs_you order, and why: a REAL GAP outranks a failed check (there is
+    # nothing to check when a required value is missing), and a failed check
+    # outranks a low score (the check found something specific, the score is a
+    # summary). The low-score run comes last, LOWEST FIRST, so the worst field is
+    # the first thing a reviewer sees.
     needs_you: list[dict[str, Any]] = [
         {"kind": "missing_required", **item} for item in missing
     ]
@@ -574,6 +635,18 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
         }
         for row in check_rows if row["status"] == CHECK_FAIL
     ]
+    missing_keys = {item["field_key"] for item in missing}
+    below = sorted(
+        (
+            _field_view(key) for key, record in fields.items()
+            if key not in missing_keys
+            and record.get("score") is not None
+            and record.get("threshold_used") is not None
+            and float(record["score"]) < float(record["threshold_used"])
+        ),
+        key=lambda item: (float(item["score"]), item["field_key"]),
+    )
+    needs_you += [{"kind": "below_threshold", **item} for item in below]
     direction = str((direction_row or {}).get("direction") or DIRECTION_UNDETERMINED)
     if direction not in (DIRECTION_SALES, DIRECTION_PURCHASE):
         needs_you.append({
@@ -582,11 +655,37 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
             "match": json.loads((direction_row or {}).get("match_json") or "{}"),
         })
 
+    # ---------------------------------------------------------------- settled
+    # Confidence DESCENDING by default — the strongest values first — with
+    # `order="document"` for a reviewer who wants the invoice's own reading
+    # order instead. A field BELOW the threshold is never settled, however the
+    # list is ordered: it is still a question, and the screen must not present it
+    # as decided.
     settled = [
-        {"field_key": key, "value": record.get("value_a") or record.get("value_b")}
-        for key, record in sorted(fields.items())
-        if effective.get(key) == LEVEL_REQUIRED and (record.get("value_a") or record.get("value_b"))
+        {**_field_view(key), "order": index}
+        for index, key in enumerate(sorted(fields))
+        if effective.get(key) == LEVEL_REQUIRED
+        and (fields[key].get("value_a") or fields[key].get("value_b"))
         and not key.startswith("line.")
+        and not _is_below_threshold(fields[key])
+    ]
+    if order == "document":
+        settled.sort(key=lambda item: item["order"])
+    else:
+        settled.sort(key=lambda item: (
+            -(float(item["score"]) if item["score"] is not None else -1.0), item["field_key"],
+        ))
+    for item in settled:
+        item.pop("order", None)
+    # The derived values are tagged, never scored: they were calculated, not read.
+    derived_view = [
+        {
+            "key": row["key"], "label": DERIVED_LABELS.get(str(row["key"]), str(row["key"])),
+            "value": row["value"], "formula": row["formula"],
+            "inputs": json.loads(row["inputs_json"] or "{}"),
+            "tag": "derived", "score": None,
+        }
+        for row in derived_rows
     ]
     return {
         "document_id": document_id,
@@ -605,17 +704,11 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
             {"field_key": row["field_key"], "reason": row["reason"]}
             for row in level_rows if row["level"] == LEVEL_OPTIONAL
         ],
-        "derived": [
-            {
-                "key": row["key"], "label": DERIVED_LABELS.get(str(row["key"]), str(row["key"])),
-                "value": row["value"], "formula": row["formula"],
-                "inputs": json.loads(row["inputs_json"] or "{}"),
-            }
-            for row in derived_rows
-        ],
+        "derived": derived_view,
         "checks": [
             {
-                "check_key": row["check_key"], "label": checks_mod.CHECK_LABELS.get(row["check_key"], ""),
+                "check_key": row["check_key"],
+                "label": checks_mod.CHECK_LABELS.get(row["check_key"], ""),
                 "status": row["status"], "detail": row["detail"],
                 "inputs": json.loads(row["inputs_json"] or "{}"),
                 "fields_implicated": json.loads(row["fields_implicated_json"] or "[]"),
@@ -634,6 +727,22 @@ def get_review_model(document_id: int, *, db_path=None) -> dict[str, Any]:
         },
         "aliases": [dict(a) for a in _aliases_public(document.get("client_id"), db_path=db_path)],
     }
+
+
+def _is_below_threshold(record: dict[str, Any]) -> bool:
+    """Is this field's score below the threshold in force when it was scored?
+
+    A NULL score is NOT "below threshold": it means the field has no score by
+    rule (never printed, or derived), which is a different statement.
+    """
+    score = record.get("score")
+    threshold = record.get("threshold_used")
+    if score is None or threshold is None:
+        return False
+    try:
+        return float(score) < float(threshold)
+    except (TypeError, ValueError):
+        return False
 
 
 def _aliases_public(client_id: Optional[int], *, db_path=None) -> tuple[dict[str, Any], ...]:
@@ -820,14 +929,25 @@ def _print_review(model: dict[str, Any]) -> None:
     if not model["needs_you"]:
         print("  nothing — no missing required field, no failed check, direction settled")
     for item in model["needs_you"]:
-        if item["kind"] == "missing_required":
+        kind = item.get("kind")
+        if kind == "missing_required":
             print(f"  [missing] {item['field_key']} (status {item['status']}) — {item['reason']}")
-        elif item["kind"] == "check_failed":
+        elif kind == "check_failed":
             print(f"  [failed ] {item['check_key']}: {item['detail']}")
             if item["fields_implicated"]:
                 print(f"             implicated: {', '.join(item['fields_implicated'])}")
-        else:
+        elif kind == "below_threshold":
+            # The score is a summary; the reasons are in its signals and caps.
+            caps = ", ".join(cap["name"] for cap in item.get("caps") or [])
+            print(
+                f"  [low    ] {item['field_key']} = {item.get('value')!r} "
+                f"score {item['score']} < {item['threshold_used']}"
+                + (f"  (capped by: {caps})" if caps else "")
+            )
+        elif kind == "direction_unsettled":
             print(f"  [decide ] direction {item['direction']}: {item['basis']}")
+        else:  # pragma: no cover — a new kind must not crash the printer
+            print(f"  [{kind or 'unknown'}] {item}")
     print()
     print("CHECKS")
     for check in model["checks"]:

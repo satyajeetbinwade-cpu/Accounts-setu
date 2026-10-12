@@ -154,6 +154,11 @@ def init_invoice_extract_schema(conn: sqlite3.Connection) -> None:
     from src.invoice_extract.rules_schema import ensure_rules_schema
 
     ensure_rules_schema(conn)
+    # Phase-4 confidence (per-field score + every human correction). Reads the
+    # Phase-2/3 rows; writes only its own two tables.
+    from src.invoice_extract.confidence_schema import ensure_confidence_schema
+
+    ensure_confidence_schema(conn)
     conn.commit()
 
 

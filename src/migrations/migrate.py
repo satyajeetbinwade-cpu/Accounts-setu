@@ -30,8 +30,9 @@ from src.migrations.m0001_client_id_identity import MIGRATION
 from src.migrations.m0002_invoice_triage import MIGRATION as MIGRATION_2
 from src.migrations.m0003_invoice_doc_extraction import MIGRATION as MIGRATION_3
 from src.migrations.m0004_invoice_rules_v1 import MIGRATION as MIGRATION_4
+from src.migrations.m0005_invoice_confidence_v1 import MIGRATION as MIGRATION_5
 
-MIGRATIONS = [MIGRATION, MIGRATION_2, MIGRATION_3, MIGRATION_4]
+MIGRATIONS = [MIGRATION, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5]
 
 
 def _now_stamp() -> str:
