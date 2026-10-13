@@ -47,17 +47,25 @@ echo "== boot (migrations + seeds) against the scratch pair =="
 "${PY}" main.py
 
 # ------------------------------------------------------------------ client
+# Idempotent: the client is created only when this GSTIN is not already there,
+# so re-running the script on an existing scratch folder is harmless.
 echo "== client =="
 "${PY}" - <<'PY'
 from src.clients import service as clients
 
 NAME, GSTIN = "KMAP Capital Limited", "07AAECK9054D1ZK"
-existing = [c for c in clients.list_clients() if c.get("legal_name") == NAME]
+# The service requires PAN or TAN: the PAN is characters 3-12 of the GSTIN.
+PAN = GSTIN[2:12]
+
+existing = [c for c in clients.list_clients() if (c.get("gstin") or "").strip().upper() == GSTIN]
 if existing:
-    print(f"client exists: {NAME} (client_id={existing[0]['client_id']})")
+    cid = existing[0].get("client_id")
+    print(f"client exists: {NAME} (client_id={cid}, GSTIN={GSTIN}) — nothing created")
 else:
-    cid = clients.create_client(legal_name=NAME, gstin=GSTIN, actor="cli:go-live")
-    print(f"client created: {NAME} (client_id={cid}, GSTIN={GSTIN})")
+    cid = clients.create_client(
+        legal_name=NAME, gstin=GSTIN, pan=PAN, actor="cli:go-live",
+    )
+    print(f"client created: {NAME} (client_id={cid}, GSTIN={GSTIN}, PAN={PAN})")
 PY
 
 # ------------------------------------------------------------ v2 pipeline ON
