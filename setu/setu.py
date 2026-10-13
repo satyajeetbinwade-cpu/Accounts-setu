@@ -54,6 +54,14 @@ from setu.views.login import login_page
 # every folder under data/.)
 from src import bootstrap  # noqa: E402
 
+# The database and the data tree must belong to each other before anything is
+# served. A scratch run points BOTH at the copy (SETU_DB_PATH / SETU_DATA_ROOT);
+# a mismatch — the copy's database with the real data/ — is refused here rather
+# than discovered by a write landing in the client folders.
+from src import data_paths  # noqa: E402
+
+data_paths.assert_app_data_root()
+
 bootstrap.ensure_schema_current()
 
 

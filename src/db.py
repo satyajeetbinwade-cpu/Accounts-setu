@@ -11,11 +11,19 @@ this separation).
 """
 
 from pathlib import Path
+import os
 import sqlite3
 import json
 from typing import Any, Optional
 
-DB_PATH = Path(__file__).resolve().parent.parent / "db" / "poc.db"
+#: The repository's OWN database. Never changes: it is what the safety checks
+#: compare against, so it must not follow an override.
+REPO_DB_PATH = Path(__file__).resolve().parent.parent / "db" / "poc.db"
+
+#: ``SETU_DB_PATH`` points the whole app at a COPY of the database. Used by a
+#: local scratch run (and by the screenshot harness) so nothing can touch the
+#: real db/poc.db. The DEFAULT is unchanged: with the variable unset.
+DB_PATH = Path(os.environ.get("SETU_DB_PATH") or REPO_DB_PATH)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (

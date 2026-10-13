@@ -16,13 +16,74 @@ creating anything (for read paths and existence checks).
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
 from src.shared.periods import PERIOD_UNFILED, is_valid_period
 from src.shared.vocab import SOURCE_TYPES, is_valid_source_type
 
-DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
+#: The repository's OWN data tree. Never changes: the safety check below compares
+#: against it, so it must not follow an override.
+REPO_DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
+
+#: ``SETU_DATA_ROOT`` points the whole app at a COPY of the data tree. Used by a
+#: local scratch run so a stray write cannot land in the real upload folders.
+#: The DEFAULT is unchanged: the repo's data/ when the variable is unset.
+DATA_ROOT = Path(os.environ.get("SETU_DATA_ROOT") or REPO_DATA_ROOT)
+
+
+def default_data_root(db_path=None) -> Path:
+    """The data root that BELONGS to a database.
+
+    * a database under a ``db/`` folder owns the ``data/`` folder beside that one
+      — the deployed layout (``/app/persist/db/poc.db`` ↔ ``/app/persist/data``)
+      and the repo's own (``db/poc.db`` ↔ ``data/``);
+    * any other database owns a ``data/`` folder next to itself, which is what a
+      copy or a scratch database gets.
+    """
+    from src import db as recon_db
+
+    path = Path(db_path) if db_path else Path(recon_db.DB_PATH)
+    if path.parent.name == "db":
+        return path.parent.parent / "data"
+    return path.parent / "data"
+
+
+def assert_app_data_root(db_path=None, *, data_root=None) -> Path:
+    """Refuse to serve the app with a data root that does not belong to the DB.
+
+    Called on the app's import path, so ``reflex run`` can never start against a
+    mismatched pair. Accepted:
+
+    * the database's OWN data folder (see :func:`default_data_root`);
+    * a folder BESIDE the database — which is what a scratch run gets;
+    * the repo's real ``data/`` when the database is the repo's own.
+
+    Refused: any other root, and specifically the repo's real ``data/`` while the
+    database is a copy. That mismatch is the dangerous one — it would let a
+    scratch run migrate or write into the real upload folders.
+    """
+    from src import db as recon_db
+
+    db = Path(db_path) if db_path else Path(recon_db.DB_PATH)
+    resolved = Path(data_root) if data_root else Path(DATA_ROOT)
+    db = db.expanduser().resolve()
+    resolved = resolved.expanduser().resolve()
+
+    if resolved == REPO_DATA_ROOT.resolve() and db != Path(recon_db.REPO_DB_PATH).resolve():
+        raise RuntimeError(
+            f"refusing to start: the data root is the repository's real {resolved} but the "
+            f"database is {db}. Point SETU_DATA_ROOT at the copy's own data folder "
+            f"({default_data_root(db)}) as well."
+        )
+    accepted = {default_data_root(db).expanduser().resolve(), db.parent}
+    if resolved.parent not in accepted and resolved not in accepted:
+        raise RuntimeError(
+            f"refusing to start: the data root {resolved} does not belong to the database "
+            f"{db}. Expected {default_data_root(db)} or a folder beside it."
+        )
+    return resolved
 
 #: A RESERVED folder under the data root for machine-made artefacts — currently
 #: the review screen's rendered page images. The leading underscore keeps it out
