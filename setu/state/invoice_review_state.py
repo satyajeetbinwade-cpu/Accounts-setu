@@ -865,7 +865,25 @@ class InvoiceReviewState(SharedUploadState):
         try:
             model = rules_mod.get_review_model(self.current_document_id, order=order)
         except Exception as exc:  # noqa: BLE001
+            # A document with no extraction yet is a normal state mid-run — and
+            # the header must NOT keep the previous document's words while the
+            # viewer already shows this one's pages (seen in a screenshot pass).
             self.refusal = str(exc)
+            blank = next(
+                (d for d in self.documents if d.document_id == self.current_document_id),
+                DocRow(),
+            )
+            self.doc_label = blank.label
+            self.doc_category = blank.category
+            self.doc_category_label = blank.category_label
+            self.doc_direction = ""
+            self.doc_direction_label = "No extraction yet"
+            self.doc_direction_basis = ""
+            self.doc_needs_a_human = False
+            self.page_tag = ""
+            self.page_line = f"{blank.label or 'This document'} has no extraction to review yet."
+            self.can_mark_reviewed = False
+            self._load_field_boxes()
             self._load_viewer()
             return
 
