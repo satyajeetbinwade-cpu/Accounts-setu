@@ -554,6 +554,11 @@ def test_pipeline_chains_triage_into_extraction(db, monkeypatch):
 
     # The chain runs on the triage worker, so the extraction starts by itself.
     triage_mod.wait_for_run(started["run_id"], db_path=db, timeout=120)
+    # ...and it is the CHAIN's persisted state that says when the extraction has
+    # started and finished — waiting on the run row alone is a race (the run row
+    # is finalised before the chain hands over).
+    chain_end = pipeline.wait_for_chain(started["run_id"], db_path=db, timeout=120)
+    assert chain_end in ("complete", "failed"), f"chain ended in {chain_end!r}"
     ex.wait_for_extraction(1, db_path=db, timeout=120)
 
     info = ex.get_extraction(1, db_path=db)
