@@ -91,6 +91,9 @@ class JobRow:
     client_label: str = ""
     started: bool = False              # has a triage run at all
     status: str = ""                   # triage run status ("running", "partial", …)
+    #: The PERSISTED chain state — what makes "triage done, extraction pending"
+    #: visible instead of looking finished.
+    chain_state: str = ""
     status_label: str = ""
     running: bool = False
     can_resume: bool = False           # interrupted / partial — finish the rest
@@ -496,6 +499,7 @@ class InvoiceReviewState(SharedUploadState):
         triage = progress["triage"]
         review = progress["review"]
         extraction = progress["extraction"]
+        row.chain_state = str(progress.get("chain_state") or "")
         run_status = str(triage.get("status") or "")
         row.started = run_status != "" or bool(triage.get("run_id"))
         row.status = run_status
@@ -526,7 +530,31 @@ class InvoiceReviewState(SharedUploadState):
 
     def _label_job(self, row: JobRow, extraction: dict) -> None:
         """The job's own words — a state a person can act on, never a colour."""
+        chain = str(row.chain_state or "")
         running = extraction.get("queued", 0) + extraction.get("running", 0)
+        if chain in ("queued", "triage_running", "extraction_running"):
+            row.running = True
+            row.status_label = "Working"
+            row.progress_label = (
+                f"{row.pages_ok} of {row.pages_total or '?'} pages read"
+                + (f" — {row.fallback_pages} by the fallback model" if row.fallback_pages else "")
+            )
+            return
+        if chain == "triage_done_extraction_pending":
+            # The window that used to look finished: pages are read, the
+            # extraction has not started yet. It is STILL RUNNING.
+            row.running = True
+            row.status_label = "Reading the values"
+            row.progress_label = (
+                f"{row.pages_ok} of {row.pages_total} pages read — the extraction "
+                "is starting. Progress is saved; it is safe to leave this page."
+            )
+            return
+        if chain == "interrupted":
+            row.can_resume = True
+            row.status_label = "Stopped part-way"
+            row.progress_label = "The app restarted while this was running. Resume picks up the rest."
+            return
         if row.status == triage_mod.RUN_RUNNING or running:
             row.running = True
             row.status_label = "Reading the file"

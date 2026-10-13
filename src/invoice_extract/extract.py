@@ -1359,17 +1359,39 @@ def wait_for_extraction(
     hang forever.
     """
     deadline = time.monotonic() + max(1.0, float(timeout))
+    from src.invoice_extract import pipeline as pipeline_mod
+
     while True:
         counts = _status_counts(upload_id, db_path=db_path)
         unfinished = sum(counts.get(s, 0) for s in EXTRACTION_UNFINISHED)
         if unfinished == 0:
-            return counts
+            # NOT finished just because nothing is unfinished: between "triage
+            # run finalised" and "extraction job started" the chain is PENDING,
+            # and returning here is what made this wait a race.
+            chain = None
+            try:
+                chain = pipeline_mod.chain_state(upload_id=upload_id, db_path=db_path)
+            except Exception:  # noqa: BLE001 — no chain table, no chain
+                chain = None
+            if chain not in pipeline_mod.CHAIN_RUNNING_STATES:
+                return counts
         state = job_state(upload_id)
-        if state is not None and state["event"].is_set():
+        if state is not None and state["event"].is_set() and chain_finished(counts, db_path=db_path, upload_id=upload_id):
             return counts
         if time.monotonic() > deadline:
             return counts
         time.sleep(max(0.01, float(poll)))
+
+
+def chain_finished(counts: dict[str, int], *, db_path=None, upload_id: int) -> bool:
+    """Has the chain for this upload stopped asking us to wait?"""
+    from src.invoice_extract import pipeline as pipeline_mod
+
+    try:
+        chain = pipeline_mod.chain_state(upload_id=upload_id, db_path=db_path)
+    except Exception:  # noqa: BLE001
+        return True
+    return chain not in pipeline_mod.CHAIN_RUNNING_STATES
 
 
 # ---------------------------------------------------------------------------

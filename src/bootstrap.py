@@ -210,6 +210,16 @@ def run_migrations(
             backup=backup,
             allow_real_db=allow_real_db,
         )
+        # A pipeline chain left RUNNING by a previous process is INTERRUPTED —
+        # not complete (nothing was read) and not failed (nothing went wrong).
+        # The review screen shows it as resumable instead of finished.
+        try:
+            from src.invoice_extract import pipeline as _pipeline
+
+            _pipeline.recover_interrupted_chains(db_path=db_path)
+        except Exception:  # noqa: BLE001 — recovery must never block a boot
+            pass
+
         if report.get("mode") == "apply":
             # Report next to the DB that was migrated, never the repo default.
             resolved = Path(db_path) if db_path else Path(db.DB_PATH)

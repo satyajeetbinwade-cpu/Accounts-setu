@@ -38,11 +38,235 @@ from src.invoice_extract.service import InvoiceExtractError
 
 #: run_id -> {"upload_id", "actor", "db_path", "include_disabled"}.
 #: Registered by ``start_v2_pipeline`` BEFORE the triage run is queued, taken by
-#: ``run_chain`` when the worker finishes that run. Process-local by design: a
-#: restart loses the chain, and the resume paths (``resume_triage`` /
-#: ``resume_extraction``) are what recover the work itself.
+#: ``run_chain`` when the worker finishes that run. Process-local BY DESIGN —
+#: the memory copy is only a hand-off; the STATE lives in the database (see
+#: ``invoice_pipeline_chains`` below), which is why a restart is recoverable.
 _CHAINS: dict[int, dict[str, Any]] = {}
 _LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# The chain's PERSISTED state
+# ---------------------------------------------------------------------------
+#
+# The memory hand-off above cannot answer "has this upload finished?": after a
+# restart it is empty, and between "triage run row finalised" and "extraction
+# job started" there is a window in which NOTHING is running and NOTHING has
+# been read — a poller that only looks at run rows and extraction rows sees a
+# finished-looking upload. The window is small but it is real, and it made the
+# chained-pipeline test fail 9 times in 10.
+
+CHAIN_QUEUED = "queued"
+CHAIN_TRIAGE_RUNNING = "triage_running"
+CHAIN_TRIAGE_DONE = "triage_done_extraction_pending"
+CHAIN_EXTRACTION_RUNNING = "extraction_running"
+CHAIN_COMPLETE = "complete"
+CHAIN_FAILED = "failed"
+CHAIN_INTERRUPTED = "interrupted"
+
+#: A chain in one of these is NOT finished, whatever the other tables say.
+CHAIN_RUNNING_STATES = frozenset({
+    CHAIN_QUEUED, CHAIN_TRIAGE_RUNNING, CHAIN_TRIAGE_DONE, CHAIN_EXTRACTION_RUNNING,
+})
+#: No further progress will happen without a person (resume) or a new run.
+CHAIN_TERMINAL_STATES = frozenset({CHAIN_COMPLETE, CHAIN_FAILED, CHAIN_INTERRUPTED})
+
+_CHAIN_DDL = """
+CREATE TABLE IF NOT EXISTS invoice_pipeline_chains (
+    run_id     INTEGER PRIMARY KEY,
+    upload_id  INTEGER NOT NULL,
+    state      TEXT    NOT NULL,
+    actor      TEXT,
+    detail     TEXT,
+    created_at TEXT    NOT NULL,
+    updated_at TEXT    NOT NULL
+)
+"""
+
+
+def _chain_connect(db_path=None):
+    from src import db as recon_db
+
+    return recon_db.get_connection(db_path)
+
+
+def _chain_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_schema(db_path=None) -> None:
+    """Create ``invoice_pipeline_chains`` if it is not there yet.
+
+    Idempotent and cheap: called on EVERY write path, so a database that missed
+    the boot still gets the table the first time the pipeline touches it. Read
+    paths tolerate its absence (a database that never ran the v2 pipeline has
+    no chains at all).
+    """
+    conn = _chain_connect(db_path)
+    try:
+        conn.execute(_CHAIN_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_chain_state(
+    run_id: int, state: str, *, upload_id: Optional[int] = None,
+    actor: Optional[str] = None, detail: Optional[str] = None, db_path=None,
+) -> None:
+    """Write one transition. THE only writer of this table's state column."""
+    ensure_schema(db_path)
+    conn = _chain_connect(db_path)
+    try:
+        now = _chain_now()
+        conn.execute(
+            "INSERT INTO invoice_pipeline_chains "
+            "(run_id, upload_id, state, actor, detail, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(run_id) DO UPDATE SET state = excluded.state, "
+            "actor = COALESCE(excluded.actor, actor), detail = excluded.detail, "
+            "updated_at = excluded.updated_at",
+            (int(run_id), int(upload_id or 0), state, actor, detail, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def chain_row(*, run_id: Optional[int] = None, upload_id: Optional[int] = None, db_path=None):
+    """The chain row for a run (or the newest one for an upload), or None."""
+    conn = _chain_connect(db_path)
+    try:
+        try:
+            if run_id is not None:
+                cur = conn.execute(
+                    "SELECT * FROM invoice_pipeline_chains WHERE run_id = ?", (int(run_id),)
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM invoice_pipeline_chains WHERE upload_id = ? "
+                    "ORDER BY run_id DESC LIMIT 1", (int(upload_id or 0),),
+                )
+            row = cur.fetchone()
+            return {c[0]: row[i] for i, c in enumerate(cur.description)} if row else None
+        except Exception:  # noqa: BLE001 - the table may not exist yet
+            return None
+    finally:
+        conn.close()
+
+
+def chain_state(*, run_id: Optional[int] = None, upload_id: Optional[int] = None,
+                db_path=None, promote: bool = True) -> Optional[str]:
+    """The chain's state, self-healed from the tables the work actually writes.
+
+    ``extraction_running`` has no writer of its own: the extraction job ends on
+    a worker thread, so the transition to ``complete``/``failed`` is made HERE,
+    from the extraction rows, the first time anyone asks — and persisted, so
+    every later reader sees the same answer.
+    """
+    row = chain_row(run_id=run_id, upload_id=upload_id, db_path=db_path)
+    if row is None:
+        return None
+    state = str(row["state"])
+    if promote and state == CHAIN_EXTRACTION_RUNNING:
+        from src.invoice_extract import extract as extract_mod
+
+        target = int(row["run_id"])
+        try:
+            counts = extract_mod.extraction_status_counts(int(row["upload_id"]), db_path=db_path)
+        except Exception:  # noqa: BLE001
+            return state
+        total = sum(int(v) for v in counts.values())
+        unfinished = sum(int(counts.get(name, 0)) for name in ("queued", "running"))
+        if total and not unfinished:
+            failed = sum(int(counts.get(name, 0)) for name in ("failed",))
+            new_state = CHAIN_FAILED if failed == total else CHAIN_COMPLETE
+            set_chain_state(target, new_state, upload_id=int(row["upload_id"]), db_path=db_path,
+                            detail=f"extraction finished: {counts}")
+            return new_state
+    return state
+
+
+def recover_interrupted_chains(db_path=None) -> list[int]:
+    """Mark chains left RUNNING by a previous process as ``interrupted``.
+
+    Called on BOOT. An interrupted chain is a state a person can act on — not
+    complete (nothing was read) and not failed (nothing went wrong): the work
+    simply stopped, and ``resume_pipeline`` continues the unfinished pieces.
+    """
+    ensure_schema(db_path)
+    conn = _chain_connect(db_path)
+    try:
+        placeholders = ",".join("?" for _ in CHAIN_RUNNING_STATES)
+        rows = conn.execute(
+            f"SELECT run_id FROM invoice_pipeline_chains WHERE state IN ({placeholders})",
+            tuple(CHAIN_RUNNING_STATES),
+        ).fetchall()
+        run_ids = [int(r[0]) for r in rows]
+        if run_ids:
+            conn.execute(
+                f"UPDATE invoice_pipeline_chains SET state = ?, updated_at = ?, "
+                f"detail = 'the app restarted while this was running' "
+                f"WHERE state IN ({placeholders})",
+                (CHAIN_INTERRUPTED, _chain_now(), *CHAIN_RUNNING_STATES),
+            )
+            conn.commit()
+        return run_ids
+    finally:
+        conn.close()
+
+
+def wait_for_chain(run_id: int, *, db_path=None, timeout: float = 300.0, poll: float = 0.05) -> Optional[str]:
+    """Block until a chain reaches a terminal state (or the timeout)."""
+    import time as _time
+
+    deadline = _time.monotonic() + max(1.0, float(timeout))
+    while True:
+        state = chain_state(run_id=run_id, db_path=db_path)
+        if state in CHAIN_TERMINAL_STATES or state is None:
+            return state
+        if _time.monotonic() > deadline:
+            return state
+        _time.sleep(max(0.01, float(poll)))
+
+
+def resume_pipeline(upload_id: int, *, actor: str, db_path=None) -> dict[str, Any]:
+    """Continue an interrupted (or failed) chain — only its unfinished pieces.
+
+    * triage stopped part-way → ``resume_triage`` re-runs just its unfinished
+      pages, and the chain is re-registered so the extraction still follows;
+    * triage finished but the extraction never started (or stopped) →
+      ``start_extraction`` picks up the documents that have no pass yet.
+    """
+    row = chain_row(upload_id=upload_id, db_path=db_path)
+    state = chain_state(upload_id=upload_id, db_path=db_path) if row else None
+    if row is None:
+        raise InvoiceExtractError(f"Upload {upload_id} has no pipeline chain to resume.")
+    if state not in (CHAIN_INTERRUPTED, CHAIN_FAILED):
+        return {"upload_id": int(upload_id), "resumed": False, "state": state,
+                "reason": "this chain is not interrupted"}
+
+    from src.invoice_extract import extract as extract_mod
+    from src.invoice_extract import triage as triage_mod
+
+    run_id = int(row["run_id"])
+    run = triage_mod.get_run(run_id, db_path=db_path) or {}
+    pages_failed = int(run.get("pages_failed") or 0)
+    if run and run.get("status") != triage_mod.RUN_COMPLETE and (
+        pages_failed or int(run.get("pages_ok") or 0) > 0
+    ):
+        triage_mod.resume_triage(run_id, actor=actor, db_path=db_path, include_disabled=True)
+        register_chain(run_id, upload_id, actor=actor, db_path=db_path, include_disabled=True)
+        set_chain_state(run_id, CHAIN_TRIAGE_RUNNING, upload_id=int(upload_id), actor=actor,
+                        detail="resumed by a person", db_path=db_path)
+        return {"upload_id": int(upload_id), "resumed": True, "leg": "triage", "run_id": run_id}
+
+    summary = extract_mod.start_extraction(upload_id, actor=actor, db_path=db_path, force=True)
+    set_chain_state(run_id, CHAIN_EXTRACTION_RUNNING, upload_id=int(upload_id), actor=actor,
+                    detail="resumed by a person", db_path=db_path)
+    return {"upload_id": int(upload_id), "resumed": True, "leg": "extraction",
+            "run_id": run_id, "extraction": summary}
 
 
 def register_chain(
@@ -53,6 +277,11 @@ def register_chain(
             "upload_id": int(upload_id), "actor": actor,
             "db_path": db_path, "include_disabled": bool(include_disabled),
         }
+    # The PERSISTED half of the hand-off: this row is what survives a restart
+    # and what every poller reads. Written here so a chain exists on disk from
+    # the moment the run is queued.
+    set_chain_state(run_id, CHAIN_QUEUED, upload_id=int(upload_id), actor=actor,
+                    detail="triage queued", db_path=db_path)
 
 
 def take_chain(run_id: int) -> Optional[dict[str, Any]]:
@@ -90,7 +319,14 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
     from src.invoice_extract import triage as triage_mod
 
     run = triage_mod.get_run(run_id, db_path=db_path) or {}
+    # Triage is DONE and the extraction has NOT started: the state a poller must
+    # never mistake for a finished upload.
+    set_chain_state(run_id, CHAIN_TRIAGE_DONE, upload_id=upload_id, actor=actor,
+                    detail="triage finished — extraction follows", db_path=db_path)
     if run.get("status") == triage_mod.RUN_FAILED:
+        set_chain_state(run_id, CHAIN_FAILED, upload_id=upload_id, actor=actor,
+                        detail=f"triage run {run_id} failed — nothing to extract from",
+                        db_path=db_path)
         return {"upload_id": upload_id, "run_id": int(run_id), "started": False,
                 "reason": f"triage run {run_id} failed — nothing to extract from"}
 
@@ -100,6 +336,8 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
         if not d.get("excluded") and d.get("category") in extract_mod.TARGET_CATEGORIES
     ]
     if not extractable:
+        set_chain_state(run_id, CHAIN_COMPLETE, upload_id=upload_id, actor=actor,
+                        detail="triage-only: no extractable document", db_path=db_path)
         return {
             "upload_id": upload_id, "run_id": int(run_id), "started": False,
             "reason": "triage found no extractable document (only tax_invoice and "
@@ -107,12 +345,20 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
             "documents": len(info.get("documents") or []),
         }
 
+    set_chain_state(run_id, CHAIN_EXTRACTION_RUNNING, upload_id=upload_id, actor=actor,
+                    detail="extraction starting", db_path=db_path)
     try:
         summary = extract_mod.start_extraction(
             upload_id, actor=actor, db_path=db_path, force=include_disabled,
         )
     except InvoiceExtractError as exc:
-        # e.g. a pass is still unfinished. Reported, never forced.
+        # e.g. a pass is still unfinished — the extraction IS running, which is
+        # what the chain state must say; anything else is a failure.
+        unfinished = "unfinish" in str(exc).lower()
+        set_chain_state(
+            run_id, CHAIN_EXTRACTION_RUNNING if unfinished else CHAIN_FAILED,
+            upload_id=upload_id, actor=actor, detail=str(exc), db_path=db_path,
+        )
         return {"upload_id": upload_id, "run_id": int(run_id), "started": False,
                 "reason": str(exc)}
     return {

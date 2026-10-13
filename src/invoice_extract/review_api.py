@@ -148,6 +148,20 @@ def get_upload_progress(upload_id: int, *, db_path=None) -> dict[str, Any]:
         d for d in documents
         if not d.get("excluded") and d.get("category") in EXTRACTABLE_CATEGORIES
     ]
+    # The chain state is read BEFORE the per-document work: it is one indexed
+    # row and it is what the screen's polling keys off.
+    from src.invoice_extract import pipeline as pipeline_mod
+
+    chain_state = None
+    if run.get("run_id"):
+        try:
+            chain_state = pipeline_mod.chain_state(
+                run_id=int(run["run_id"]), db_path=db_path,
+            )
+        except Exception:  # noqa: BLE001 — a database without the table
+            chain_state = None
+    if chain_state == pipeline_mod.CHAIN_QUEUED and run.get("status") == "running":
+        chain_state = pipeline_mod.CHAIN_TRIAGE_RUNNING
     reviewed_ids: set[int] = set()
     needs_you = 0
     unreviewed = 0
@@ -168,6 +182,10 @@ def get_upload_progress(upload_id: int, *, db_path=None) -> dict[str, Any]:
 
     return {
         "upload_id": int(upload_id),
+        #: The CHAIN's own state — the answer to "is this file finished?" that
+        #: the run rows and extraction rows cannot give on their own. None when
+        #: the upload never entered the v2 pipeline.
+        "chain_state": chain_state,
         "triage": {
             "run_id": run.get("run_id"),
             "status": run.get("status"),
