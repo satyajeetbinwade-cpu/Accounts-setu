@@ -262,6 +262,36 @@ def _box_style(state: str) -> dict:
     }
 
 
+def _scope(document) -> bool:
+    """Is this document IN the review scope at all?
+
+    THE single definition the whole screen uses: extractable category and not
+    excluded. "To review" is then one more step — see :func:`_counts`.
+
+    Accepts either shape the screen holds documents in: the raw triage dicts the
+    Files view works with, or the ``DocRow``s the review screen builds.
+    """
+    if isinstance(document, dict):
+        excluded = bool(document.get("excluded"))
+        category = document.get("category")
+    else:
+        excluded = bool(getattr(document, "excluded", False))
+        category = getattr(document, "category", None)
+    return not excluded and category in doc_actions.EXTRACTABLE_CATEGORIES
+
+
+def _counts(documents, *, reviewed_of) -> tuple[int, int]:
+    """(still to review, reviewed) — computed ONCE for every counter.
+
+    "To review" = in the review scope AND not marked reviewed. The Files row,
+    the top bar and the document footer all read these two numbers, so the same
+    file can never report two different totals.
+    """
+    scope = [d for d in documents if _scope(d)]
+    reviewed = sum(1 for d in scope if reviewed_of(d))
+    return len(scope) - reviewed, reviewed
+
+
 class InvoiceReviewState(SharedUploadState):
     """The v2 Files view + review screen."""
 
@@ -291,6 +321,9 @@ class InvoiceReviewState(SharedUploadState):
     document_count: int = 0
     to_review_count: int = 0
     reviewed_count: int = 0
+    #: Documents that still HAVE needs-you items — reported separately, never
+    #: mixed into "to review".
+    needs_you_count: int = 0
     doc_label: str = ""
     doc_category: str = ""
     doc_category_label: str = ""
@@ -477,6 +510,17 @@ class InvoiceReviewState(SharedUploadState):
         row.excluded = int(review.get("excluded") or 0)
         row.unassigned_pages = int(review.get("unassigned_pages") or 0)
         row.with_needs_you = int(review.get("with_needs_you") or 0)
+        # The counters on this row use the SAME definition as the review
+        # screen's, computed from the documents themselves rather than from
+        # the progress call's own tally.
+        try:
+            documents = triage_mod.get_triage(upload_id).get("documents") or []
+            row.to_review, row.reviewed = _counts(
+                documents,
+                reviewed_of=lambda d: doc_actions.is_reviewed(int(d["document_id"])),
+            )
+        except Exception:  # noqa: BLE001 — the progress tallies remain as fallback
+            pass
         self._label_job(row, extraction)
         return row
 
@@ -517,7 +561,7 @@ class InvoiceReviewState(SharedUploadState):
             f"{row.to_review} to review · {row.reviewed} reviewed"
         )
         if row.with_needs_you:
-            row.summary_label += f" · {row.with_needs_you} still ask a question"
+            row.summary_label += f" · {row.with_needs_you} need you"
 
     @rx.event
     def poll(self):
@@ -716,7 +760,11 @@ class InvoiceReviewState(SharedUploadState):
 
     @rx.var
     def review_counter(self) -> str:
-        return f"{self.reviewed_count} of {self.to_review_count} to review"
+        """The footer's counters — the same numbers as the Files row's."""
+        text = f"{self.to_review_count} to review · {self.reviewed_count} reviewed"
+        if self.needs_you_count:
+            text += f" · {self.needs_you_count} need you"
+        return text
 
     @rx.var
     def has_next_issue(self) -> bool:
@@ -784,9 +832,11 @@ class InvoiceReviewState(SharedUploadState):
 
     def _load_review(self, *, first: bool = False) -> None:
         self._load_documents()
-        in_review = [d for d in self.documents if not d.excluded and d.category in doc_actions.EXTRACTABLE_CATEGORIES]
-        self.to_review_count = len(in_review)
-        self.reviewed_count = sum(1 for d in in_review if d.reviewed)
+        # THE counters: the same two numbers the Files row shows for this file.
+        self.to_review_count, self.reviewed_count = _counts(
+            self.documents, reviewed_of=lambda d: d.reviewed,
+        )
+        self.needs_you_count = sum(1 for d in self.documents if d.needs_you and not d.excluded)
         if first or not any(d.document_id == self.current_document_id for d in self.documents):
             if self.documents:
                 self.current_document_id = self.documents[0].document_id
@@ -863,11 +913,14 @@ class InvoiceReviewState(SharedUploadState):
         for item in model.get("settled") or []:
             self.settled.append(self._value_row(item))
         for item in model.get("not_applicable") or []:
+            reason = str(item.get("reason") or "no reason recorded")
             self.not_applicable.append(ValueRow(
                 field_key=str(item["field_key"]),
                 label=_field_label(str(item["field_key"])),
                 tag="not_applicable",
-                reason=str(item.get("reason") or ""),
+                # The reason is the RULE's own words, quoted as stored (for
+                # example "inter-state supply (Delhi to Uttar Pradesh)").
+                reason=reason,
             ))
         for item in model.get("derived") or []:
             self.derived.append(ValueRow(

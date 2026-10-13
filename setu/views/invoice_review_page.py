@@ -808,12 +808,16 @@ def _right_pane() -> rx.Component:
             S.not_applicable.length() > 0,
             c.card(
                 rx.vstack(
-                    _quiet_label("Not applicable — put back only if it IS printed here"),
+                    _quiet_label("Not applicable to this document"),
                     rx.foreach(
                         S.not_applicable,
                         lambda row: rx.hstack(
                             rx.text(row.label, style=t.TEXT["micro"], font_weight="600"),
-                            rx.text(f"· {row.reason}", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
+                            rx.text(
+                                "Not applicable: " + row.reason,
+                                style=t.TEXT["micro"],
+                                color=t.Color.TEXT_SECONDARY.value,
+                            ),
                             rx.spacer(),
                             rx.cond(
                                 S.open_read_only,
