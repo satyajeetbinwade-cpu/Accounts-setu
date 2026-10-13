@@ -139,15 +139,19 @@ _TOPUP_TEXT: dict[str, str] = {
 def _refuse_the_real_database(db_path: str) -> Path:
     """A demo seed must never land in the database the app runs on.
 
+    The database to protect is the REPOSITORY's own (``REPO_DB_PATH``), not
+    ``DB_PATH``: when ``SETU_DB_PATH`` points the app at a scratch copy, that
+    copy IS the one this command is meant to seed.
+
     A path that does not exist yet is allowed: creating a fresh scratch database
     is one of the two things this command is for (the other is seeding a copy).
     """
     target = Path(db_path).expanduser().resolve()
-    real = Path(recon_db.DB_PATH).expanduser().resolve()
+    real = Path(recon_db.REPO_DB_PATH).expanduser().resolve()
     if target == real:
         raise InvoiceExtractError(
-            f"{target} is the app's real database. Pass a COPY or a scratch database "
-            "(--db /tmp/demo.db) — this command only ever writes demo rows."
+            f"{target} is the repository's real database. Pass a COPY or a scratch "
+            "database (--db /tmp/demo.db) — this command only ever writes demo rows."
         )
     return target
 
