@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS invoice_pipeline_chains (
 """
 
 
+def chain_schema_statements() -> tuple[str, ...]:
+    """The DDL, as statements for a caller's OWN connection.
+
+    Migration 0007 executes these inside the framework's transaction; the
+    runtime safety net below executes them on a connection of its own.
+    """
+    return (_CHAIN_DDL,)
+
+
 def _chain_connect(db_path=None):
     from src import db as recon_db
 
@@ -102,10 +111,15 @@ def ensure_schema(db_path=None) -> None:
     the boot still gets the table the first time the pipeline touches it. Read
     paths tolerate its absence (a database that never ran the v2 pipeline has
     no chains at all).
+
+    A SAFETY NET, not the front door: migration 0007 creates the same table
+    through the migration framework, and this only covers a database that never
+    ran the boot.
     """
     conn = _chain_connect(db_path)
     try:
-        conn.execute(_CHAIN_DDL)
+        for statement in chain_schema_statements():
+            conn.execute(statement)
         conn.commit()
     finally:
         conn.close()

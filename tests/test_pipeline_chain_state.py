@@ -120,3 +120,60 @@ def test_the_waiter_does_not_return_while_the_chain_is_pending(seeded):
     waited = time.monotonic() - started
     assert waited >= 1.5, "a pending chain must keep the waiter waiting"
     assert counts is not None
+
+
+def test_a_pre_migration_database_gains_the_table_through_the_framework(tmp_path, monkeypatch):
+    """A database migrated to 6 only has no chain table; migration 7 adds it.
+
+    Built the honest way: the REAL boot path runs with the migration list cut to
+    the first six, then the full list runs again on the same database — exactly
+    what a release branch does to an existing database.
+    """
+    from src.migrations import migrate as migrate_mod
+
+    all_migrations = list(migrate_mod.MIGRATIONS)
+    assert len(all_migrations) == 7
+    assert all_migrations[-1].version == 7 and all_migrations[-1].name == "invoice_pipeline_chains"
+
+    def tables(db_path):
+        conn = recon_db.get_connection(db_path)
+        try:
+            return {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        finally:
+            conn.close()
+
+    db_path = tmp_path / "pre_migration.db"
+    monkeypatch.setattr(migrate_mod, "MIGRATIONS", all_migrations[:6])
+    bootstrap.run_migrations(db_path=str(db_path), data_root=tmp_path / "data", allow_real_db=True)
+    # Make it look like a database this branch has never touched: the boot's
+    # recovery safety net may have created the table, so drop it — migration 7
+    # is what must bring it back, and the RECORDED version is the proof.
+    conn = recon_db.get_connection(db_path)
+    try:
+        conn.execute("DROP TABLE IF EXISTS invoice_pipeline_chains")
+        conn.commit()
+    finally:
+        conn.close()
+    assert "invoice_pipeline_chains" not in tables(db_path)
+
+    # The release branch's migration, through the framework, on the same file.
+    monkeypatch.setattr(migrate_mod, "MIGRATIONS", all_migrations)
+    bootstrap.run_migrations(db_path=str(db_path), data_root=tmp_path / "data", allow_real_db=True)
+    assert "invoice_pipeline_chains" in tables(db_path)
+    conn = recon_db.get_connection(db_path)
+    try:
+        versions = {int(row[0]) for row in conn.execute("SELECT version FROM schema_migrations")}
+    finally:
+        conn.close()
+    assert 7 in versions, "migration 7 must be RECORDED, not merely re-created by the safety net"
+
+    # And the chain state works on that database immediately.
+    pipeline.register_chain(9, 1, actor="test", db_path=db_path)
+    assert pipeline.chain_state(run_id=9, db_path=db_path) == pipeline.CHAIN_QUEUED
+    # ...and the runtime safety net stays harmless on a migrated database.
+    pipeline.ensure_schema(db_path)
+    assert pipeline.chain_state(run_id=9, db_path=db_path) == pipeline.CHAIN_QUEUED
