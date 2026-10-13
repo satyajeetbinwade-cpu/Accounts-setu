@@ -918,7 +918,12 @@ def _vision_test_leg(spec, api_key: str, model: str, result_base: dict[str, Any]
             spec, api_key, model=model,
             system="You are a connectivity test for the SETU platform.",
             user="Reply with the single word printed in this image.",
-            images=[(mime, png)], max_tokens=16, temperature=0.0, timeout=30,
+            # 256, not 16: a reasoning-style vision model (e.g. deepseek-flash)
+            # spends its first output tokens thinking and only then writes the
+            # word, so a 16-token cap truncated it to an EMPTY reply and the
+            # model failed a test it demonstrably passes at 256. A text-only
+            # model still fails: it never answers with the word.
+            images=[(mime, png)], max_tokens=256, temperature=0.0, timeout=30,
         )
     except prov.ProviderError as exc:
         return {**result_base, "ok": False, "latency_ms": None, "sample": "", "error": str(exc)}

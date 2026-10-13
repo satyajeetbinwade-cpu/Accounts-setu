@@ -291,7 +291,12 @@ def _call_extract_model(
         system_prompt,
         user_prompt,
         images=images,
-        max_tokens=4000,
+        # 8000, not 4000: a reasoning-style model (deepseek-flash) spends
+        # output tokens thinking before the JSON, and 4000 cut its replies
+        # off mid-object ("unbalanced JSON … hit the output-token limit" on
+        # 7/8 real read-B calls; its one success used 3079). 8000 fits it
+        # with headroom and costs fractions of a cent at these prices.
+        max_tokens=8000,
         temperature=0.0,
         actor=actor,
         timeout=timeout,

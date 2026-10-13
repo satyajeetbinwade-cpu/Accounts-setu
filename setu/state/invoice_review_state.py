@@ -416,7 +416,9 @@ class InvoiceReviewState(SharedUploadState):
                 assignment = ai_service.get_assignment(key) or {}
             except Exception:  # noqa: BLE001
                 assignment = {}
-            model = assignment.get("primary_model_id")
+            # The assignment row's column is `primary_model`; the extra
+            # `primary_model_id` lookup covers callers that remap it.
+            model = assignment.get("primary_model") or assignment.get("primary_model_id")
             provider = assignment.get("primary_provider")
             parts.append(f"{names.get(key, key)}: {model or 'not assigned yet'}")
             if provider:
