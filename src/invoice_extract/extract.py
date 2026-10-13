@@ -402,12 +402,20 @@ def _handwriting_guard(
     annotations: list[dict[str, Any]],
 ) -> Optional[str]:
     """The deterministic guard: a numeric value that EQUALS an annotation's
-    amount and whose box OVERLAPS that annotation needs the printed value.
+    amount, and whose box the annotation actually COVERS, needs the printed one.
 
     Returns the matching annotation text when the guard fires, else None. This
     catches the case the prompt alone cannot: a handwritten total scribbled over
     the printed block, where the model reports the printed number but the page
     is genuinely ambiguous.
+
+    BOTH halves are required. Equal amounts alone are not enough — the same
+    figure appears many times on a real invoice and a handwritten "6,825" in
+    the margin says nothing about a printed 6,825.00 elsewhere. And the overlap
+    must be SUBSTANTIAL: at least ``crops_mod.HANDWRITING_OVERLAP_MIN`` of the
+    value's own box, so a figure written in the neighbouring column cannot flag
+    a value it merely touches. ``rules.get_review_model`` re-derives the same
+    match from the stored annotation to show the reviewer the figure.
     """
     if value is None or page_box is None:
         return None
@@ -421,7 +429,7 @@ def _handwriting_guard(
         ann_box = ann.get("page_box")
         if ann_box is None:
             continue
-        if crops_mod.boxes_overlap(page_box, ann_box):
+        if crops_mod.overlap_ratio_of(page_box, ann_box) >= crops_mod.HANDWRITING_OVERLAP_MIN:
             return str(ann.get("text"))
     return None
 

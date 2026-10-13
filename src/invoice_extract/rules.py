@@ -36,7 +36,9 @@ from typing import Any, Optional
 
 from src.invoice_extract import applicability as applicability_mod
 from src.invoice_extract import checks as checks_mod
+from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import direction as direction_mod
+from src.invoice_extract import normalisers as nz_mod
 from src.invoice_extract.doc_context import DocContext, RuleConfig
 from src.invoice_extract.rules_schema import (
     CHECK_FAIL,
@@ -510,6 +512,18 @@ def init_rules_v1(db_path=None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _box_of(row: dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
+    """``(x, y, w, h)`` from a stored row, or None when it has no usable box."""
+    values = [row.get(k) for k in ("x", "y", "w", "h")]
+    if any(value is None for value in values):
+        return None
+    try:
+        box = (float(values[0]), float(values[1]), float(values[2]), float(values[3]))
+    except (TypeError, ValueError):
+        return None
+    return None if box[2] <= 0 or box[3] <= 0 else box
+
+
 def get_review_model(
     document_id: int, *, order: str = "confidence", db_path=None,
 ) -> dict[str, Any]:
@@ -561,6 +575,7 @@ def get_review_model(
 
         cur = conn.execute(
             "SELECT f.field_key, f.status, f.value_a, f.value_b, f.reads_agree, f.field_id, "
+            "f.page, f.x, f.y, f.w, f.h, "
             "s.score, s.signals_json, s.caps_json, s.threshold_used, s.formula_version "
             "FROM invoice_doc_fields f "
             "LEFT JOIN invoice_doc_field_scores s ON s.field_id = f.field_id "
@@ -568,6 +583,15 @@ def get_review_model(
             (extraction_id,),
         )
         fields = {str(r["field_key"]): r for r in (_dict_row(cur, row) for row in cur.fetchall())}
+        # The handwritten figures on this document. They are never VALUES; they
+        # are the reason a value needs a person (a figure written over a printed
+        # amount), so the screen can name the figure instead of saying "flag".
+        cur = conn.execute(
+            "SELECT page, x, y, w, h, text_verbatim, kind_guess FROM invoice_doc_annotations "
+            "WHERE extraction_id = ?",
+            (extraction_id,),
+        )
+        annotations = [_dict_row(cur, row) for row in cur.fetchall()]
     finally:
         conn.close()
 
@@ -598,6 +622,36 @@ def get_review_model(
     # screen explains the number instead of asserting it. A field with a NULL
     # score has one BY RULE (never printed, or derived) and says so in its
     # signals.
+    def _handwriting_over(record: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """The handwritten figure written OVER this value, if there is one.
+
+        Same rule as the Phase-2 guard, read back from what was STORED: the
+        annotation must carry the same amount and cover at least
+        ``crops.HANDWRITING_OVERLAP_MIN`` of the value's own box. The guard's own
+        match was never persisted (``invoice_doc_fields`` has no such column), so
+        this re-derives it from the annotation, which IS stored.
+        """
+        value = record.get("value_a") or record.get("value_b")
+        target = nz_mod.normalise_number(value) if value is not None else None
+        if target is None:
+            return None
+        box = _box_of(record)
+        if box is None:
+            return None
+        for ann in annotations:
+            if nz_mod.normalise_number(ann.get("text_verbatim")) != target:
+                continue
+            ann_box = _box_of(ann)
+            if ann_box is None:
+                continue
+            if crops_mod.overlap_ratio_of(box, ann_box) >= crops_mod.HANDWRITING_OVERLAP_MIN:
+                return {
+                    "text": str(ann.get("text_verbatim")),
+                    "kind": str(ann.get("kind_guess") or "unknown"),
+                    "overlap": round(crops_mod.overlap_ratio_of(box, ann_box), 3),
+                }
+        return None
+
     def _field_view(key: str) -> dict[str, Any]:
         record = fields.get(key) or {}
         score = record.get("score")
@@ -609,11 +663,13 @@ def get_review_model(
             "value_b": record.get("value_b"),
             "status": record.get("status"),
             "reads_agree": record.get("reads_agree"),
+            "page": record.get("page"),
             "score": score,
             "threshold_used": record.get("threshold_used"),
             "formula_version": record.get("formula_version"),
             "signals": json.loads(record.get("signals_json") or "[]"),
             "caps": json.loads(record.get("caps_json") or "[]"),
+            "handwriting": _handwriting_over(record),
             "below_threshold": (
                 score is not None and record.get("threshold_used") is not None
                 and float(score) < float(record["threshold_used"])
