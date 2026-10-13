@@ -284,6 +284,26 @@ def invoice_files_view() -> rx.Component:
             "The v2 pipeline reads every page, groups them into documents, extracts each "
             "one, and asks you only about what it cannot settle.",
         ),
+        # Amendment 5: name the models on THIS screen, and warn when the two
+        # reads share a provider (agreement then proves less).
+        c.card(
+            rx.vstack(
+                rx.text(S.models_line, style=t.TEXT["micro"], font_weight="600"),
+                rx.cond(
+                    S.models_warning != "",
+                    rx.hstack(
+                        rx.icon("triangle-alert", size=12, color="#8A5A00"),
+                        rx.text(S.models_warning, style=t.TEXT["micro"], color="#8A5A00"),
+                        spacing="1",
+                        align="center",
+                    ),
+                    rx.fragment(),
+                ),
+                spacing="1",
+                width="100%",
+                align="start",
+            ),
+        ),
         rx.cond(S.flash != "", c.info_banner(S.flash), rx.fragment()),
         rx.cond(S.error != "", c.inline_reason(S.error), rx.fragment()),
         rx.cond(S.v2_reason != "", c.warning_banner(S.v2_reason), rx.fragment()),

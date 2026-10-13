@@ -29,7 +29,6 @@ from dataclasses import dataclass, field as dc_field
 
 import reflex as rx
 
-from src.auth import service as auth  # noqa: F401 — permission checks ride AuthState helpers
 from src.clients import service as clients
 from src.invoice_extract import confidence as confidence_mod
 from src.invoice_extract import doc_actions
@@ -267,6 +266,9 @@ class InvoiceReviewState(SharedUploadState):
     jobs: list[JobRow] = []
     poll_active: bool = False
     upload_error: str = ""
+    #: Amendment 5 — WHO reads the files, on the Files view itself.
+    models_line: str = ""
+    models_warning: str = ""
 
     # --- review screen ------------------------------------------------
     open_upload_id: int = 0
@@ -340,7 +342,42 @@ class InvoiceReviewState(SharedUploadState):
             for c in clients.list_clients(include_inactive=True)
         }
         self._read_flag()
+        self._load_models_line()
         self._load_jobs()
+
+    def _load_models_line(self) -> None:
+        """Which model reads the triage page, read A and read B — and a warning
+        when read A and read B are the SAME provider: the two reads exist to be
+        independent, and one provider means agreement proves less.
+        """
+        from src.ai_models import defaults as ai_defaults
+        from src.ai_models import service as ai_service
+
+        names = {
+            "invoice_triage": "triage",
+            "invoice_extraction_visual": "read A",
+            "invoice_extraction_verify": "read B",
+        }
+        parts: list[str] = []
+        providers: dict[str, str] = {}
+        for key in ai_defaults.VISION_SEED_TOUCHPOINTS:
+            try:
+                assignment = ai_service.get_assignment(key) or {}
+            except Exception:  # noqa: BLE001
+                assignment = {}
+            model = assignment.get("primary_model_id")
+            provider = assignment.get("primary_provider")
+            parts.append(f"{names.get(key, key)}: {model or 'not assigned yet'}")
+            if provider:
+                providers[key] = str(provider)
+        self.models_line = "Reading is done by — " + " · ".join(parts)
+        read_a = providers.get("invoice_extraction_visual")
+        read_b = providers.get("invoice_extraction_verify")
+        self.models_warning = (
+            f"Read A and read B are both {read_a} — the two reads are no longer "
+            "independent, so agreement between them proves less."
+            if read_a and read_a == read_b else ""
+        )
 
     def _read_flag(self) -> None:
         try:
