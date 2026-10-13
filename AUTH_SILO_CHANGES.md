@@ -271,11 +271,13 @@ so they can create the clients they own without widening a shared role.
   verify + upgrade, generic failure message, lockout after five failures,
   counter reset, forced change, reset revoking sessions, deactivation, idle
   expiry, logout, access-role derivation and demotion.
-- [`tests/test_client_silos.py`](tests/test_client_silos.py) — 24 tests: list and
+- [`tests/test_client_silos.py`](tests/test_client_silos.py) — 35 tests: list and
   count scoping, no widening via the Admin filter, fail-closed viewers, strict
   and render-path lookups, mutation refusal, filesystem view scoping,
   unregistered folders, child-record and document scoping, queue counts, session
-  ownership of new clients, and the required-`viewer` guard.
+  ownership of new clients, and the required-`viewer` guard. It also carries a
+  structural guard that walks the AST for every scoped call site by receiver and
+  name, so the review-round fixes cannot regress silently.
 - [`tests/test_clients_model.py`](tests/test_clients_model.py) — updated for the
   scoped signatures; its original assertions are unchanged.
 
@@ -352,11 +354,93 @@ and Filing.
 
 ---
 
-## 10. Status
+## 10. Running several users at once
 
-- Changes are **uncommitted and unpushed** on `phase-2` — 46 paths,
-  ~+1630/−265.
+The backend has no single-user bottleneck: `sessions` is keyed by token, not by
+user, and the viewer is re-derived from the token on every request. Three
+simultaneous sessions were verified end to end — three logins at once,
+interleaved requests staying on their own identity, three concurrent client
+creates with no errors, and the silo holding throughout (one user's roster
+stayed empty while another's held only their own client).
+
+**One browser, three users.** A browser has one cookie jar per *host*, and
+`setu_session` lives in it, so three tabs on the same host are one user: the
+second tab opens already signed in, and signing in as somebody else in one tab
+changes the identity of every tab the next time it reloads. To run three users
+side by side in one browser, give each a different host — cookies are scoped per
+host, not per port:
+
+| URL | Purpose |
+|---|---|
+| <http://localhost:3100> | user A |
+| <http://127.0.0.1:3100> | user B |
+| <http://u1.localhost:3100> | user C (any `*.localhost` alias resolves to 127.0.0.1) |
+
+Separate browser profiles, an incognito window or separate devices work equally
+well. `http://[::1]:3100` serves the frontend but the backend listens on IPv4
+only, so signing in there fails.
+
+**SQLite.** [`src/db.py`](src/db.py) now puts the database in **WAL** journal
+mode, so readers never wait on the single writer and a lingering reader can no
+longer make a writer fail at commit. This is hardening, not a repair of
+observed breakage: measured with three writers and three readers over 150
+statements on this codebase, both journal modes completed with **zero** errors,
+because the 5 s busy timeout already absorbed the serialisation. The gain is in
+the tail — WAL kept the slowest read at ~0.5 ms where the rollback journal
+reached 4–22 ms.
+
+WAL is recorded in the file header, so it is a one-off per database, and the
+pragma falls back silently where WAL is unavailable (read-only filesystem, no
+shared memory, network mounts). Set `SETU_SQLITE_JOURNAL=delete` to opt out.
+Verified: fresh databases are created in WAL, re-opening is idempotent,
+`integrity_check` is `ok`, `foreign_keys` stays on, and a value outside SQLite's
+own list of modes is ignored rather than interpolated into the pragma.
+
+---
+
+## 11. Status
+
+- All auth/silo work is **pushed to `origin/phase-2`**: `dfafdf2` ("Harden auth
+  and add per-user client data silos") — 54 paths, +4,435/−362 — followed by
+  `b090ae2` ("Add SQLite WAL mode for multi-user parallelism").
 - Local dev server runs at <http://localhost:3100> (backend 8100) with
-  `SETU_COOKIE_SECURE=0` so cookies work over plain http.
-- The deployed app (`setu-poc.fly.dev`) still runs the older build and does not
-  contain any of this.
+  `SETU_COOKIE_SECURE=0` so cookies work over plain http. Local database reports
+  `journal_mode = wal`.
+- **Pushing the branch did not deploy it.** The live app is a build of a
+  *different* branch: release v30, and its container has no `src/auth/access.py`
+  and no `scripts/seed_users.py`, while carrying files that are not on `phase-2`
+  (`scripts/go_live_local.sh`, `scripts/smoke_release.py`, `railway.toml`,
+  `verify_*.py`). Its database keeps the legacy `role_id` schema with PBKDF2
+  hashes.
+- Consequence: **the three standard users exist only in the local database.**
+  The live app authenticates `admin` alone.
+
+### 11.1 Which login works where
+
+| Environment | URL | Accounts that work |
+| --- | --- | --- |
+| Local | `http://localhost:3100` | `admin` plus `User1`, `User2`, `User3` (this machine's `SETU_USERn_PASSWORD` values) |
+| Live | <https://setu-poc.fly.dev/login> | `admin` only |
+
+Entering a standard-user ID on the live URL returns "Invalid ID or password" —
+correct behaviour for an account that does not exist there, not a throttle and
+not a wrong password. Deliberately no passwords appear in this document; if you
+have lost them, re-run `scripts/seed_users.py --reset-passwords` and stay
+signed in with the console that launched it.
+
+### 11.2 To make the three users real on Fly
+
+Requires deploying `phase-2` first, which **overwrites the current live build**,
+then running the scripts against the deployed volume:
+
+```bash
+flyctl deploy -a setu-poc                       # replaces v30
+flyctl ssh console -a setu-poc -C "python3 scripts/migrate_ownership.py"
+flyctl ssh console -a setu-poc -C \
+  "SETU_USER1_PASSWORD=… SETU_USER2_PASSWORD=… SETU_USER3_PASSWORD=… \
+   python3 scripts/seed_users.py --no-force-change"
+```
+
+Do not run this while another branch is mid-deploy on the same app, and rotate
+the live `admin` password: it is still set to the historical default that used
+to be seeded from source, so it must be treated as public knowledge.
