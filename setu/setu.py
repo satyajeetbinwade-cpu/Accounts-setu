@@ -31,6 +31,7 @@ from setu.state import (
     FilingState,
     IngestionAiState,
     InvoiceExtractState,
+    InvoiceReviewState,
     Module2State,
     Module8State,
     NewClientState,
@@ -139,6 +140,8 @@ for _route, _renderer in pages.all_routes():
         _on_load.append(ReportState.load)
     if _route == "/invoice-extraction":
         _on_load.append(InvoiceExtractState.load)
+        # The v2 flow (flag-gated): reads the setting, then the files list.
+        _on_load.append(InvoiceReviewState.load)
     if _route in ("/run", "/compare", "/config", "/export"):
         _on_load.append(Phase1State.load)
     if _route == "/review":

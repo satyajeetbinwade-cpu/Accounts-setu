@@ -87,6 +87,9 @@ STATUS_EXTRACTED = "extracted"      # all fields auto-accepted; awaiting Confirm
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_CONFIRMED = "confirmed"
 STATUS_EXPORTED = "exported"
+#: v2 uploads only: the row exists, the triage run has been queued. Status then
+#: comes from the triage run + the extraction rows, never this column.
+STATUS_QUEUED = "queued"
 
 
 class InvoiceExtractError(Exception):
@@ -329,6 +332,60 @@ def upload_invoice(
         "ai_error": ai_meta["ai_error"],
         "extraction_touchpoint": ai_meta.get("touchpoint") if ai_meta["ai_used"] else None,
         "coverage": coverage,
+    }
+
+
+def upload_invoice_v2(
+    *, client_id: int, filename: str, file_bytes: bytes, batch_id: Optional[str],
+    actor: str, db_path=None,
+) -> dict[str, Any]:
+    """Create the upload row for the v2 pipeline and QUEUE it.
+
+    No model call happens here: the upload is stored ``queued`` and the triage
+    run (with the extraction chained behind it) does the reading. The caller
+    polls ``review_api.get_upload_progress``. Gated by
+    ``invoice_extract.v2.enabled``.
+    """
+    from src.documents.service import ALLOWED_EXTENSIONS
+    from src.invoice_extract import extract as extract_mod
+    from src.invoice_extract import pipeline as pipeline_mod
+
+    extract_mod.require_enabled(db_path=db_path)
+    if not filename or "." not in filename:
+        raise InvoiceExtractError("File has no extension — can't validate its type.")
+    ext = filename.rsplit(".", 1)[-1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise InvoiceExtractError(
+            f"'.{ext}' isn't an accepted file type. Allowed: images (JPG/PNG), "
+            "documents (DOC/DOCX/PDF), spreadsheets (XLS/XLSX/CSV)."
+        )
+    source_format = extractor.source_format_for(filename)
+
+    conn = _connect(db_path)
+    try:
+        upload_id = idb.create_upload(
+            conn, client_id=client_id, filename=filename, file_ext=ext,
+            source_format=source_format, extraction_path="v2", batch_id=batch_id,
+            status=STATUS_QUEUED, duplicate_warning=False, actor=actor,
+            file_bytes=file_bytes,
+        )
+        idb.log_change(
+            conn, upload_id=upload_id, action="upload_queued_v2",
+            detail=f"{source_format}; queued for the v2 pipeline", actor=actor,
+        )
+    finally:
+        conn.close()
+
+    queued = pipeline_mod.start_v2_pipeline(upload_id, actor=actor, db_path=db_path)
+    return {
+        "upload_id": upload_id,
+        "client_id": client_id,
+        "filename": filename,
+        "source_format": source_format,
+        "extraction_path": "v2",
+        "status": STATUS_QUEUED,
+        "queued": True,
+        "run_id": queued.get("run_id"),
     }
 
 

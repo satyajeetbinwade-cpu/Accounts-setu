@@ -947,6 +947,37 @@ def upload_progress_row(
     )
 
 
+def _region_box(region) -> rx.Component:
+    """One region overlay row: a positioned box with an optional name chip.
+
+    Position, size AND colour all arrive in ``region.style``, baked by the
+    caller's state (these props are hoisted). This function only reads them.
+    """
+    return rx.box(
+        rx.cond(
+            region.label != "",
+            rx.text(
+                region.label,
+                style={
+                    "position": "absolute",
+                    "top": "-9px",
+                    "left": "0",
+                    "font_size": "10px",
+                    "font_weight": "700",
+                    "padding": "0 5px",
+                    "border_radius": "3px",
+                    "white_space": "nowrap",
+                    "background": t.Color.SURFACE.value,
+                    "color": t.Color.TEXT_SECONDARY.value,
+                    "border": f"1px solid {t.Color.BORDER.value}",
+                },
+            ),
+            rx.fragment(),
+        ),
+        style=region.style,
+    )
+
+
 def file_viewer_panel(
     *,
     title_var,
@@ -974,7 +1005,7 @@ def file_viewer_panel(
     highlight_page_var=1,
     highlight_row_index_var=-1,
     highlight_snippet_var="",
-    regions_var=(),
+    regions_var=None,
 ) -> rx.Component:
     """FileViewerPanel — the embedded in-app viewer for images and PDFs
     (page controls for multi-page), with a "download to view" fallback for
@@ -1000,7 +1031,8 @@ def file_viewer_panel(
     these props are hoisted (MemoizationLeaf) and a style built inside the loop
     could not read the row's state. The caller passes ONLY the current page's
     regions, so a document that spans pages shows the regions of the page on
-    screen. The default ``()`` renders nothing: the legacy viewer is untouched.
+    screen. ``None`` (the default) renders nothing at all: the legacy viewer is
+    untouched.
     """
     # Coerce the highlight/zoom defaults to Vars — callers that don't pass
     # them (F3 Documents) supply plain Python literals, which have no
@@ -1014,7 +1046,17 @@ def file_viewer_panel(
     highlight_row_index_var = rx.Var.create(highlight_row_index_var)
     highlight_snippet_var = rx.Var.create(highlight_snippet_var)
     zoom_var = rx.Var.create(zoom_var)
-    regions_var = rx.Var.create(regions_var)
+    # Regions are OPTIONAL at the Python level, not merely empty by default: a
+    # caller that passes none gets no foreach at all (an empty tuple would be an
+    # untyped var and cannot be iterated). Every legacy call site is unaffected.
+    regions_block = rx.fragment()
+    if regions_var is not None:
+        regions_var = rx.Var.create(regions_var)
+        regions_block = rx.cond(
+            regions_var.length() > 0,
+            rx.foreach(regions_var, _region_box),
+            rx.fragment(),
+        )
 
     header = rx.hstack(
         rx.icon("file-text", size=16, color=t.Color.ACCENT.value),
@@ -1088,41 +1130,12 @@ def file_viewer_panel(
                 ),
                 rx.fragment(),
             ),
-            # The document's regions, for the page on screen only. Each row
-            # carries its own baked style (see the docstring): active regions
-            # solid, the other documents' dimmed, excluded dashed. A label chip
-            # rides on the active region so the box says which document it is.
-            rx.cond(
-                regions_var.length() > 0,
-                rx.foreach(
-                    regions_var,
-                    lambda region: rx.box(
-                        rx.cond(
-                            region["label"] != "",
-                            rx.text(
-                                region["label"],
-                                style={
-                                    "position": "absolute",
-                                    "top": "-9px",
-                                    "left": "0",
-                                    "font_size": "10px",
-                                    "font_weight": "700",
-                                    "padding": "0 5px",
-                                    "border_radius": "3px",
-                                    "white_space": "nowrap",
-                                    "background": t.Color.SURFACE.value,
-                                    "color": t.Color.TEXT_SECONDARY.value,
-                                    "border": f"1px solid {t.Color.BORDER.value}",
-                                },
-                            ),
-                            rx.fragment(),
-                        ),
-                        style=region["style"],
-                    ),
-                ),
-                rx.fragment(),
-            ),
-            position="relative",
+    # The document's regions, for the page on screen only. Each row carries its
+    # own baked style (see the docstring): active regions solid, the other
+    # documents' dimmed, excluded dashed. A label chip rides on the active
+    # region so the box says which document it is.
+    regions_block,
+    position="relative",
             width="100%",
             style={
                 "transform": "scale(" + zoom_var.to_string() + ")",

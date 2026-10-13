@@ -20,6 +20,7 @@ from setu.state.filing_state import FilingState
 from setu.state.gst_tally_state import GstTallyState
 from setu.state.ingestion_ai_state import IngestionAiState
 from setu.state.invoice_extract_state import InvoiceExtractState
+from setu.state.invoice_review_state import InvoiceReviewState
 from setu.state.module2_state import Module2State
 from setu.state.navigation import NavState
 from setu.state.phase1_state import Phase1State
@@ -47,6 +48,7 @@ __all__ = [
     "GstTallyState",
     "IngestionAiState",
     "InvoiceExtractState",
+    "InvoiceReviewState",
     "Module2State",
     "NavState",
     "Phase1State",

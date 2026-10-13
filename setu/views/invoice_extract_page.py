@@ -12,7 +12,9 @@ import reflex as rx
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.invoice_extract_state import FORMAT_CHIPS, InvoiceExtractState
+from setu.state.invoice_review_state import InvoiceReviewState
 from setu.views import shell
+from setu.views.invoice_review_page import invoice_review_flow
 
 _ACCEPT = {
     "image/jpeg": [".jpg", ".jpeg"],
@@ -1207,6 +1209,19 @@ def _model_admin_section() -> rx.Component:
 
 
 def invoice_extract_page() -> rx.Component:
+    """THE single place the v2 flag is honoured.
+
+    On: the v2 flow (Files view → review screen). Off: ``_legacy_invoice_page``
+    exactly as it was — no other line of this module branches on the flag.
+    """
+    return rx.cond(
+        InvoiceReviewState.v2_enabled,
+        shell.shell(invoice_review_flow()),
+        _legacy_invoice_page(),
+    )
+
+
+def _legacy_invoice_page() -> rx.Component:
     return shell.shell(
         rx.vstack(
             c.page_header(
