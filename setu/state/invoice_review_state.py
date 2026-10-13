@@ -1050,7 +1050,13 @@ class InvoiceReviewState(SharedUploadState):
         card.implicated = [str(k) for k in (item.get("fields_implicated") or [])]
         card.implicated_labels = [_field_label(k) for k in card.implicated]
         if card.kind == "check_failed":
+            # A failed check's detail renders once, in its own branch; it must
+            # NOT also stand in for `reason`, or the same long sentence showed
+            # up three times in one card (reason + two detail renders).
+            card.reason = str(item.get("reason") or "")
             self._explain_check(card)
+        else:
+            card.reason = str(item.get("reason") or item.get("detail") or "")
         handwriting = item.get("handwriting") or None
         if handwriting:
             card.has_handwriting = True
@@ -1131,11 +1137,31 @@ class InvoiceReviewState(SharedUploadState):
         # "a check did not pass".
         card.title = str(row.get("label") or card.title or card.check_key)
         inputs = row.get("inputs") or {}
-        parts = [
-            f"{str(key).replace('_', ' ')}: {value}"
-            for key, value in inputs.items()
-        ]
-        card.figures = " · ".join(parts)
+        if card.check_key == "provenance_in_region":
+            # A plain sentence with readable field labels — NEVER the raw
+            # Python list the stored input carries. At most five names, then
+            # the count of the rest.
+            outside = [str(k) for k in (inputs.get("outside_regions") or [])]
+            total = inputs.get("valued_fields")
+            if outside and total is not None:
+                shown = ", ".join(_field_label(k) for k in outside[:5])
+                more = len(outside) - len(outside[:5])
+                card.figures = (
+                    f"{len(outside)} of {total} read value(s) were outside its region: "
+                    f"{shown}" + (f" (+{more} more)" if more else "")
+                )
+        else:
+            parts: list[str] = []
+            for key, value in inputs.items():
+                label = str(key).replace("_", " ")
+                if isinstance(value, (list, tuple)):
+                    items = [str(v) for v in value]
+                    shown = ", ".join(items[:5])
+                    more = len(items) - len(items[:5])
+                    parts.append(f"{label}: {shown}" + (f" (+{more} more)" if more else ""))
+                else:
+                    parts.append(f"{label}: {value}")
+            card.figures = " · ".join(parts)
         detail = str(row.get("detail") or card.detail or "")
         if card.figures and not any(ch.isdigit() for ch in detail):
             # The detail says what is wrong but not by how much — name the

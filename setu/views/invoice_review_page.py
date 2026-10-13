@@ -472,11 +472,6 @@ def _card_row(card) -> rx.Component:
                         rx.text(card.reason, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
                         rx.fragment(),
                     ),
-                    rx.cond(
-                        (card.kind == "check_failed") & (card.detail != ""),
-                        rx.text(card.detail, style=t.TEXT["micro"]),
-                        rx.fragment(),
-                    ),
                     spacing="1",
                     align="start",
                 ),

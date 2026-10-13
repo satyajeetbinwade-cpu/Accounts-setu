@@ -463,22 +463,34 @@ def _mentions_reverse_charge(ctx: DocContext) -> bool:
 
 
 def provenance_in_region(ctx: DocContext) -> CheckResult:
-    """Was every READ value boxed inside the document's own regions?
+    """Was the box of every READ value inside the document's own regions?
 
-    Looks at every field that HOLDS a value (status ``read`` or
-    ``out_of_region``): the point of the check is to surface the values whose
-    boxes fell outside the document, so it cannot restrict itself to the ones
-    Phase 2 happened to leave as ``read``.
+    Only fields that HOLD a value AND CARRY A BOX are judged. A field whose
+    reads returned no value was never read, and a value the model never boxed
+    has no box that can lie outside — neither is "boxed outside". Counting
+    them made this check fail on EVERY document (20+ phantom failures per
+    document on the live bundle, most of them for fields the invoice cannot
+    even have).
+
+    A value genuinely boxed outside its regions still fails, exactly as
+    before: its box is compared against the regions with the same overlap
+    rule.
     """
     with_values = [
         key for key, row in ctx.fields.items()
-        if row.get("status") in (fv2.STATUS_READ, fv2.STATUS_OUT_OF_REGION)
-        or (row.get("value_a") or row.get("value_b"))
+        if (row.get("value_a") or row.get("value_b"))
     ]
+    boxed = [key for key in with_values if row_has_box(ctx.fields[key])]
+    unboxed = [key for key in with_values if key not in boxed]
     if not with_values:
         return _na("provenance_in_region", "no value was read for this document")
-    outside = [key for key in with_values if not row_in_region(ctx.fields[key])]
-    inputs = {"valued_fields": len(with_values), "outside_regions": outside}
+    outside = [key for key in boxed if not row_in_region(ctx.fields[key])]
+    inputs = {
+        "valued_fields": len(with_values),
+        "boxed_fields": len(boxed),
+        "unboxed_fields": len(unboxed),
+        "outside_regions": outside,
+    }
     if outside:
         return CheckResult(
             "provenance_in_region", CHECK_FAIL,
@@ -486,14 +498,24 @@ def provenance_in_region(ctx: DocContext) -> CheckResult:
             + ", ".join(outside),
             inputs, tuple(outside),
         )
-    return CheckResult(
-        "provenance_in_region", CHECK_PASS,
-        f"all {len(with_values)} read value(s) sit inside the document's regions", inputs,
-    )
+    detail = f"all {len(boxed)} boxed read value(s) sit inside the document's regions"
+    if unboxed:
+        detail += f" ({len(unboxed)} read value(s) carry no box)"
+    return CheckResult("provenance_in_region", CHECK_PASS, detail, inputs)
 
 
 def row_in_region(row: dict[str, Any]) -> bool:
     return bool(row.get("in_region"))
+
+
+def row_has_box(row: dict[str, Any]) -> bool:
+    """Does the stored row carry a usable box?
+
+    Only a row WITH a box can be "boxed outside" (or inside) a region —
+    ``in_region`` is False for a boxless row too, so the box itself must be
+    checked before ``in_region`` is interpreted.
+    """
+    return all(row.get(k) is not None for k in ("x", "y", "w", "h"))
 
 
 # ---------------------------------------------------------------------------

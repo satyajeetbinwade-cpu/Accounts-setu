@@ -822,6 +822,9 @@ def extract_document(
             page_box, crop_used = _place(b, crop_list, fallback=crop_list[0])
             page = crop_used.region_page
 
+        # `in_region` is False both when the box lies outside every region AND
+        # when there is no box at all (the model returned none). Consumers
+        # must check the row's box (x) before reading False as "outside".
         in_region = (
             crops_mod.in_any_region(page_box, regions) if page_box is not None else False
         )
@@ -829,7 +832,13 @@ def extract_document(
         verdict = nz.compare(spec.kind, a.value_a if a else None, b.value_a if b else None)
 
         status = fv2.STATUS_NOT_PRINTED
-        if page_box is not None and not in_region:
+        if (a is None or a.value_a is None) and (b is None or b.value_a is None):
+            # Neither read returned a value: the field is NOT PRINTED, whatever
+            # the model's key list contains. A key present with a null value
+            # used to fall through to READ, which made the provenance check
+            # count valueless fields as read values "boxed outside".
+            status = fv2.STATUS_NOT_PRINTED
+        elif page_box is not None and not in_region:
             # The value was read, but its box lands outside every region of this
             # document: keep the value, flag where it came from.
             status = fv2.STATUS_OUT_OF_REGION

@@ -468,7 +468,13 @@ def score_field(facts: FieldFacts, config: ScoreConfig, *, known_state_codes=Non
             "gstin_checksum_invalid", w("invoice_extract.score.cap.gstin_invalid"),
             "the GSTIN's check character does not match its own first 14 characters",
         ))
-    if facts.status == fv2.STATUS_OUT_OF_REGION or not facts.in_region:
+    # The out-of-region cap fires only for a value that WAS boxed outside its
+    # regions (status out_of_region). `not facts.in_region` alone also matched
+    # a value the model never boxed at all — that capped its score while
+    # claiming "the value's box lies outside the document's own regions",
+    # which is false: there was no box to lie anywhere. It drove every
+    # unboxed value below the threshold and emptied the Settled list.
+    if facts.status == fv2.STATUS_OUT_OF_REGION:
         caps.append(Cap(
             "out_of_region", w("invoice_extract.score.cap.out_of_region"),
             "the value's box lies outside the document's own regions",
