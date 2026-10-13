@@ -121,21 +121,9 @@ def _login_card() -> rx.Component:
             reset_on_submit=False,
             width="100%",
         ),
-        # First-run hint
-        rx.box(
-            rx.text(
-                "First run? Default admin login is ",
-                rx.text.span("admin / ChangeMe123", font_weight="700"),
-                " — change this password immediately after signing in.",
-                font_size="12px",
-                color=t.Color.TEXT_SECONDARY.value,
-            ),
-            background="#EAF0FB",
-            border="1px solid #D4E1F8",
-            border_radius="10px",
-            padding="10px 14px",
-            width="100%",
-        ),
+        # No first-run credentials hint: a deployment's login page must not
+        # advertise a default password. The admin is created by the seed
+        # (src/auth/seed.py) and its password is printed by the go-live script.
         spacing="4",
         width="100%",
         max_width="380px",
