@@ -38,6 +38,9 @@ db/
 .env
 *.pem
 
+# ---- UI mockups / real client data — never commit ----
+mockups/
+
 # ---- Real client document bundles used as triage fixtures (PII) ----
 # The triage fixture PDF is a real client's bundle. It is NEVER committed;
 # read its path from the SETU_TRIAGE_FIXTURE_PDF environment variable instead.
