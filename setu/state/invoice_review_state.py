@@ -332,6 +332,8 @@ class InvoiceReviewState(SharedUploadState):
     regions_cache: dict = {}
     #: field_key -> {page, x, y, w, h} for EVERY field of the open document.
     field_boxes: dict = {}
+    #: The open document's raw check rows (detail + inputs), for the cards.
+    check_rows_raw: list[dict] = []
     batch_name: str = ""
     busy_label: str = ""
     #: Typed empties for the shared viewer's table props — the component
@@ -838,6 +840,8 @@ class InvoiceReviewState(SharedUploadState):
             )
             for chk in model.get("checks") or []
         ]
+        # The check rows, kept for the cards: the detail AND the inputs.
+        self.check_rows_raw = [dict(chk) for chk in model.get("checks") or []]
         for item in model.get("needs_you") or []:
             # The direction question has its own card (with the two answers and
             # the remember-the-name checkbox); it is not a value card.
@@ -931,6 +935,9 @@ class InvoiceReviewState(SharedUploadState):
         card.detail = str(item.get("detail") or "")
         card.check_key = str(item.get("check_key") or "")
         card.implicated = [str(k) for k in (item.get("fields_implicated") or [])]
+        card.implicated_labels = [_field_label(k) for k in card.implicated]
+        if card.kind == "check_failed":
+            self._explain_check(card)
         handwriting = item.get("handwriting") or None
         if handwriting:
             card.has_handwriting = True
@@ -987,6 +994,33 @@ class InvoiceReviewState(SharedUploadState):
         except Exception:  # noqa: BLE001
             return
         card.crop_src = "data:image/png;base64," + base64.b64encode(crop.png).decode("ascii")
+
+    def _explain_check(self, card: CardRow) -> None:
+        """A failed check, in plain words and with its OWN figures.
+
+        ``invoice_doc_checks`` stores the detail line AND the inputs the check
+        ran on. The detail is written by the check itself; where it does not
+        already carry the figures, they are named here from the stored inputs —
+        a reviewer must never have to guess which numbers disagreed.
+        """
+        row = next(
+            (c for c in self.check_rows_raw if str(c.get("check_key")) == card.check_key),
+            None,
+        )
+        if row is None:
+            return
+        inputs = row.get("inputs") or {}
+        parts = [
+            f"{str(key).replace('_', ' ')}: {value}"
+            for key, value in inputs.items()
+        ]
+        card.figures = " · ".join(parts)
+        detail = str(row.get("detail") or card.detail or "")
+        if card.figures and not any(ch.isdigit() for ch in detail):
+            # The detail says what is wrong but not by how much — name the
+            # figures in it rather than showing a bare sentence.
+            detail = f"{detail.rstrip('.')} — {card.figures}." if detail else card.figures
+        card.detail = detail
 
     def _value_row(self, item: dict) -> ValueRow:
         field_key = str(item["field_key"])

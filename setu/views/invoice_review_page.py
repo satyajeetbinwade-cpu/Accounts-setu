@@ -472,6 +472,11 @@ def _card_row(card) -> rx.Component:
                         rx.text(card.reason, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
                         rx.fragment(),
                     ),
+                    rx.cond(
+                        (card.kind == "check_failed") & (card.detail != ""),
+                        rx.text(card.detail, style=t.TEXT["micro"]),
+                        rx.fragment(),
+                    ),
                     spacing="1",
                     align="start",
                 ),
@@ -484,21 +489,74 @@ def _card_row(card) -> rx.Component:
             _handwriting_note(card),
             rx.cond(
                 card.kind == "check_failed",
-                rx.hstack(
-                    rx.button(
-                        "Accept the figures as read",
-                        on_click=lambda: S.confirm_card(card.field_key),
-                        size="1",
-                        variant="soft",
+                rx.vstack(
+                    rx.cond(
+                        card.detail != "",
+                        rx.text(
+                            card.detail,
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                            white_space="pre-wrap",
+                        ),
+                        rx.fragment(),
                     ),
-                    rx.button(
-                        "Mark not applicable here",
-                        on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
-                        size="1",
-                        variant="ghost",
+                    rx.cond(
+                        card.figures != "",
+                        rx.box(
+                            rx.text("The figures it compared", style=t.TEXT["micro"], font_weight="700"),
+                            rx.text(card.figures, style=t.TEXT["micro"]),
+                            padding="6px 8px",
+                            border=f"1px solid {t.Color.BORDER.value}",
+                            border_radius="8px",
+                            background=t.Color.SURFACE.value,
+                            width="100%",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        card.implicated_labels.length() > 0,
+                        rx.vstack(
+                            rx.text("The fields this is about", style=t.TEXT["micro"], font_weight="700"),
+                            rx.hstack(
+                                rx.foreach(
+                                    card.implicated_labels,
+                                    lambda label, index: rx.button(
+                                        label,
+                                        # Clicking goes to the field: its page,
+                                        # its box, a heavy outline in the viewer.
+                                        on_click=lambda: S.focus_field(card.implicated[index]),
+                                        size="1",
+                                        variant="soft",
+                                    ),
+                                ),
+                                spacing="2",
+                                wrap="wrap",
+                            ),
+                            spacing="1",
+                            align="start",
+                            width="100%",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.hstack(
+                        rx.button(
+                            "Accept the figures as read",
+                            on_click=lambda: S.confirm_card(card.field_key),
+                            size="1",
+                            variant="soft",
+                        ),
+                        rx.button(
+                            "Mark not applicable here",
+                            on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
+                            size="1",
+                            variant="ghost",
+                        ),
+                        spacing="2",
+                        wrap="wrap",
                     ),
                     spacing="2",
-                    wrap="wrap",
+                    width="100%",
+                    align="start",
                 ),
                 rx.vstack(
                     rx.input(
