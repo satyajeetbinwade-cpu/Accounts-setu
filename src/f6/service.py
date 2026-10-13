@@ -521,7 +521,7 @@ def confirm_mapping_proposal(
                 decided_by=actor,
             )
 
-        _audit_confirmation(run_id=run_id, version_id=version_id, actor=actor, promotion_scope=promotion_scope)
+        _audit_confirmation(run_id=run_id, version_id=version_id, actor=actor, promotion_scope=promotion_scope, db_path=db_path)
 
         return {
             "promoted": True, "status": "parsed", "validation": outcome.to_json(), "version_id": version_id,
@@ -592,7 +592,7 @@ def _promote(
     return new_version_id
 
 
-def _audit_confirmation(*, run_id: int, version_id: int, actor: str, promotion_scope: str) -> None:
+def _audit_confirmation(*, run_id: int, version_id: int, actor: str, promotion_scope: str, db_path=None) -> None:
     """F5 (audit trail — every mapping confirmation and format promotion
     is an audited event) — routed through F4's Universal Edit & Version
     History, which already exists in this repo."""
@@ -603,6 +603,7 @@ def _audit_confirmation(*, run_id: int, version_id: int, actor: str, promotion_s
             record_type="f6_format_version", record_id=version_id, field="promotion",
             old_value=None, new_value=f"promoted ({promotion_scope})",
             reason=f"Mapping confirmed for ingestion run {run_id}", actor=actor,
+            db_path=db_path,
         )
     except Exception:  # noqa: BLE001
         pass  # best-effort — an audit-log failure must never block a confirmed promotion
@@ -647,7 +648,8 @@ def quarantine_format_version(*, version_id: int, reason: str, actor: str, db_pa
 
             f4.record_edit(
                 record_type="f6_format_version", record_id=version_id, field="status",
-                old_value="active", new_value="quarantined", reason=reason.strip(), actor=actor,
+                old_value="active", new_value="quarantined", reason=reason.strip(),
+                actor=actor, db_path=db_path,
             )
         except Exception:  # noqa: BLE001
             pass

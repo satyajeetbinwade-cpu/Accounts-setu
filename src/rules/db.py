@@ -386,7 +386,15 @@ def log_change(
     client_id: Optional[int], field: str, old_value: Optional[str],
     new_value: Optional[str], changed_by: str, reason: Optional[str] = None,
     record_type: Optional[str] = None, record_id: Optional[str] = None,
+    db_path=None,
 ) -> None:
+    """Record a rules change as a REAL F4 Edit History entry.
+
+    ``db_path`` MUST be the database the caller is operating on. The F4 sink
+    opens its OWN connection, so omitting the path sends the audit entry to the
+    app default while the change itself goes to the caller's database — the
+    exact leak the isolation guard caught twice (ai_models, then here).
+    """
     from src.f4 import service as f4  # local import avoids a hard circular dep
 
     if record_type is None:
@@ -408,6 +416,7 @@ def log_change(
         record_type=record_type, record_id=record_id, client_id=client_id,
         field=field, old_value=old_value, new_value=new_value,
         reason=reason, actor=changed_by,
+        db_path=db_path,
     )
 
 

@@ -248,7 +248,7 @@ def create_role(name: str, description: str, *, actor: str, db_path=None) -> int
         if adb.get_role_by_name(conn, name) is not None:
             raise AuthError(f"A role named '{name}' already exists.")
         role_id = adb.create_role(conn, name, description)
-        adb.log_change(conn, "role", name, field="created", new_value=description, changed_by=actor)
+        adb.log_change(conn, "role", name, field="created", new_value=description, changed_by=actor, db_path=db_path)
         return role_id
     finally:
         conn.close()
@@ -262,8 +262,7 @@ def update_role(role_id: int, *, name: str, description: str, actor: str, db_pat
         adb.log_change(
             conn, "role", name, field="name/description",
             old_value=f"{before['name']} / {before['description']}" if before else None,
-            new_value=f"{name} / {description}", changed_by=actor,
-        )
+            new_value=f"{name} / {description}", changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -279,8 +278,7 @@ def set_role_active(role_id: int, is_active: bool, *, actor: str, db_path=None) 
         adb.log_change(
             conn, "role", role["name"] if role else str(role_id),
             field="is_active", old_value=str(not is_active), new_value=str(is_active),
-            changed_by=actor,
-        )
+            changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -306,7 +304,7 @@ def delete_role(role_id: int, *, actor: str, db_path=None) -> None:
             )
         role = adb.get_role(conn, role_id)
         adb.delete_role(conn, role_id)
-        adb.log_change(conn, "role", role["name"] if role else str(role_id), field="deleted", changed_by=actor)
+        adb.log_change(conn, "role", role["name"] if role else str(role_id), field="deleted", changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -325,8 +323,7 @@ def set_role_permissions(role_id: int, permission_ids: list[int], *, actor: str,
             field="permissions",
             old_value=", ".join(sorted(before)),
             new_value=", ".join(sorted(after_codes)),
-            changed_by=actor,
-        )
+            changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -377,7 +374,7 @@ def create_user(
             password=password, role_id=role_id,
             is_end_client=is_end_client, end_client_id=end_client_id,
         )
-        adb.log_change(conn, "user", username, field="created", changed_by=actor)
+        adb.log_change(conn, "user", username, field="created", changed_by=actor, db_path=db_path)
         return user_id
     finally:
         conn.close()
@@ -397,8 +394,7 @@ def update_user_role(user_id: int, new_role_id: int, *, actor: str, db_path=None
             conn, "user_role", user["username"] if user else str(user_id),
             field="role", old_value=old_role,
             new_value=new_role["name"] if new_role else str(new_role_id),
-            changed_by=actor,
-        )
+            changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -413,8 +409,7 @@ def set_user_active(user_id: int, is_active: bool, *, actor: str, db_path=None) 
         adb.log_change(
             conn, "user", user["username"] if user else str(user_id),
             field="is_active", old_value=str(not is_active), new_value=str(is_active),
-            changed_by=actor,
-        )
+            changed_by=actor, db_path=db_path)
         if not is_active:
             # Deactivation is a security-relevant event (surfaced in the
             # "Recent security events" panel — retrofit item 7).
@@ -438,8 +433,7 @@ def reset_user_password(user_id: int, new_password: str, *, actor: str, db_path=
         adb.set_user_password(conn, user_id, new_password)
         adb.log_change(
             conn, "user", user["username"] if user else str(user_id),
-            field="password", new_value="(reset)", changed_by=actor,
-        )
+            field="password", new_value="(reset)", changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -463,8 +457,7 @@ def set_user_override(
         adb.log_change(
             conn, "user_override", user["username"] if user else str(user_id),
             field=perm["code"] if perm else str(permission_id),
-            new_value=effect, reason=reason, changed_by=actor,
-        )
+            new_value=effect, reason=reason, changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 
@@ -476,8 +469,7 @@ def clear_user_override(user_id: int, permission_id: int, *, actor: str, db_path
         user = adb.get_user_by_id(conn, user_id)
         adb.log_change(
             conn, "user_override", user["username"] if user else str(user_id),
-            field=str(permission_id), new_value="(cleared)", changed_by=actor,
-        )
+            field=str(permission_id), new_value="(cleared)", changed_by=actor, db_path=db_path)
     finally:
         conn.close()
 

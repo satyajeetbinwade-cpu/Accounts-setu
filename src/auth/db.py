@@ -568,6 +568,7 @@ def log_change(
     new_value: Optional[str] = None,
     reason: Optional[str] = None,
     changed_by: str,
+    db_path=None,
 ) -> None:
     from src.f4 import service as f4  # local import avoids a hard circular dep
 
@@ -587,6 +588,7 @@ def log_change(
         new_value=new_value,
         reason=reason,
         actor=changed_by,
+        db_path=db_path,
     )
 
 

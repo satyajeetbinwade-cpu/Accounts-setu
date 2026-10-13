@@ -544,12 +544,14 @@ def assign_item(
             ("assignee", before_assignee, assignee),
             ("due_date", before_due, due_date),
         ], actor=actor, reason=reason,
+        db_path=db_path,
     )
     return get_flagged_item(item_ref, db_path=db_path) or item
 
 
 def _write_f4_edits(
     *, item: dict[str, Any], changes: list[tuple[str, Any, Any]], actor: str, reason: Optional[str],
+    db_path=None,
 ) -> None:
     """Write one F4 edit-history entry per actually-changed field. F4's
     record_type is generic ('flagged_item'); record_id is the item_ref; the
@@ -569,6 +571,7 @@ def _write_f4_edits(
                 reason=reason or f"Changed via Action Center ({item['source_module']}).",
                 actor=actor,
                 client_id=item.get("client_id"),
+                db_path=db_path,
             )
     except Exception:  # noqa: BLE001 — never break the action if F4 is unavailable
         pass

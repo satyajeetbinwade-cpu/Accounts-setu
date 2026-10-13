@@ -308,6 +308,7 @@ def edit_rule_value(
             conn, rule_id=rule["rule_id"], scope=scope, client_id=client_id,
             field="value", old_value=old_value, new_value=canonical,
             changed_by=actor, reason=reason.strip(),
+            db_path=db_path,
         )
         return version_id
     finally:
@@ -381,6 +382,7 @@ def rename_taxonomy_entry(entry_id: int, label: str, *, actor: str, db_path=None
         rdb.log_change(
             conn, rule_id=None, scope=None, client_id=None, field="taxonomy_label",
             old_value=entry["label"], new_value=label.strip(), changed_by=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -427,6 +429,7 @@ def delete_taxonomy_entry(entry_id: int, *, actor: str, db_path=None) -> None:
         rdb.log_change(
             conn, rule_id=None, scope=None, client_id=None, field="taxonomy_deleted",
             old_value=entry["code"] if entry else None, new_value=None, changed_by=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -481,6 +484,7 @@ def update_regulatory_rule(reg_rule_id: int, *, rate_or_rule: str, effective_fro
         rdb.log_change(
             conn, rule_id=None, scope=None, client_id=None, field="regulatory_rate",
             old_value=before["rate_or_rule"], new_value=rate_or_rule, changed_by=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -493,6 +497,7 @@ def mark_regulatory_rule_reviewed(reg_rule_id: int, *, actor: str, db_path=None)
         rdb.log_change(
             conn, rule_id=None, scope=None, client_id=None, field="regulatory_reviewed",
             old_value=None, new_value=_today(), changed_by=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -525,6 +530,7 @@ def update_statutory_due_date(
         rdb.log_change(
             conn, rule_id=None, scope=None, client_id=None, field="statutory_due_date",
             old_value=None, new_value=obligation, changed_by=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
