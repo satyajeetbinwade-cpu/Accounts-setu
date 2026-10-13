@@ -430,29 +430,22 @@ def _handwriting_note(card) -> rx.Component:
 
 
 def _crop(card) -> rx.Component:
-    """The value's own region, cropped out of the page image."""
+    """The field's own box, cropped out of the upright page (server-side)."""
     return rx.cond(
         card.crop_src != "",
         rx.box(
-            rx.box(
-                rx.image(
-                    src=card.crop_src,
-                    position="absolute",
-                    left=card.crop_left,
-                    top=card.crop_top,
-                    width=card.crop_img_w,
-                    height=card.crop_img_h,
-                ),
-                position="relative",
-                overflow="hidden",
-                width=card.crop_frame_w,
-                height=card.crop_frame_h,
+            rx.image(
+                src=card.crop_src,
+                max_height="86px",
+                width="auto",
                 border=f"1px solid {t.Color.BORDER.value}",
                 border_radius="6px",
                 background=t.Color.SURFACE.value,
-                flex_shrink="0",
             ),
             flex_shrink="0",
+            on_click=lambda: S.focus_field(card.field_key),
+            cursor="pointer",
+            title="crop of this field on the page",
         ),
         rx.fragment(),
     )
@@ -511,7 +504,8 @@ def _card_row(card) -> rx.Component:
                     rx.input(
                         placeholder="The printed value",
                         value=S.field_inputs[card.field_key],
-                        on_change=lambda v: S.set_field_input(card.field_key, v),
+                        on_change=lambda v: S.set_field_input(v, card.field_key),
+                        on_focus=lambda: S.focus_field(card.field_key),
                         size="2",
                         width="100%",
                     ),

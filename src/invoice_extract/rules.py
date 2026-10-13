@@ -785,6 +785,39 @@ def get_review_model(
     }
 
 
+def field_boxes(document_id: int, *, db_path=None) -> dict[str, dict[str, Any]]:
+    """The stored page box of every field of the document's active extraction.
+
+    The review model carries a box only for the items that need a person. The
+    screen also has to point at the box of a field a FAILED CHECK named, and at
+    the box of a settled field — both are ordinary rows, so their boxes come
+    from here.
+    """
+    conn = _connect(db_path)
+    try:
+        extraction_id = _active_extraction_id(conn, document_id)
+        if extraction_id is None:
+            return {}
+        cur = conn.execute(
+            "SELECT field_key, page, x, y, w, h FROM invoice_doc_fields "
+            "WHERE extraction_id = ?",
+            (extraction_id,),
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for row in cur.fetchall():
+            record = _dict_row(cur, row)
+            box = _box_of(record)
+            if box is None or record.get("page") is None:
+                continue
+            out[str(record["field_key"])] = {
+                "page": int(record["page"]),
+                "x": box[0], "y": box[1], "w": box[2], "h": box[3],
+            }
+        return out
+    finally:
+        conn.close()
+
+
 def _is_below_threshold(record: dict[str, Any]) -> bool:
     """Is this field's score below the threshold in force when it was scored?
 

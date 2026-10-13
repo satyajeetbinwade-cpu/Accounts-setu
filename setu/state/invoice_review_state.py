@@ -31,6 +31,7 @@ import reflex as rx
 
 from src.clients import service as clients
 from src.invoice_extract import confidence as confidence_mod
+from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import doc_actions
 from src.invoice_extract import extract as extract_mod
 from src.invoice_extract import fields_v2 as fv2
@@ -138,20 +139,14 @@ class CardRow:
     detail: str = ""
     check_key: str = ""
     implicated: list[str] = dc_field(default_factory=list)
+    implicated_labels: list[str] = dc_field(default_factory=list)
+    figures: str = ""
     page: int = 0
     handwriting_text: str = ""
     has_handwriting: bool = False
-    has_box: bool = False
-    # The crop of the value's own region: the page image, positioned so the
-    # region fills a small fixed-height frame. Plain px maths — no CSS crop
-    # arithmetic, so a wide or tall region can never come out mirrored.
+    #: The field's own box, cropped out of the upright page with padding —
+    #: a real crop, not the whole page positioned by CSS.
     crop_src: str = ""
-    crop_frame_w: str = "0px"
-    crop_frame_h: str = "0px"
-    crop_img_w: str = "0px"
-    crop_img_h: str = "0px"
-    crop_left: str = "0px"
-    crop_top: str = "0px"
 
 
 @dataclass
@@ -207,8 +202,9 @@ def _pct(value: float) -> str:
     return f"{value * 100:.4f}%"
 
 
-def _px(value: float) -> str:
-    return f"{value:.2f}px"
+#: Upright page renders, keyed (upload_id, page). PIL images — process-local,
+#: deliberately NOT a state field (state fields must be serialisable).
+_RENDER_CACHE: dict = {}
 
 
 def _field_label(key: str) -> str:
@@ -223,6 +219,19 @@ def _field_label(key: str) -> str:
 
 def _box_style(state: str) -> dict:
     """The baked style for one overlay box, by state."""
+    if state == "focused":
+        # The box of the field the card on the right is about. Heavier than
+        # "active" and lifted above it, so "which box is this card about?"
+        # never needs asking.
+        return {
+            "position": "absolute",
+            "border": f"3px solid {t.Color.ACCENT.value}",
+            "box_shadow": "0 0 0 3px rgba(59, 111, 219, 0.28)",
+            "background": "rgba(59, 111, 219, 0.10)",
+            "border_radius": "4px",
+            "pointer_events": "none",
+            "z_index": "4",
+        }
     if state == "active":
         return {
             "position": "absolute",
@@ -310,6 +319,8 @@ class InvoiceReviewState(SharedUploadState):
     refusal: str = ""
     flash: str = ""
     error: str = ""
+    #: Which card on the right the viewer's heavy box belongs to.
+    focused_field_key: str = ""
 
     # --- viewer -------------------------------------------------------
     view_page: int = 1
@@ -319,6 +330,8 @@ class InvoiceReviewState(SharedUploadState):
     page_srcs: dict[str, str] = {}
     page_info_rows: list[dict] = []
     regions_cache: dict = {}
+    #: field_key -> {page, x, y, w, h} for EVERY field of the open document.
+    field_boxes: dict = {}
     batch_name: str = ""
     busy_label: str = ""
     #: Typed empties for the shared viewer's table props — the component
@@ -808,6 +821,7 @@ class InvoiceReviewState(SharedUploadState):
         self.doc_label = doc.label
         self.doc_category = doc.category
         self.doc_category_label = doc.category_label
+        self._load_field_boxes()
         direction = model.get("direction") or {}
         self._set_direction(direction, model)
         self.page_tag = self._page_tag(doc)
@@ -847,6 +861,14 @@ class InvoiceReviewState(SharedUploadState):
                 tag="derived",
             ))
         self.can_mark_reviewed = not self.cards and not doc.excluded
+        # The first thing that needs a person is focused: its box is the heavy
+        # one in the viewer, so the card and the page agree from the start. A
+        # card whose value was never extracted has no box, so the first card
+        # that HAS one wins.
+        self.focused_field_key = next(
+            (c.field_key for c in self.cards if c.field_key in self.field_boxes),
+            self.cards[0].field_key if self.cards else "",
+        )
         self._load_viewer()
 
     def _set_direction(self, direction: dict, model: dict) -> None:
@@ -913,38 +935,58 @@ class InvoiceReviewState(SharedUploadState):
         if handwriting:
             card.has_handwriting = True
             card.handwriting_text = str(handwriting.get("text") or "")
-        card.has_box = item.get("w") is not None
-        if card.has_box:
-            self._crop(card, item)
+        # The box comes from the FIELD's own row: the review model carries one
+        # only for the items that need a person, and a below-threshold item
+        # carries none at all.
+        box = self.field_boxes.get(field_key) if field_key else None
+        if box is not None:
+            card.page = int(box.get("page") or card.page or 0)
+            self._crop(card, box)
         return card
 
-    def _crop(self, card: CardRow, item: dict) -> None:
-        """A small crop of the value's own region, from the page image."""
-        src = self._page_src(card.page)
-        card.crop_src = src
-        info = next(
-            (p for p in self.page_info_rows if int(p.get("page") or 0) == card.page), None,
+    def _page_render(self, page: int):
+        """The upright page render, cached per (upload, page).
+
+        The renders are PIL images, so they live in a module-level cache — a
+        state field must be serialisable, and a render never leaves the process.
+        """
+        key = (self.open_upload_id, int(page))
+        if key in _RENDER_CACHE:
+            return _RENDER_CACHE[key]
+        rendered = None
+        try:
+            data = ie.get_upload_bytes(self.open_upload_id) or b""
+            upload = ie.get_upload(self.open_upload_id) or {}
+            rendered = crops_mod.render_upright_page(
+                data, str(upload.get("source_format") or "pdf"), int(page),
+                dpi=review_api.DEFAULT_PAGE_DPI,
+            )
+        except Exception:  # noqa: BLE001 — no crop is better than a broken screen
+            rendered = None
+        _RENDER_CACHE[key] = rendered
+        return rendered
+
+    def _crop(self, card: CardRow, box: dict) -> None:
+        """The field's OWN box, cropped out of the upright page WITH padding.
+
+        Built when the document loads (never on the render path) and only for
+        the cards that carry a box. ``crop_region`` caps the long edge, so a
+        full-page A4 region does not become a megabyte of data URI.
+        """
+        crop_box = (
+            float(box.get("x") or 0.0), float(box.get("y") or 0.0),
+            float(box.get("w") or 0.0), float(box.get("h") or 0.0),
         )
-        width = float((info or {}).get("width") or 0.0)
-        height = float((info or {}).get("height") or 0.0)
-        if not src or not info or width <= 0 or height <= 0:
-            card.crop_src = ""
+        if crop_box[2] <= 0 or crop_box[3] <= 0:
             return
-        box_x = float(item.get("x") or 0.0)
-        box_y = float(item.get("y") or 0.0)
-        box_w = max(float(item.get("w") or 0.0), 0.01)
-        box_h = max(float(item.get("h") or 0.0), 0.01)
-        # Frame: fixed height, width from the region's true aspect.
-        frame_h = 76.0
-        frame_w = frame_h * (box_w * width) / (box_h * height)
-        displayed_w = frame_w / box_w
-        displayed_h = displayed_w * height / width
-        card.crop_frame_w = _px(frame_w)
-        card.crop_frame_h = _px(frame_h)
-        card.crop_img_w = _px(displayed_w)
-        card.crop_img_h = _px(displayed_h)
-        card.crop_left = _px(-box_x * displayed_w)
-        card.crop_top = _px(-box_y * displayed_h)
+        rendered = self._page_render(int(box.get("page") or 1))
+        if rendered is None:
+            return
+        try:
+            crop = crops_mod.crop_region(rendered, crop_box, region_index=1, max_edge_px=520)
+        except Exception:  # noqa: BLE001
+            return
+        card.crop_src = "data:image/png;base64," + base64.b64encode(crop.png).decode("ascii")
 
     def _value_row(self, item: dict) -> ValueRow:
         field_key = str(item["field_key"])
@@ -1029,16 +1071,25 @@ class InvoiceReviewState(SharedUploadState):
             state = "excluded" if doc.excluded else (
                 "active" if doc.document_id == self.current_document_id else "dimmed"
             )
-            for region in self._regions_of(doc):
+            regions = self._regions_of(doc)
+            for index, region in enumerate(self._regions_of(doc), start=1):
                 if int(region["page"]) != page:
                     continue
                 box_x = float(region["x"])
                 box_y = float(region["y"])
                 box_w = float(region["w"])
                 box_h = float(region["h"])
+                # A document with several regions names them, so "which box is
+                # this?" has an answer on the box itself.
+                label = ""
+                if doc.document_id == self.current_document_id:
+                    label = (
+                        f"Region {index} of {len(regions)} — Document #{doc.ordinal}"
+                        if len(regions) > 1 else f"Document #{doc.ordinal}"
+                    )
                 boxes.append(RegionBox(
                     page=page, x=box_x, y=box_y, w=box_w, h=box_h,
-                    label=f"Document #{doc.ordinal}" if doc.document_id == self.current_document_id else "",
+                    label=label,
                     state=state,
                     style={
                         **_box_style(state),
@@ -1048,7 +1099,60 @@ class InvoiceReviewState(SharedUploadState):
                         "height": _pct(box_h),
                     },
                 ))
+        # The focused card's own field box, drawn on top of the document boxes.
+        focus = self._focused_box(page)
+        if focus is not None:
+            box_x, box_y, box_w, box_h, label = focus
+            boxes.append(RegionBox(
+                page=page, x=box_x, y=box_y, w=box_w, h=box_h, label=label,
+                state="focused",
+                style={
+                    **_box_style("focused"),
+                    "left": _pct(box_x),
+                    "top": _pct(box_y),
+                    "width": _pct(box_w),
+                    "height": _pct(box_h),
+                },
+            ))
         return boxes
+
+    def _focused_box(self, page: int):
+        """(x, y, w, h, label) of the focused card's field box on this page."""
+        if not self.focused_field_key:
+            return None
+        for card in self.cards:
+            if card.field_key != self.focused_field_key or card.page != page:
+                continue
+            box = self.field_boxes.get(card.field_key) or None
+            if box is None:
+                return None
+            return (
+                float(box["x"]), float(box["y"]), float(box["w"]), float(box["h"]),
+                f"{card.label} — the card you are on",
+            )
+        return None
+
+    def _load_field_boxes(self) -> None:
+        """Every field's stored page box, so a card can point at the page.
+
+        The review model carries boxes only for the items that need a person;
+        the viewer has to highlight the box of ANY field a card is about, and
+        of the fields a failed check implicates.
+        """
+        try:
+            self.field_boxes = rules_mod.field_boxes(self.current_document_id)
+        except Exception:  # noqa: BLE001
+            self.field_boxes = {}
+
+    @rx.event
+    def focus_field(self, field_key: str):
+        """Point the viewer at a field: switch to its page and box it."""
+        self.focused_field_key = field_key
+        box = self.field_boxes.get(field_key) or {}
+        page = int(box.get("page") or 0)
+        if page:
+            self.view_page = page
+        self._show_view_page()
 
     def _regions_of(self, doc: DocRow) -> list[dict]:
         key = str(doc.document_id)
@@ -1135,7 +1239,9 @@ class InvoiceReviewState(SharedUploadState):
             return False
 
     @rx.event
-    def set_field_input(self, field_key: str, value: str):
+    def set_field_input(self, value: str, field_key: str):
+        """The card inputs bind as ``on_change={value}`` — Reflex supplies the
+        value first, so the key rides as a partial argument."""
         self.field_inputs = {**self.field_inputs, field_key: value}
 
     @rx.event
