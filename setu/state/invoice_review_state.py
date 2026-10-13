@@ -842,10 +842,22 @@ class InvoiceReviewState(SharedUploadState):
         ]
         # The check rows, kept for the cards: the detail AND the inputs.
         self.check_rows_raw = [dict(chk) for chk in model.get("checks") or []]
+        # GROUP BY CAUSE. A failed check that implicates fields speaks for them:
+        # one card titled with the cause, listing the fields it is about, is the
+        # honest shape — a reviewer acts on the cause, not on five symptoms.
+        grouped: set[str] = set()
         for item in model.get("needs_you") or []:
+            if str(item.get("kind")) == "check_failed":
+                grouped.update(str(k) for k in (item.get("fields_implicated") or []))
+        for item in model.get("needs_you") or []:
+            kind = str(item.get("kind") or "")
             # The direction question has its own card (with the two answers and
             # the remember-the-name checkbox); it is not a value card.
-            if str(item.get("kind")) == "direction_unsettled":
+            if kind == "direction_unsettled":
+                continue
+            if kind in ("missing_required", "below_threshold") and (
+                str(item.get("field_key") or "") in grouped
+            ):
                 continue
             self.cards.append(self._card(item, doc))
         for item in model.get("settled") or []:
@@ -1009,6 +1021,9 @@ class InvoiceReviewState(SharedUploadState):
         )
         if row is None:
             return
+        # The card is titled with the CAUSE (the check's own label), not with
+        # "a check did not pass".
+        card.title = str(row.get("label") or card.title or card.check_key)
         inputs = row.get("inputs") or {}
         parts = [
             f"{str(key).replace('_', ' ')}: {value}"
