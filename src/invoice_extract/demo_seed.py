@@ -318,26 +318,28 @@ def _make_documents(conn, upload_id: int, run_id: int, by_tag: dict, *, actor: s
             _fill_fields(conn, extraction_id, document_id, spec, source, pages, ordinal=ordinal)
             handwritten = list(source.get("handwritten_amounts") or [])
             if handwritten:
-                # The page has a figure written by hand. Flag the monetary field
-                # it overlaps as `needs_printed` — the state amendment 3's
-                # decision-card wording is for. NOTE: the guard's own `guard_hit`
-                # is NOT persisted (invoice_doc_fields has no such column); the
-                # annotation itself is, and that is what the screen shows.
+                # The page has a figure written by hand. In the real case it is
+                # written OVER the printed value, so the value's box and the
+                # annotation's box coincide — that is what makes the guard (and
+                # the screen's re-derivation of it) fire. NOTE: the guard's own
+                # `guard_hit` is NOT persisted (invoice_doc_fields has no such
+                # column); the annotation is, and that is what the screen shows.
+                page, rx_, ry, rw, rh = spec["regions"][0]
+                ann_box = (rx_ + rw * 0.10, ry + rh * 0.45, rw * 0.30, rh * 0.06)
                 conn.execute(
-                    "UPDATE invoice_doc_fields SET status = ? "
+                    "UPDATE invoice_doc_fields SET status = ?, page = ?, "
+                    "x = ?, y = ?, w = ?, h = ?, in_region = 1 "
                     "WHERE extraction_id = ? AND field_key = 'line.1.amount'",
-                    (fv2.STATUS_NEEDS_PRINTED, extraction_id),
+                    (fv2.STATUS_NEEDS_PRINTED, page, ann_box[0], ann_box[1],
+                     ann_box[2], ann_box[3], extraction_id),
                 )
-            for annotation in handwritten:
-                page = pages[0]
-                # Annotated ON the first region, so the handwriting guard's
-                # "written over the value" case is visible on the demo page.
-                _page, x, y, w, h = spec["regions"][0]
-                extract_mod._insert_annotation(
-                    conn, extraction_id=extraction_id, document_id=document_id,
-                    ann={"text": annotation, "kind_guess": "payment", "page": page,
-                         "x": x + w * 0.55, "y": y + h * 0.5, "w": w * 0.3, "h": 0.03},
-                )
+                for annotation in handwritten:
+                    extract_mod._insert_annotation(
+                        conn, extraction_id=extraction_id, document_id=document_id,
+                        ann={"text": annotation, "kind_guess": "payment", "page": page,
+                             "x": ann_box[0], "y": ann_box[1], "w": ann_box[2],
+                             "h": ann_box[3]},
+                    )
         made.append({
             "document_id": document_id, "ordinal": ordinal, "category": spec["category"],
             "label": spec["label"], "pages": pages, "extraction_id": extraction_id,
