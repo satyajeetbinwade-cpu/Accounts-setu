@@ -608,6 +608,10 @@ def get_review_model(
         if not has_value:
             missing.append({
                 "field_key": key,
+                # The ROW a decision is logged against: a screen taking a
+                # "not printed" decision needs the field row's id, and a missing
+                # value still has one.
+                "field_id": (record or {}).get("field_id"),
                 "status": (record or {}).get("status") or "not_extracted",
                 "reason": next(
                     (r["reason"] for r in level_rows if r["field_key"] == key), "",
@@ -810,6 +814,7 @@ def field_boxes(document_id: int, *, db_path=None) -> dict[str, dict[str, Any]]:
             if box is None or record.get("page") is None:
                 continue
             out[str(record["field_key"])] = {
+                "field_id": record.get("field_id"),
                 "page": int(record["page"]),
                 "x": box[0], "y": box[1], "w": box[2], "h": box[3],
             }

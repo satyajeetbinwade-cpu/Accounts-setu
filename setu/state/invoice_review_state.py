@@ -1014,6 +1014,11 @@ class InvoiceReviewState(SharedUploadState):
         if box is not None:
             card.page = int(box.get("page") or card.page or 0)
             self._crop(card, box)
+        if not card.field_id and card.implicated:
+            # A cause card has no field row of its own: the decision is logged
+            # against the first field it names.
+            first = self.field_boxes.get(card.implicated[0]) or {}
+            card.field_id = int(first.get("field_id") or 0)
         return card
 
     def _page_render(self, page: int):
