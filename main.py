@@ -17,7 +17,7 @@ from src.config_loader import load_config
 
 
 def main() -> None:
-    bootstrap.run_migrations()
+    bootstrap.run_migrations(allow_real_db=True)
     config = load_config()
 
     # Verify both tables exist.

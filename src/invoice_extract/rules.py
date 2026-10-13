@@ -1073,9 +1073,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("cmd", choices=["show"], help="show the review model for a document")
     parser.add_argument("document_id", type=int)
     parser.add_argument("--db", default=None, help="database path (default: the app database)")
+    parser.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
     parser.add_argument("--rerun", action="store_true", help="recompute the rules before showing")
     parser.add_argument("--json", action="store_true", help="print the whole model as JSON")
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    from src import db as _db
+    _db.require_real_db_allowed(
+        getattr(args, "db", None), allow_real_db=getattr(args, "allow_real_db", False),
+    )
 
     try:
         if args.rerun:

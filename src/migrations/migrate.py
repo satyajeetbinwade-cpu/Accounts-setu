@@ -108,11 +108,20 @@ def run(
     *,
     dry_run: bool = False,
     backup: bool = True,
+    allow_real_db: bool = False,
 ) -> dict:
     """Run (or plan) the migration. Returns the report dict.
 
     Idempotent: a second ``--apply`` on an already-migrated DB changes nothing.
+
+    Refuses to touch the repository's own ``db/poc.db`` unless the caller says
+    ``allow_real_db=True``. Every path through here writes something — including
+    the planner's edit-history rows, which is exactly how 52 rows once landed in
+    the real database from a test run.
     """
+    from src import db as _db
+
+    _db.require_real_db_allowed(db_path, allow_real_db=allow_real_db)
     from src.data_paths import DATA_ROOT
     from src import db as recon_db
 

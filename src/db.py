@@ -20,6 +20,36 @@ from typing import Any, Optional
 #: compare against, so it must not follow an override.
 REPO_DB_PATH = Path(__file__).resolve().parent.parent / "db" / "poc.db"
 
+
+def path_is_repo_db(db_path=None) -> bool:
+    """Is this path the repository's own database?"""
+    target = Path(db_path) if db_path else Path(DB_PATH)
+    try:
+        return target.expanduser().resolve() == Path(REPO_DB_PATH).expanduser().resolve()
+    except OSError:  # pragma: no cover - unresolvable path is not the repo db
+        return False
+
+
+def require_real_db_allowed(db_path=None, *, allow_real_db: bool = False) -> None:
+    """Refuse to WRITE the repository's own database unless the caller says so.
+
+    THE guard for this whole class of accident: a test, a tool or a stray CLI
+    run must not write ``db/poc.db`` by simply not passing ``--db``. Callers that
+    really mean it — the boot path, ``python main.py --migrate``, and a person on
+    purpose — pass ``allow_real_db=True`` (CLI: ``--allow-real-db``).
+
+    Writing means ANY row, including the migration planner's own edit-history
+    rows: those were what silently landed in the real database once already.
+    """
+    if allow_real_db:
+        return
+    if path_is_repo_db(db_path):
+        raise RuntimeError(
+            f"{Path(db_path) if db_path else Path(DB_PATH)} is the repository's own "
+            "database. Refusing to write it — pass an explicit database (--db) or "
+            "allow_real_db=True / --allow-real-db if that is genuinely what you want."
+        )
+
 #: ``SETU_DB_PATH`` points the whole app at a COPY of the database. Used by a
 #: local scratch run (and by the screenshot harness) so nothing can touch the
 #: real db/poc.db. The DEFAULT is unchanged: with the variable unset.

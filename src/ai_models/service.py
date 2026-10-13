@@ -389,6 +389,7 @@ def set_assignment_active(touchpoint_key: str, *, is_active: bool, actor: str, d
             conn, touchpoint_key=touchpoint_key,
             action="touchpoint_activated" if is_active else "touchpoint_deactivated",
             detail=f"is_active -> {bool(is_active)}", actor=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -538,6 +539,7 @@ def set_provider_key(provider_key: str, secret: str, *, actor: str, db_path=None
         adb.log_change(
             conn, touchpoint_key=None, action="provider_key_set",
             detail=f"An API key was stored for {spec.label}", actor=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -572,6 +574,7 @@ def replace_provider_key(provider_key: str, secret: str, *, actor: str, db_path=
         adb.log_change(
             conn, touchpoint_key=None, action="provider_key_replaced",
             detail=f"The API key for {spec.label} was replaced", actor=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()
@@ -701,6 +704,7 @@ def refresh_provider_catalog(provider_key: str, *, actor: str, db_path=None) -> 
         adb.log_change(
             conn, touchpoint_key=None, action="provider_catalog_refreshed",
             detail=f"{len(models)} model(s) loaded for {spec.label}", actor=actor,
+            db_path=db_path,
         )
     finally:
         conn.close()

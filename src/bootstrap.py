@@ -159,6 +159,7 @@ def run_migrations(
     data_root: Path | str | None | object = _SCOPE_DATA_ROOT,
     backup: bool = True,
     dry_run: bool = False,
+    allow_real_db: bool = False,
 ) -> dict:
     """EXPLICIT entry point: create every schema, seed defaults, then migrate.
 
@@ -207,6 +208,7 @@ def run_migrations(
             data_root=data_root,
             dry_run=dry_run,
             backup=backup,
+            allow_real_db=allow_real_db,
         )
         if report.get("mode") == "apply":
             # Report next to the DB that was migrated, never the repo default.

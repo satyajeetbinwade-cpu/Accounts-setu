@@ -2547,6 +2547,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_p = sub.add_parser("run", help="run triage on an existing upload")
     run_p.add_argument("upload_id", type=int)
     run_p.add_argument("--db", default=None, help="database path (default: the app DB)")
+    run_p.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
 
     score_p = sub.add_parser("score", help="score one or more models against a PDF (uses DB COPIES)")
     score_p.add_argument("pdf")
@@ -2584,6 +2585,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    from src import db as _db
+    _db.require_real_db_allowed(
+        getattr(args, "db", None), allow_real_db=getattr(args, "allow_real_db", False),
+    )
     try:
         if args.cmd == "run":
             return _cmd_run(args.upload_id, db_path=args.db)

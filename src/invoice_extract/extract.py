@@ -2196,12 +2196,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     score_p.add_argument("pdf")
     score_p.add_argument("--db", default=None, help="database to COPY (default: the app database)")
+    score_p.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
     score_p.add_argument("--out", default=None, help="report directory")
     score_p.add_argument("--expected", default=None, help="expected-fields JSON")
     score_p.add_argument("--client-id", type=int, default=None)
     score_p.add_argument("--keep", action="store_true", help="keep the temp copy")
 
     args = parser.parse_args(_cli_argv(argv))
+    from src import db as _db
+    _db.require_real_db_allowed(
+        getattr(args, "db", None), allow_real_db=getattr(args, "allow_real_db", False),
+    )
     try:
         if args.cmd == "score":
             result = score(

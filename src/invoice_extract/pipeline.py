@@ -170,12 +170,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     start_p = sub.add_parser("start", help="triage the upload, then extract its documents")
     start_p.add_argument("upload_id", type=int)
     start_p.add_argument("--db", default=None, help="database path (default: the app database)")
+    start_p.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
     start_p.add_argument(
         "--wait", action="store_true",
         help="block until the chained extraction finishes (for scripts; the app never waits)",
     )
 
     args = parser.parse_args(_cli_argv(argv))
+    from src import db as _db
+    _db.require_real_db_allowed(
+        getattr(args, "db", None), allow_real_db=getattr(args, "allow_real_db", False),
+    )
     try:
         if args.cmd == "start":
             # The CLI is a harness: it drives a database whose flags may be off,

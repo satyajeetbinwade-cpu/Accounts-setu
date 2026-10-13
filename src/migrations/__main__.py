@@ -29,8 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--apply", action="store_true", help="run the migration")
     parser.add_argument("--no-backup", action="store_true", help="skip the DB backup (not recommended)")
     parser.add_argument("--db", default=None, help="path to poc.db (default: db/poc.db)")
+    parser.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
     parser.add_argument("--data-root", default=None, help="path to data/ (default: ./data)")
     args = parser.parse_args(argv)
+    from src import db as _db
+    _db.require_real_db_allowed(
+        getattr(args, "db", None), allow_real_db=getattr(args, "allow_real_db", False),
+    )
 
     dry_run = not args.apply  # --dry-run or nothing => dry-run
 
