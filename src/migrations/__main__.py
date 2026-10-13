@@ -29,7 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--apply", action="store_true", help="run the migration")
     parser.add_argument("--no-backup", action="store_true", help="skip the DB backup (not recommended)")
     parser.add_argument("--db", default=None, help="path to poc.db (default: db/poc.db)")
-    parser.add_argument("--data-root", default=None, help="path to data/ (default: ./data)")
+    parser.add_argument(
+        "--data-root", default=None,
+        help="path to data/ — must be the database's OWN data folder (its sibling). "
+             "Default: ./data, or the --db database's sibling under --db.",
+    )
     args = parser.parse_args(argv)
 
     dry_run = not args.apply  # --dry-run or nothing => dry-run

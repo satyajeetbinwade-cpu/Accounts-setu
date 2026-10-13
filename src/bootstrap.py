@@ -43,6 +43,7 @@ either finds a current schema or fails loudly with the command to run.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 # (label, module path, init function name) in boot order. The label is only
 # used in the aggregated error message below.
@@ -79,7 +80,7 @@ _BOOT_STEPS: list[tuple[str, str, str]] = [
 
 # The one instruction that resolves a pending migration. ``str()`` of
 # ``SchemaMigrationPending`` is exactly this string.
-MIGRATION_HINT = "Run python main.py (or python -m src.migrations --apply) first"
+MIGRATION_HINT = "run: python main.py --migrate"
 
 # Sentinel for "caller did not choose a data root": scope it to the DB.
 _SCOPE_DATA_ROOT = object()
@@ -90,6 +91,69 @@ def _required_versions() -> list[int]:
     from src.migrations.migrate import MIGRATIONS
 
     return sorted(int(m.version) for m in MIGRATIONS)
+
+
+def expected_data_root(db_path: Path | str | None = None) -> Path:
+    """The data root that BELONGS to this database.
+
+    One rule, so the migration cannot be pointed at somebody else's folders:
+
+    * a database under a ``db/`` folder owns the ``data/`` folder beside that
+      one — the deployed layout, where ``/app/persist/db/poc.db`` is matched by
+      ``/app/persist/data`` (and the repo's ``db/poc.db`` by its ``data/``);
+    * any other database owns a ``data/`` folder next to itself — which is what
+      a scratch database, a copy, or a test gets.
+    """
+    from src import db
+
+    path = Path(db_path) if db_path else Path(db.DB_PATH)
+    if path.parent.name == "db":
+        return path.parent.parent / "data"
+    return path.parent / "data"
+
+
+def migration_status(db_path: Path | str | None = None) -> dict:
+    """READ-ONLY: the database path, what is applied, and what is pending.
+
+    Opens the file ``mode=ro`` — this never creates, migrates or seeds
+    anything, and it is safe to run against the live database.
+    """
+    import sqlite3
+
+    from src import db
+
+    path = Path(db_path) if db_path else Path(db.DB_PATH)
+    required = _required_versions()
+    applied: list[int] = []
+    error: Optional[str] = None
+    if not path.exists():
+        error = "the database file does not exist"
+    else:
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        except sqlite3.Error as exc:
+            error = f"cannot open it read-only: {exc}"
+        else:
+            try:
+                try:
+                    applied = sorted(
+                        int(row[0]) for row in conn.execute("SELECT version FROM schema_migrations")
+                    )
+                except sqlite3.Error:
+                    # No schema_migrations table: a pre-migration database.
+                    applied = []
+            finally:
+                conn.close()
+    pending = sorted(set(required) - set(applied))
+    return {
+        "db_path": str(path),
+        "data_root": str(expected_data_root(path)),
+        "applied": applied,
+        "required": required,
+        "pending": pending,
+        "current": not pending and error is None,
+        "error": error,
+    }
 
 
 class SchemaMigrationPending(RuntimeError):

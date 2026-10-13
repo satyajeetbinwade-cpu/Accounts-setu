@@ -444,8 +444,12 @@ import setu.setu
 print("APP_IMPORT_OK")
 """
 
+# main.py refuses a bare start now, so the child passes --migrate: the
+# command-line way to migrate is a flag, not a bare run.
 _RUN_MAIN_CHILD = _CHILD_PREAMBLE + """
+import sys
 import runpy
+sys.argv = [{main!r}, "--migrate"]
 runpy.run_path({main!r}, run_name="__main__")
 """
 
@@ -514,7 +518,7 @@ def test_importing_the_app_before_migration_raises_and_changes_nothing(tmp_path)
 
     assert proc.returncode != 0, "importing the app against a stale DB must fail"
     assert "SchemaMigrationPending" in proc.stderr
-    assert "Run python main.py (or python -m src.migrations --apply) first" in proc.stderr
+    assert "run: python main.py --migrate" in proc.stderr
     assert "APP_IMPORT_OK" not in proc.stdout
 
     assert _file_hash(db) == db_before, "the import altered the database file"
@@ -557,7 +561,7 @@ def test_ensure_schema_current_is_read_only(tmp_path):
 
     with pytest.raises(bootstrap.SchemaMigrationPending) as exc:
         bootstrap.ensure_schema_current(db)
-    assert str(exc.value) == "Run python main.py (or python -m src.migrations --apply) first"
+    assert str(exc.value) == "run: python main.py --migrate"
     assert exc.value.detail, "the diagnostic detail should be attached as a note"
 
     assert _file_hash(db) == db_before
