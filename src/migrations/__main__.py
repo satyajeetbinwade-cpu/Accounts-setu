@@ -30,7 +30,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-backup", action="store_true", help="skip the DB backup (not recommended)")
     parser.add_argument("--db", default=None, help="path to poc.db (default: db/poc.db)")
     parser.add_argument("--allow-real-db", action="store_true", help="allow writing the repository's own db/poc.db")
-    parser.add_argument("--data-root", default=None, help="path to data/ (default: ./data)")
+    parser.add_argument(
+        "--data-root", default=None,
+        help="path to data/ — must be the database's OWN data folder (its sibling). "
+             "Default: ./data, or the --db database's sibling under --db.",
+    )
     args = parser.parse_args(argv)
     from src import db as _db
     _db.require_real_db_allowed(

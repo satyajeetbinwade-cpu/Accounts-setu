@@ -29,7 +29,7 @@ There is **one frontend** — the Reflex app — which shares the engine with th
 | Entry point | Framework | Run with | Purpose |
 |-------------|-----------|----------|---------|
 | `setu/setu.py` | Reflex | `reflex run` | **The production frontend** (full module suite, sidebar navigation) |
-| `main.py` | CLI | `python main.py` | One-time DB/config smoke test |
+| `main.py` | CLI | `python main.py --migrate` | Boot the database: schema, seeds, migrations (`--check` is the read-only report) |
 | `verify.py` | CLI | `python verify.py ...` | Baseline/verification harness |
 
 The **service layer** under `src/` is shared by the frontend and the CLI tools. Every module follows the same shape:
@@ -95,25 +95,46 @@ The SQLite database (`db/poc.db`) and auth/session tables are created and seeded
 
 ```bash
 source venv/bin/activate
-python main.py
+python main.py --migrate     # the only way to migrate from the command line
+python main.py --check       # read-only: what is applied, what is pending
 ```
 
-**This is not optional and not just a smoke test any more.** `main.py` is the
-only entry point allowed to create or migrate the schema — it creates every
-module's tables, seeds first-run defaults, applies the client-id migration
+**This is not optional and not just a smoke test any more.** `main.py --migrate`
+is the only entry point allowed to create or migrate the schema — it creates
+every module's tables, seeds first-run defaults, applies the client-id migration
 (backing up `db/poc.db` to `db/backups/` first), and moves `data/<name>/`
 folders to `data/<client_id>/`.
+
+**A bare `python main.py` no longer migrates.** It prints a refusal naming the
+two flags above and exits 2 **without touching anything**, unless
+`SETU_ALLOW_BOOT_MIGRATE=1` is set — which is exactly what the Dockerfile CMD
+sets, so a container boot still migrates and still fails closed. The reason is a
+real incident: `main.py` used to run the whole boot sequence before argparse saw
+`argv`, so `python main.py --help` migrated a live database and moved the real
+client folders.
 
 The UI is deliberately **read-only** at import: `setu/setu.py` only *checks*
 the schema. If you start the frontend against a database that has not been
 initialised, it refuses to boot with
 
 ```
-SchemaMigrationPending: Run python main.py (or python -m src.migrations --apply) first
+SchemaMigrationPending: run: python main.py --migrate
 ```
 
 That is the intended fail-closed behaviour — it means the app can never rewrite
 your database or move your client folders as a side effect of starting up.
+
+**Fly / Docker:** the CMD runs `python main.py` with `SETU_ALLOW_BOOT_MIGRATE=1`
+set, so the container is the one place a start may migrate, and a migration
+failure still stops the chain before Reflex or Caddy start (the container exits
+non-zero and Fly keeps the previous release serving).
+
+The migration itself has two more guards, both new: it refuses to run when the
+data root is not the one that belongs to the database being migrated (the
+`data/` beside a `db/` folder, or a sibling of a scratch database) and never
+from a temp or sandbox folder when the app database is the target; and it
+requires a **readable database backup to exist before any folder is moved**, so
+there is always something to roll back to.
 
 ### Frontend (Reflex)
 
@@ -245,7 +266,7 @@ The matching engine snapshots `matching_rules.yaml` on every run, so later confi
 
 ```
 .
-├── main.py                # one-time DB/config smoke test
+├── main.py                # boot: --migrate / --check (a bare start refuses without SETU_ALLOW_BOOT_MIGRATE=1)
 ├── verify.py              # verification harness (CLI)
 ├── rxconfig.py            # Reflex config (ports, CORS, plugins)
 ├── requirements.txt

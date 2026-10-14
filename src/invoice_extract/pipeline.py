@@ -36,13 +36,32 @@ from typing import Any, Optional
 
 from src.invoice_extract.service import InvoiceExtractError
 
-#: run_id -> {"upload_id", "actor", "db_path", "include_disabled"}.
+#: (database, run_id) -> {"upload_id", "actor", "db_path", "include_disabled"}.
 #: Registered by ``start_v2_pipeline`` BEFORE the triage run is queued, taken by
-#: ``run_chain`` when the worker finishes that run. Process-local BY DESIGN —
-#: the memory copy is only a hand-off; the STATE lives in the database (see
-#: ``invoice_pipeline_chains`` below), which is why a restart is recoverable.
-_CHAINS: dict[int, dict[str, Any]] = {}
+#: ``run_chain`` when the worker finishes THAT run. Keyed by the database as
+#: well as the run id, because run ids restart at 1 in every scratch database —
+#: and a copy (the scoring harness makes several) would otherwise consume
+#: another database's chain. The memory registry is only a hand-off; the STATE
+#: lives in the database (see ``invoice_pipeline_chains`` below), which is why
+#: a restart is recoverable.
+_CHAINS: dict[tuple[str, int], dict[str, Any]] = {}
 _LOCK = threading.Lock()
+
+#: (database, run_id) -> the last outcome ``run_chain`` returned. Kept so a
+#: screen (or a test) can say WHY nothing was extracted instead of guessing
+#: from an empty result.
+_RESULTS: dict[tuple[str, int], dict[str, Any]] = {}
+
+
+def _chain_key(db_path, run_id: int) -> tuple[str, int]:
+    return (str(db_path) if db_path else "", int(run_id))
+
+
+def last_chain_result(run_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+    """What the chain did for this run, or None while it has not run yet."""
+    with _LOCK:
+        result = _RESULTS.get(_chain_key(db_path, run_id))
+    return dict(result) if result is not None else None
 
 # ---------------------------------------------------------------------------
 # The chain's PERSISTED state
@@ -287,7 +306,7 @@ def register_chain(
     run_id: int, upload_id: int, *, actor: str, db_path=None, include_disabled: bool = False,
 ) -> None:
     with _LOCK:
-        _CHAINS[int(run_id)] = {
+        _CHAINS[_chain_key(db_path, run_id)] = {
             "upload_id": int(upload_id), "actor": actor,
             "db_path": db_path, "include_disabled": bool(include_disabled),
         }
@@ -298,15 +317,15 @@ def register_chain(
                     detail="triage queued", db_path=db_path)
 
 
-def take_chain(run_id: int) -> Optional[dict[str, Any]]:
+def take_chain(run_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
     with _LOCK:
-        return _CHAINS.pop(int(run_id), None)
+        return _CHAINS.pop(_chain_key(db_path, run_id), None)
 
 
 def pending_chains() -> dict[int, dict[str, Any]]:
-    """A copy of the registered chains — for tests and diagnostics."""
+    """The registered chains keyed by run id — for tests and diagnostics."""
     with _LOCK:
-        return dict(_CHAINS)
+        return {run_id: dict(payload) for (_db, run_id), payload in _CHAINS.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -321,10 +340,18 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
     cheap and harmless when nothing registered a chain: the first thing it does
     is look for one.
     """
-    chain = take_chain(run_id)
+    chain = take_chain(run_id, db_path=db_path)
     if chain is None:
         return None
-    actor = chain.get("actor") or actor
+    try:
+        return _run_chain(run_id, chain, db_path=db_path)
+    finally:
+        pass
+
+
+def _run_chain(run_id: int, chain: dict[str, Any], *, db_path=None) -> dict[str, Any]:
+    """The chain body. Its result is RECORDED before it is returned."""
+    actor = chain.get("actor") or "pipeline"
     db_path = chain.get("db_path") or db_path
     upload_id = int(chain["upload_id"])
     include_disabled = bool(chain.get("include_disabled"))
@@ -341,8 +368,10 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
         set_chain_state(run_id, CHAIN_FAILED, upload_id=upload_id, actor=actor,
                         detail=f"triage run {run_id} failed — nothing to extract from",
                         db_path=db_path)
-        return {"upload_id": upload_id, "run_id": int(run_id), "started": False,
-                "reason": f"triage run {run_id} failed — nothing to extract from"}
+        return _remember(run_id, db_path, {
+            "upload_id": upload_id, "run_id": int(run_id), "started": False,
+            "reason": f"triage run {run_id} failed — nothing to extract from",
+        })
 
     info = triage_mod.get_triage(upload_id, db_path=db_path)
     extractable = [
@@ -352,12 +381,12 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
     if not extractable:
         set_chain_state(run_id, CHAIN_COMPLETE, upload_id=upload_id, actor=actor,
                         detail="triage-only: no extractable document", db_path=db_path)
-        return {
+        return _remember(run_id, db_path, {
             "upload_id": upload_id, "run_id": int(run_id), "started": False,
             "reason": "triage found no extractable document (only tax_invoice and "
                       "no_gst_expense are extracted)",
             "documents": len(info.get("documents") or []),
-        }
+        })
 
     set_chain_state(run_id, CHAIN_EXTRACTION_RUNNING, upload_id=upload_id, actor=actor,
                     detail="extraction starting", db_path=db_path)
@@ -373,12 +402,20 @@ def run_chain(run_id: int, *, actor: str = "pipeline", db_path=None) -> Optional
             run_id, CHAIN_EXTRACTION_RUNNING if unfinished else CHAIN_FAILED,
             upload_id=upload_id, actor=actor, detail=str(exc), db_path=db_path,
         )
-        return {"upload_id": upload_id, "run_id": int(run_id), "started": False,
-                "reason": str(exc)}
-    return {
+        return _remember(run_id, db_path, {
+            "upload_id": upload_id, "run_id": int(run_id), "started": False,
+            "reason": str(exc),
+        })
+    return _remember(run_id, db_path, {
         "upload_id": upload_id, "run_id": int(run_id), "started": True,
         "documents": len(extractable), "extraction": summary,
-    }
+    })
+
+
+def _remember(run_id: int, db_path, result: dict[str, Any]) -> dict[str, Any]:
+    with _LOCK:
+        _RESULTS[_chain_key(db_path, run_id)] = dict(result)
+    return result
 
 
 # ---------------------------------------------------------------------------

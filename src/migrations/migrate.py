@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -107,6 +108,81 @@ def _open(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _guard_data_root(db_path: Path, data_root: Path) -> None:
+    """Refuse to move folders in a tree that does not belong to this database.
+
+    The migration renames ``data/<name>/`` folders. Pointed at the wrong root it
+    would rename somebody else's tree — a sandbox, a temp copy, or a directory
+    that simply is not this database's own ``data/``. The expectation itself
+    lives in ONE place (``bootstrap.expected_data_root``).
+    """
+    from src.bootstrap import expected_data_root
+
+    resolved = Path(data_root).expanduser().resolve()
+    expected = Path(expected_data_root(db_path)).expanduser().resolve()
+    database = Path(db_path).expanduser().resolve()
+    # Accepted: the data root that BELONGS to this database (`data/` beside a
+    # `db/`, or this database's sibling), and — for a caller who passes one
+    # explicitly — any folder that is a SIBLING of the database. A scratch
+    # database with a deliberately-named data folder (the scoring harness uses
+    # `srcdata/`) is a choice, not an accident: it lives in the same tree the
+    # caller owns.
+    is_sibling = resolved.parent == database.parent
+    if resolved != expected and not is_sibling:
+        raise RuntimeError(
+            f"refusing to migrate: the data root {resolved} is not the one that belongs "
+            f"to {database} (expected {expected}, or a folder beside the database). Pass "
+            "the database and its own data/ folder from the same tree."
+        )
+    # Belt and braces, and ONLY for the repository's OWN database: a scratch
+    # database legitimately has a scratch data root (tests, copies, the scoring
+    # harnesses all do this), but the real one must never be migrated from
+    # inside a temp folder or a known sandbox.
+    #
+    # NOTE the path is computed from THIS source tree, not from ``db.DB_PATH``:
+    # a test or tool points DB_PATH at a copy, and that copy is not the app's.
+    if Path(db_path).expanduser().resolve() == _app_database_path():
+        temp = Path(tempfile.gettempdir()).resolve()
+        if "sandbox" in str(resolved).lower() or resolved == temp or temp in resolved.parents:
+            raise RuntimeError(
+                f"refusing to migrate the app database from {resolved}: that is a temp or "
+                "sandbox folder, not the app's own data/ tree."
+            )
+
+
+def _app_database_path() -> Path:
+    """The repository's own database, derived from the installed source."""
+    from src import db as recon_db
+
+    return (Path(recon_db.__file__).resolve().parents[1] / "db" / "poc.db").resolve()
+
+
+def _require_readable_backup(path: Optional[Path]) -> None:
+    """The backup must EXIST and be readable before any folder is moved.
+
+    A rollback restores the DATABASE, so a migration that moved folders with no
+    working backup to go back to is not recoverable.
+    """
+    if path is None:
+        raise RuntimeError(
+            "refusing to move data folders without a database backup "
+            "(run with backup=True)."
+        )
+    backup_path = Path(path)
+    if not backup_path.exists():
+        raise RuntimeError(f"refusing to move data folders: the backup {backup_path} was not written.")
+    try:
+        conn = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
+        try:
+            conn.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"refusing to move data folders: the backup {backup_path} is not readable ({exc})."
+        ) from None
+
+
 def run(
     db_path: Optional[Path | str] = None,
     data_root: Optional[Path | str] = None,
@@ -132,6 +208,12 @@ def run(
 
     db_path = Path(db_path) if db_path else Path(recon_db.DB_PATH)
     data_root = Path(data_root) if data_root else Path(DATA_ROOT)
+
+    # Anything that can MOVE a folder is guarded first. A dry run plans only, so
+    # it is deliberately left alone — tooling plans against roots it never
+    # writes to.
+    if not dry_run:
+        _guard_data_root(db_path, data_root)
 
     conn = _open(db_path)
     try:
@@ -160,6 +242,11 @@ def run(
             moves = folders_mod.plan_folder_moves(
                 resolve_mapping(conn, create=False, data_root=data_root), data_root
             )
+            # This branch moves folders too (self-healing a crash between the two
+            # steps), so it needs the same backup guarantee — but ONLY when there
+            # is something to move, so an ordinary restart writes nothing.
+            if any(m["status"] == "planned" for m in moves):
+                _require_readable_backup(_backup(db_path) if backup else None)
             folder_result = folders_mod.apply_folder_moves(moves, data_root)
             return {
                 "mode": "no-op",
@@ -171,6 +258,9 @@ def run(
             }
 
         backup_path = _backup(db_path) if backup else None
+        # No backup, no moves. The migration renames client folders, and a
+        # rollback can only restore the database it copied.
+        _require_readable_backup(backup_path)
 
         try:
             from src.migrations import m0001_client_id_identity as _m1

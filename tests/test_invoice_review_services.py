@@ -9,6 +9,7 @@ real ``data/`` tree are never touched.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -552,15 +553,27 @@ def test_pipeline_chains_triage_into_extraction(db, monkeypatch):
     assert started["chained"] is True
     assert pipeline.pending_chains().get(started["run_id"]) is not None
 
-    # The chain runs on the triage worker, so the extraction starts by itself.
+    # The chain runs on the triage worker, AFTER the run row is finalised, so
+    # waiting for the RUN is not enough: wait for the chain to be consumed and
+    # for its extraction rows to appear. (wait_for_extraction cannot help here —
+    # it sees zero unfinished rows and returns before the chain has created any.)
     triage_mod.wait_for_run(started["run_id"], db_path=db, timeout=120)
-    # ...and it is the CHAIN's persisted state that says when the extraction has
-    # started and finished — waiting on the run row alone is a race (the run row
-    # is finalised before the chain hands over).
+    # The chain runs on the triage worker AFTER the run row is finalised, so
+    # waiting for the RUN is not enough. Wait until the chain has been consumed
+    # from the in-memory registry and its extraction rows exist (the chain's
+    # own hand-off) AND until the chain's PERSISTED state is terminal — the run
+    # row alone is a race (it is finalised before the chain hands over).
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        if not pipeline.pending_chains() and ex.get_extraction(1, db_path=db)["extractions"]:
+            break
+        time.sleep(0.05)
     chain_end = pipeline.wait_for_chain(started["run_id"], db_path=db, timeout=120)
     assert chain_end in ("complete", "failed"), f"chain ended in {chain_end!r}"
     ex.wait_for_extraction(1, db_path=db, timeout=120)
 
+    # ...and only THEN can wait_for_extraction see the pass and wait it out.
+    ex.wait_for_extraction(1, db_path=db, timeout=120)
     info = ex.get_extraction(1, db_path=db)
     assert info["extractions"], "the pipeline did not chain into an extraction"
     assert info["extractions"][0]["status"] in ("complete", "partial")
@@ -575,7 +588,10 @@ def test_the_chain_is_not_left_behind_when_nothing_is_extractable(db, monkeypatc
 
     started = pipeline.start_v2_pipeline(1, actor="test", include_disabled=True, db_path=db)
     triage_mod.wait_for_run(started["run_id"], db_path=db, timeout=120)
-    # The run itself is fine; the chain simply had nothing to extract.
+    # Wait for the chain to be consumed, then assert it started nothing.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline and pipeline.pending_chains():
+        time.sleep(0.05)
     assert pipeline.pending_chains() == {}
     assert not ex.get_extraction(1, db_path=db)["extractions"]
 

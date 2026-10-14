@@ -100,10 +100,18 @@ EXPOSE 8080
 # non-zero, so Fly keeps the previous release serving instead of bringing up a
 # half-initialised app.
 #
+# SETU_ALLOW_BOOT_MIGRATE=1 is what lets this bare `python main.py` migrate.
+# Without it main.py refuses (exit 2) and changes nothing — that is the guard
+# against an accidental `python main.py --help` migrating a live database from
+# a laptop. The application itself never migrates: `reflex run` only checks the
+# schema version and aborts with "run: python main.py --migrate" if it is
+# behind. So a deploy is still the ONLY path that migrates, and it still fails
+# closed.
+#
 # REFLEX_HOT_RELOAD_EXCLUDE_PATHS is set explicitly (colon-separated, per
 # Reflex's env var format) rather than relying on rxconfig.py's own
 # setdefault for db/data/.states/reflex.lock: the dev-mode file watcher
 # resolves the db/data symlinks to their real target under persist/, which
 # isn't covered by those excluded names, so every SQLite write to poc.db
 # was being treated as a source change and triggering a restart loop.
-CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && rm -rf /app/data && ln -s /app/persist/data /app/data && ln -sfn /app/persist/db /app/db && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && python main.py && python -m src.demo_seed && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
+CMD ["/bin/sh", "-c", "mkdir -p /app/persist/db /app/persist/data && rm -rf /app/data && ln -s /app/persist/data /app/data && ln -sfn /app/persist/db /app/db && export REFLEX_HOT_RELOAD_EXCLUDE_PATHS=\"db:data:.states:reflex.lock:persist\" && export __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=\"setu-poc.fly.dev\" && export SETU_ALLOW_BOOT_MIGRATE=1 && python main.py && python -m src.demo_seed && (reflex run &) && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"]
