@@ -403,6 +403,48 @@ def confirm_direction(
     return {"ok": True, "reason": "", "alias": result.get("alias"), **result}
 
 
+def confirm_direction_for_upload(
+    document_id: int, direction: str, *, actor: str, remember_alias: bool = False,
+    alias_text: Optional[str] = None, db_path=None,
+) -> dict[str, Any]:
+    """The screen's direction answer, applied to the WHOLE file.
+
+    The document the person answered on is settled EXPLICITLY; every other
+    eligible document in the same upload inherits the same answer, marked as
+    inherited so the screen can say so and the person can still change any one
+    of them on its own. A rule-decided direction is never overridden and never
+    cascades — see ``rules.apply_direction_to_upload``.
+
+    A refusal still comes back as ``{"ok": False, "reason": ...}`` and nothing
+    is written. Once the confirmation IS recorded, a failure in the cascade
+    cannot un-record it: its error is reported beside the confirmation.
+    """
+    from src.invoice_extract import rules as rules_mod
+
+    # Read this BEFORE confirming: the confirmation marks the document as the
+    # person's own answer, so afterwards it no longer looks inherited. A
+    # document that INHERITED its direction was following the file — answering
+    # on it corrects THIS document, and the rest keep what they had.
+    was_inherited = rules_mod.direction_is_inherited(document_id, db_path=db_path)
+    result = confirm_direction(
+        document_id, direction, actor=actor, remember_alias=remember_alias,
+        alias_text=alias_text, db_path=db_path,
+    )
+    if not result.get("ok"):
+        return result
+    if was_inherited:
+        return {**result, "inherited": [], "inherited_count": 0, "cascade_skipped": "inherited"}
+
+    try:
+        cascade = rules_mod.apply_direction_to_upload(
+            document_id, direction, actor=actor, db_path=db_path,
+        )
+    except Exception as exc:  # noqa: BLE001 — the answer itself is already stored
+        return {**result, "inherited": [], "inherited_count": 0,
+                "cascade_reason": f"{type(exc).__name__}: {exc}"}
+    return {**result, **cascade}
+
+
 def alias_refusal_reason(
     document_id: int, alias_text: Optional[str] = None, *, db_path=None,
 ) -> Optional[str]:

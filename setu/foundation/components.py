@@ -85,8 +85,107 @@ def back_button(label: str, on_click, **props) -> rx.Component:
     return rx.button(label, on_click=on_click, **props)
 
 
+# ---------------------------------------------------------------------------
+# The three action levels
+# ---------------------------------------------------------------------------
+#
+# Radix's ``soft``/``ghost`` variants fill a button with a PALE tint of the
+# accent, which reads as disabled against this app's card surfaces — a reviewer
+# could not tell "Not printed on the document" from a greyed-out control. So
+# each level sets its own background, border and hover, and a truly DISABLED
+# button gets a look of its own (grey fill, muted text, not-allowed cursor)
+# rather than a lower opacity.
+#
+#   primary   — solid blue with white text: the one action a card is asking for
+#   secondary — white surface, hairline border, dark text (visible hover)
+#   tertiary  — plain text link, muted, underlined on hover
+
+#: The accent is the app's one blue; hover is one step darker.
+ACTION_BLUE = t.Color.ACCENT.value
+ACTION_BLUE_HOVER = "#2F5CCA"
+ACTION_DISABLED_BG = "#E7EBF3"
+_BUTTON_DISABLED = {
+    "background": ACTION_DISABLED_BG,
+    "color": t.Color.TEXT_MUTED.value,
+    "border": f"1px solid {t.Color.BORDER.value}",
+    "opacity": "1",
+    "cursor": "not-allowed",
+}
+
+
+def btn_primary(label, *, on_click=None, disabled=None, **props) -> rx.Component:
+    """The one action a card is asking for: solid blue, white text.
+
+    Disabled is a LOOK, not a fade: a filled grey button with muted text, so an
+    unavailable "Mark reviewed" cannot be mistaken for an available one.
+    """
+    props.setdefault("size", "2")
+    return rx.button(
+        label,
+        on_click=on_click,
+        disabled=disabled,
+        variant="solid",
+        background=ACTION_BLUE,
+        color="#FFFFFF",
+        border=f"1px solid {ACTION_BLUE}",
+        border_radius="9px",
+        _hover={"background": ACTION_BLUE_HOVER, "border_color": ACTION_BLUE_HOVER},
+        _disabled=dict(_BUTTON_DISABLED),
+        **props,
+    )
+
+
+def btn_secondary(label, *, on_click=None, disabled=None, **props) -> rx.Component:
+    """The alternatives beside a primary action: white, bordered, dark text."""
+    props.setdefault("size", "2")
+    return rx.button(
+        label,
+        on_click=on_click,
+        disabled=disabled,
+        variant="solid",
+        background=t.Color.SURFACE.value,
+        color=t.Color.TEXT_PRIMARY.value,
+        border=f"1px solid {t.Color.BORDER.value}",
+        border_radius="9px",
+        _hover={
+            "background": "#F1F4FA",
+            "border_color": ACTION_BLUE,
+            "color": t.Color.TEXT_PRIMARY.value,
+        },
+        _disabled=dict(_BUTTON_DISABLED),
+        **props,
+    )
+
+
+def btn_tertiary(label, *, on_click=None, disabled=None, **props) -> rx.Component:
+    """The small print: a plain text link, underlined on hover."""
+    props.setdefault("size", "2")
+    return rx.button(
+        label,
+        on_click=on_click,
+        disabled=disabled,
+        variant="ghost",
+        background="transparent",
+        color=t.Color.TEXT_SECONDARY.value,
+        border="1px solid transparent",
+        border_radius="9px",
+        padding="2px 6px",
+        _hover={
+            "background": "transparent",
+            "color": t.Color.TEXT_PRIMARY.value,
+            "text_decoration": "underline",
+        },
+        _disabled={
+            "background": "transparent",
+            "color": t.Color.TEXT_MUTED.value,
+            "opacity": "1",
+            "cursor": "not-allowed",
+        },
+        **props,
+    )
+
+
 def section_title(title: str, subtitle: str | None = None) -> rx.Component:
-    """An in-page section heading (20px/700) with an optional caption."""
     return rx.vstack(
         rx.text(title, style=t.TEXT["section_title"]),
         rx.cond(
@@ -973,32 +1072,90 @@ def upload_progress_row(
     )
 
 
+#: The focused field's label, as a tag that rides OUTSIDE its box. The chip
+#: treatment is otherwise the same one the region boxes use.
+_FOCUS_TAG = {
+    "position": "absolute",
+    "left": "0",
+    "font_size": "10px",
+    "font_weight": "700",
+    "padding": "1px 6px",
+    "border_radius": "4px",
+    "white_space": "nowrap",
+    "background": t.Color.SURFACE.value,
+    "color": t.Color.TEXT_SECONDARY.value,
+    "border": f"1px solid {t.Color.BORDER.value}",
+    "box_shadow": "0 1px 2px rgba(16, 24, 40, 0.10)",
+    "z_index": "5",
+}
+#: Above the box by default; BELOW it when the box is too near the top of the
+#: page for a tag to fit (the caller's state bakes room info as the box's y).
+_FOCUS_TAG_ABOVE = {**_FOCUS_TAG, "bottom": "100%", "margin_bottom": "3px"}
+_FOCUS_TAG_BELOW = {**_FOCUS_TAG, "top": "100%", "margin_top": "3px"}
+
+#: Bring the focused field into the viewer's scroll window. The tag carries the
+#: id (it exists for exactly one box), so scrolling its PARENT brings the box —
+#: and the tag that sits outside it — into view together.
+_FOCUS_SCROLL = (
+    "setTimeout(() => {"
+    " const tag = document.getElementById('review-focus-box');"
+    " if (tag && tag.parentElement)"
+    "   tag.parentElement.scrollIntoView({block: 'start', inline: 'center', behavior: 'smooth'});"
+    "}, 60)"
+)
+
+
 def _region_box(region) -> rx.Component:
     """One region overlay row: a positioned box with an optional name chip.
 
     Position, size AND colour all arrive in ``region.style``, baked by the
     caller's state (these props are hoisted). This function only reads them.
+
+    The FOCUSED box — the field the card on the right is about — is the one
+    exception: its label must never sit ON the field, because the value under it
+    is the whole reason the box exists. It gets a thin outline with a
+    transparent fill (baked by the state) and its label as a tag just outside
+    the box: above it, or below when the box is too near the top of the page.
+    As that tag mounts, the viewer scrolls the box into view.
     """
     return rx.box(
         rx.cond(
-            region.label != "",
-            rx.text(
-                region.label,
-                style={
-                    "position": "absolute",
-                    "top": "-9px",
-                    "left": "0",
-                    "font_size": "10px",
-                    "font_weight": "700",
-                    "padding": "0 5px",
-                    "border_radius": "3px",
-                    "white_space": "nowrap",
-                    "background": t.Color.SURFACE.value,
-                    "color": t.Color.TEXT_SECONDARY.value,
-                    "border": f"1px solid {t.Color.BORDER.value}",
-                },
+            region.state == "focused",
+            rx.cond(
+                region.y < 0.06,
+                rx.text(
+                    region.label,
+                    style=_FOCUS_TAG_BELOW,
+                    id="review-focus-box",
+                    on_mount=rx.call_script(_FOCUS_SCROLL),
+                ),
+                rx.text(
+                    region.label,
+                    style=_FOCUS_TAG_ABOVE,
+                    id="review-focus-box",
+                    on_mount=rx.call_script(_FOCUS_SCROLL),
+                ),
             ),
-            rx.fragment(),
+            rx.cond(
+                region.label != "",
+                rx.text(
+                    region.label,
+                    style={
+                        "position": "absolute",
+                        "top": "-9px",
+                        "left": "0",
+                        "font_size": "10px",
+                        "font_weight": "700",
+                        "padding": "0 5px",
+                        "border_radius": "3px",
+                        "white_space": "nowrap",
+                        "background": t.Color.SURFACE.value,
+                        "color": t.Color.TEXT_SECONDARY.value,
+                        "border": f"1px solid {t.Color.BORDER.value}",
+                    },
+                ),
+                rx.fragment(),
+            ),
         ),
         style=region.style,
     )

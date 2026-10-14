@@ -538,3 +538,213 @@ def test_a_cause_card_resolves_to_a_real_field_row(scratch, monkeypatch):
     assert [action for action, _, _ in seen] == ["marked_not_applicable"]
     assert all(field_id for _, _, field_id in seen)
     assert "no field row" not in state.refusal
+
+
+# ===========================================================================
+# The 2026-10-14 widget round: date picker, file-wide direction, focus outline
+# ===========================================================================
+
+
+def test_a_direction_answer_covers_the_file(scratch):
+    """Answering one document applies the same direction to the rest of the
+    upload — except where the rule or the person already decided.
+
+    Demo: #1 asks (likely_purchase), #5 is undetermined and eligible, and
+    #2/#4/#6 already carry a RULE decision (the client's GSTIN matched), which
+    must never be overridden or cascaded.
+    """
+    from src.invoice_extract import rules as rules_mod
+
+    state = goto(open_upload(new_state()), 1)
+    state.settle_direction("sales")
+
+    assert "1 other document" in state.flash
+    inherited = rules_mod.get_review_model(5)["direction"]
+    assert inherited["direction"] == "sales"
+    assert inherited["inherited"] is True, "the file's answer is marked inherited"
+    assert rules_mod.get_review_model(1)["direction"]["inherited"] is False
+
+    for decided in (2, 4, 6):
+        row = rules_mod.get_review_model(decided)["direction"]
+        assert row["direction"] == "purchase", "a rule-decided direction stands"
+        assert row["inherited"] is False
+
+
+def test_changing_an_inherited_direction_moves_only_that_document(scratch):
+    """An inherited document can be changed on its own: it becomes that
+    document's own answer, and nothing else in the file moves."""
+    from src.invoice_extract import rules as rules_mod
+
+    state = goto(open_upload(new_state()), 1)
+    state.settle_direction("sales")
+
+    goto(state, 5)
+    assert state.doc_direction_inherited is True
+    assert state.doc_direction_label.endswith("same as the rest of this file")
+
+    state.settle_direction("purchase")
+    assert "other document" not in state.flash, "a correction does not re-cascade"
+    assert rules_mod.get_review_model(5)["direction"]["direction"] == "purchase"
+    assert rules_mod.get_review_model(5)["direction"]["inherited"] is False
+    assert rules_mod.get_review_model(1)["direction"]["direction"] == "sales"
+
+
+def test_a_date_field_asks_with_a_picker_that_stores_the_date_form():
+    """The picker holds ISO and hands the SAME string to the confirm path,
+    which is the pipeline's own date form (``normalisers.normalise_date`` reads
+    it back); the reviewer reads it as dd-mm-yyyy."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    state = new_state()
+    key = "9:invoice_date"
+    state.set_date_input("2026-04-17", key)
+
+    assert state.field_inputs[key] == "2026-04-17", "what Confirm stores"
+    assert state.date_inputs[key] == "2026-04-17", "what the picker shows"
+    assert state.date_labels[key] == "17-04-2026", "dd-mm-yyyy for the reviewer"
+    assert review_state_mod.nz_mod.normalise_date(state.field_inputs[key]) == "2026-04-17"
+
+    state._clear_input(key)
+    assert state.field_inputs == {} and state.date_inputs == {} and state.date_labels == {}
+
+
+def test_a_date_guess_is_parsed_and_a_non_date_is_left_out():
+    """A read's guess is parsed into the picker — including the weekday form
+    and the American month-first shape the pipeline's normaliser cannot read —
+    and a value that is not a date leaves the picker empty."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    parse = review_state_mod._iso_from_guess
+    assert parse("Fri Apr 17 2026") == "2026-04-17"
+    assert parse("27-Apr-26") == "2026-04-27"
+    assert parse("03-04-2026") == "2026-04-03", "day-first, never month-first"
+    assert parse("2026-04-13") == "2026-04-13"
+    assert parse("CASH MEMO Brought of") == ""
+    assert parse("") == ""
+
+    # Only fields the pipeline declares as dates get a picker. A reference
+    # no. + date is TEXT "as printed" — a picker would drop the number.
+    assert review_state_mod._is_date_field("invoice_date") is True
+    assert review_state_mod._is_date_field("reference_no_date") is False
+    assert review_state_mod._is_date_field("invoice_total") is False
+
+
+def test_the_focused_box_is_a_thin_outline_not_a_fill():
+    """The marker for "the card you are on" is an outline with a transparent
+    fill: the value inside the box has to stay readable, and the label rides in
+    a tag OUTSIDE the box (see ``components._region_box``)."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    focused = review_state_mod._box_style("focused")
+    assert focused["background"] == "transparent"
+    assert focused["border"] == f"2px solid {review_state_mod.t.Color.ACCENT.value}"
+    assert "box_shadow" not in focused, "no glow over the field"
+    assert focused["scroll_margin_top"], "room for the tag when scrolled to"
+
+    # The change is scoped to the focus marker; the other boxes keep their fill.
+    assert review_state_mod._box_style("active")["background"] != "transparent"
+
+
+# ===========================================================================
+# The 2026-10-14 widget round: date picker, file-wide direction, focus outline
+# ===========================================================================
+
+
+def test_a_direction_answer_covers_the_file(scratch):
+    """Answering one document applies the same direction to the rest of the
+    upload — except where the rule or the person already decided.
+
+    Demo: #1 asks (likely_purchase), #5 is undetermined and eligible, and
+    #2/#4/#6 already carry a RULE decision (the client's GSTIN matched), which
+    must never be overridden or cascaded.
+    """
+    from src.invoice_extract import rules as rules_mod
+
+    state = goto(open_upload(new_state()), 1)
+    state.settle_direction("sales")
+
+    assert "1 other document" in state.flash
+    inherited = rules_mod.get_review_model(5)["direction"]
+    assert inherited["direction"] == "sales"
+    assert inherited["inherited"] is True, "the file's answer is marked inherited"
+    assert rules_mod.get_review_model(1)["direction"]["inherited"] is False
+
+    for decided in (2, 4, 6):
+        row = rules_mod.get_review_model(decided)["direction"]
+        assert row["direction"] == "purchase", "a rule-decided direction stands"
+        assert row["inherited"] is False
+
+
+def test_changing_an_inherited_direction_moves_only_that_document(scratch):
+    """An inherited document can be changed on its own: it becomes that
+    document's own answer, and nothing else in the file moves."""
+    from src.invoice_extract import rules as rules_mod
+
+    state = goto(open_upload(new_state()), 1)
+    state.settle_direction("sales")
+
+    goto(state, 5)
+    assert state.doc_direction_inherited is True
+    assert state.doc_direction_label.endswith("same as the rest of this file")
+
+    state.settle_direction("purchase")
+    assert "other document" not in state.flash, "a correction does not re-cascade"
+    assert rules_mod.get_review_model(5)["direction"]["direction"] == "purchase"
+    assert rules_mod.get_review_model(5)["direction"]["inherited"] is False
+    assert rules_mod.get_review_model(1)["direction"]["direction"] == "sales"
+
+
+def test_a_date_field_asks_with_a_picker_that_stores_the_date_form():
+    """The picker holds ISO and hands the SAME string to the confirm path,
+    which is the pipeline's own date form (``normalisers.normalise_date`` reads
+    it back); the reviewer reads it as dd-mm-yyyy."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    state = new_state()
+    key = "9:invoice_date"
+    state.set_date_input("2026-04-17", key)
+
+    assert state.field_inputs[key] == "2026-04-17", "what Confirm stores"
+    assert state.date_inputs[key] == "2026-04-17", "what the picker shows"
+    assert state.date_labels[key] == "17-04-2026", "dd-mm-yyyy for the reviewer"
+    assert review_state_mod.nz_mod.normalise_date(state.field_inputs[key]) == "2026-04-17"
+
+    state._clear_input(key)
+    assert state.field_inputs == {} and state.date_inputs == {} and state.date_labels == {}
+
+
+def test_a_date_guess_is_parsed_and_a_non_date_is_left_out():
+    """A read's guess is parsed into the picker — including the weekday form
+    and the American month-first shape the pipeline's normaliser cannot read —
+    and a value that is not a date leaves the picker empty."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    parse = review_state_mod._iso_from_guess
+    assert parse("Fri Apr 17 2026") == "2026-04-17"
+    assert parse("27-Apr-26") == "2026-04-27"
+    assert parse("03-04-2026") == "2026-04-03", "day-first, never month-first"
+    assert parse("2026-04-13") == "2026-04-13"
+    assert parse("CASH MEMO Brought of") == ""
+    assert parse("") == ""
+
+    # Only fields the pipeline declares as dates get a picker. A reference
+    # no. + date is TEXT "as printed" — a picker would drop the number.
+    assert review_state_mod._is_date_field("invoice_date") is True
+    assert review_state_mod._is_date_field("reference_no_date") is False
+    assert review_state_mod._is_date_field("invoice_total") is False
+
+
+def test_the_focused_box_is_a_thin_outline_not_a_fill():
+    """The marker for "the card you are on" is an outline with a transparent
+    fill: the value inside the box has to stay readable, and the label rides in
+    a tag OUTSIDE the box (see ``components._region_box``)."""
+    from setu.state import invoice_review_state as review_state_mod
+
+    focused = review_state_mod._box_style("focused")
+    assert focused["background"] == "transparent"
+    assert focused["border"] == f"2px solid {review_state_mod.t.Color.ACCENT.value}"
+    assert "box_shadow" not in focused, "no glow over the field"
+    assert focused["scroll_margin_top"], "room for the tag when scrolled to"
+
+    # The change is scoped to the focus marker; the other boxes keep their fill.
+    assert review_state_mod._box_style("active")["background"] != "transparent"

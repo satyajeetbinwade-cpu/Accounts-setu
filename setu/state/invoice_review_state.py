@@ -25,7 +25,9 @@ Two behaviours worth knowing:
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass, field as dc_field
+from datetime import datetime
 
 import reflex as rx
 
@@ -35,6 +37,7 @@ from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import doc_actions
 from src.invoice_extract import extract as extract_mod
 from src.invoice_extract import fields_v2 as fv2
+from src.invoice_extract import normalisers as nz_mod
 from src.invoice_extract import pipeline as pipeline_mod
 from src.invoice_extract import review_api
 from src.invoice_extract import rules as rules_mod
@@ -92,6 +95,61 @@ def _plain_note_for(category: str, status: str, reason: str) -> str:
     if not note:
         note = (reason or "This document was not extracted for values.").rstrip(".") + "."
     return note + " Nothing was extracted from it, so there are no values to check here."
+
+
+#: A printed date often carries its weekday ("Fri Apr 17 2026"); the pipeline's
+#: own normaliser reads "17 Apr 2026" but not the prefix, and a guessed date is
+#: a date whatever the reader wrote in front of it.
+#: A printed date often carries its weekday, and a reader sometimes returns the
+#: American month-first form ("Fri Apr 17 2026") the pipeline's own normaliser
+#: (day-first, ``normalisers._DATE_FORMATS``) cannot read. A guess is still a
+#: date, so the WIDGET reads those two shapes too — the pipeline's normaliser is
+#: deliberately not touched.
+_WEEKDAY_PREFIX = re.compile(
+    r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.?,?\s+", re.IGNORECASE,
+)
+_EXTRA_DATE_FORMATS: tuple[str, ...] = (
+    "%b %d %Y", "%B %d %Y", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%b-%d-%Y", "%B-%d-%Y",
+)
+
+
+def _iso_from_guess(text: str) -> str:
+    """The date a read guessed at, as ISO ("" when it is not a date at all)."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    stripped = _WEEKDAY_PREFIX.sub("", raw).strip()
+    for candidate in (raw, stripped):
+        iso = nz_mod.normalise_date(candidate)
+        if iso:
+            return iso
+        for fmt in _EXTRA_DATE_FORMATS:
+            try:
+                return datetime.strptime(candidate.rstrip("."), fmt).date().isoformat()
+            except ValueError:
+                continue
+    return ""
+
+
+def _dmy(iso: str) -> str:
+    """ISO → dd-mm-yyyy — the order this screen shows a date in ("" if none)."""
+    parts = str(iso or "").split("-")
+    if len(parts) != 3 or not all(parts):
+        return ""
+    return f"{parts[2]}-{parts[1]}-{parts[0]}"
+
+
+def _is_date_field(field_key: str) -> bool:
+    """Is this field a DATE by its own spec (fields_v2.KIND_DATE)?
+
+    Only fields the pipeline declares as dates get a picker. ``reference_no_date``
+    is deliberately TEXT ("Reference no. and date (as printed)"): it carries a
+    reference NUMBER beside the date, and a picker would throw the number away.
+    """
+    try:
+        return fv2.kind_of(field_key) == fv2.KIND_DATE
+    except Exception:  # noqa: BLE001 — an unknown field is simply not a date
+        return False
 
 
 @dataclass
@@ -175,6 +233,10 @@ class CardRow:
     read_b: str = ""
     best_guess: str = ""
     reads_line: str = ""
+    #: A DATE field (fields_v2.KIND_DATE): the card asks with a date picker and
+    #: ``guess_iso`` is the read's best guess as ISO, for the picker to start on.
+    is_date: bool = False
+    guess_iso: str = ""
 
     #: The field's own box, cropped out of the upright page with padding —
     #: a real crop, not the whole page positioned by CSS.
@@ -255,17 +317,20 @@ def _field_label(key: str) -> str:
 def _box_style(state: str) -> dict:
     """The baked style for one overlay box, by state."""
     if state == "focused":
-        # The box of the field the card on the right is about. Heavier than
-        # "active" and lifted above it, so "which box is this card about?"
-        # never needs asking.
+        # The box of the field the card on the right is about. A THIN OUTLINE
+        # with a transparent fill: the value inside the box is the whole point
+        # of the box, and a tinted fill plus a label on top made it unreadable.
+        # The label rides OUTSIDE the box (see ``_region_box``).
         return {
             "position": "absolute",
-            "border": f"3px solid {t.Color.ACCENT.value}",
-            "box_shadow": "0 0 0 3px rgba(59, 111, 219, 0.28)",
-            "background": "rgba(59, 111, 219, 0.10)",
+            "border": f"2px solid {t.Color.ACCENT.value}",
+            "background": "transparent",
             "border_radius": "4px",
             "pointer_events": "none",
             "z_index": "4",
+            # The label tag rides above the box: when the viewer scrolls the box
+            # to the top of its window, this keeps room for the tag.
+            "scroll_margin_top": "26px",
         }
     if state == "active":
         return {
@@ -365,6 +430,10 @@ class InvoiceReviewState(SharedUploadState):
     doc_direction: str = ""
     doc_direction_label: str = ""
     doc_direction_basis: str = ""
+    #: The direction was inherited from another document in the same file (the
+    #: person answered once for the file) — the label says so, and the card is
+    #: still offered so any one document can be changed on its own.
+    doc_direction_inherited: bool = False
     doc_needs_a_human: bool = False
     doc_alias_text: str = ""
     doc_alias_refusal: str = ""
@@ -388,6 +457,11 @@ class InvoiceReviewState(SharedUploadState):
     field_inputs: dict[str, str] = {}
     #: "Type the value…" under the one box it applies to, keyed the same way.
     input_warnings: dict[str, str] = {}
+    #: DATE fields only: the picker's own value (ISO — what an <input type=date>
+    #: holds) and the dd-mm-yyyy text shown beside it. ``field_inputs`` keeps
+    #: the same ISO, so the confirm path stores the pipeline's date form.
+    date_inputs: dict[str, str] = {}
+    date_labels: dict[str, str] = {}
     edited_was: dict[str, str] = {}
     open_reason_for: str = ""          # the settled row whose reason chips are open
     edit_value: str = ""
@@ -903,6 +977,8 @@ class InvoiceReviewState(SharedUploadState):
         # one document's text onto another — seen in the review log).
         self.field_inputs = {}
         self.input_warnings = {}
+        self.date_inputs = {}
+        self.date_labels = {}
         self._load_document()
 
     def _load_review(self, *, first: bool = False) -> None:
@@ -1031,10 +1107,23 @@ class InvoiceReviewState(SharedUploadState):
         # something (typed text, or a value deliberately cleared) is never
         # overwritten by a reload.
         prefilled = dict(self.field_inputs)
+        date_inputs = dict(self.date_inputs)
+        date_labels = dict(self.date_labels)
         for card in self.cards:
+            if card.is_date:
+                # A date card's box is the PICKER, which holds ISO: the guess
+                # is parsed into it ("Fri Apr 17 2026" -> 2026-04-17) and the
+                # card's own words still show the read text beside it.
+                if card.guess_iso and card.input_key not in prefilled:
+                    prefilled[card.input_key] = card.guess_iso
+                    date_inputs[card.input_key] = card.guess_iso
+                    date_labels[card.input_key] = _dmy(card.guess_iso)
+                continue
             if card.best_guess and card.input_key not in prefilled:
                 prefilled[card.input_key] = card.best_guess
         self.field_inputs = prefilled
+        self.date_inputs = date_inputs
+        self.date_labels = date_labels
         for item in model.get("settled") or []:
             self.settled.append(self._value_row(item))
         for item in model.get("not_applicable") or []:
@@ -1068,13 +1157,19 @@ class InvoiceReviewState(SharedUploadState):
     def _set_direction(self, direction: dict, model: dict) -> None:
         value = str(direction.get("direction") or "undetermined")
         self.doc_direction = value
-        self.doc_direction_label = {
+        self.doc_direction_inherited = bool(direction.get("inherited"))
+        label = {
             "sales": "Sales (outward)",
             "purchase": "Purchase (inward)",
             "likely_sales": "Likely sales — needs a person",
             "likely_purchase": "Likely purchase — needs a person",
             "undetermined": "Not settled",
         }.get(value, value)
+        # An inherited answer SAYS it was inherited: the person answered once
+        # for the file, and this document is following it (not their own word).
+        if self.doc_direction_inherited:
+            label = f"{label} — same as the rest of this file"
+        self.doc_direction_label = label
         self.doc_direction_basis = str(direction.get("basis") or "")
         self.doc_needs_a_human = bool(direction.get("needs_a_human"))
         match = direction.get("match") or {}
@@ -1165,6 +1260,11 @@ class InvoiceReviewState(SharedUploadState):
             if card.read_b:
                 shown.append(f"Read B: {card.read_b}")
             card.reads_line = " · ".join(shown)
+            # A date field asks with a picker (see the view): the guess is
+            # parsed to ISO here so the widget has nothing to interpret.
+            card.is_date = _is_date_field(field_key)
+            if card.is_date:
+                card.guess_iso = _iso_from_guess(card.best_guess)
         return card
 
     def _page_render(self, page: int):
@@ -1527,6 +1627,27 @@ class InvoiceReviewState(SharedUploadState):
     def _clear_input(self, input_key: str) -> None:
         self.field_inputs = {k: v for k, v in self.field_inputs.items() if k != input_key}
         self.input_warnings = {k: v for k, v in self.input_warnings.items() if k != input_key}
+        self.date_inputs = {k: v for k, v in self.date_inputs.items() if k != input_key}
+        self.date_labels = {k: v for k, v in self.date_labels.items() if k != input_key}
+
+    @rx.event
+    def set_date_input(self, value: str, input_key: str):
+        """The date picker's own value, normalised to the day-first ISO form.
+
+        The CONFIRM path is untouched: this stores the ISO string that path
+        already stores for a date field (``normalisers.normalise_date`` is the
+        pipeline's date form, and it reads ISO back). The dd-mm-yyyy text beside
+        the picker is derived here because a Var cannot be formatted in the
+        template.
+        """
+        iso = str(value or "").strip()
+        self.date_inputs = {**self.date_inputs, input_key: iso}
+        self.date_labels = {**self.date_labels, input_key: _dmy(iso)}
+        self.field_inputs = {**self.field_inputs, input_key: iso}
+        if input_key in self.input_warnings:
+            self.input_warnings = {
+                k: v for k, v in self.input_warnings.items() if k != input_key
+            }
 
     @rx.event
     def confirm_card(self, input_key: str):
@@ -1679,7 +1800,10 @@ class InvoiceReviewState(SharedUploadState):
             self.refusal = "This file has been exported — its history must not move."
             return
         try:
-            result = review_api.confirm_direction(
+            # The answer is for the FILE: the document answered on is settled
+            # explicitly, the rest of the upload inherits it where nothing the
+            # person or the rule decided already stands (see review_api).
+            result = review_api.confirm_direction_for_upload(
                 self.current_document_id, direction, actor=self._actor(),
                 remember_alias=self.remember_alias,
                 alias_text=self.doc_alias_text or None,
@@ -1691,8 +1815,10 @@ class InvoiceReviewState(SharedUploadState):
             self.refusal = str(result.get("reason") or "That direction was refused.")
             return
         alias = result.get("alias")
+        count = int(result.get("inherited_count") or 0)
         self.flash = (
             f"Direction settled as {direction}."
+            + (f" {count} other document(s) in this file now say the same." if count else "")
             + (f" The name was remembered as “{alias.get('alias_text')}”." if alias else "")
         )
         self._load_review()

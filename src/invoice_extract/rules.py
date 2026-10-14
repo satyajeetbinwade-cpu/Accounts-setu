@@ -72,6 +72,18 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+#: Categories that HAVE a direction at all. Supporting pages, tickets and
+#: not-a-voucher dockets are never asked — and a file-wide direction answer
+#: never reaches them.
+DIRECTION_CATEGORIES: tuple[str, str] = ("tax_invoice", "no_gst_expense")
+
+#: Where an INHERITED direction came from, written on the row itself: ``scope``
+#: marks it (an explicit answer clears the scope) and ``basis`` says it in
+#: words, because basis is the sentence the review screen prints as why.
+INHERITED_DIRECTION_SCOPE = "upload"
+INHERITED_DIRECTION_BASIS = "same as the rest of this file"
+
+
 def _dict_row(cur: sqlite3.Cursor, row: Any) -> Optional[dict[str, Any]]:
     if row is None:
         return None
@@ -853,6 +865,13 @@ def get_review_model(
             "match": json.loads((direction_row or {}).get("match_json") or "{}"),
             "confirmed_by": (direction_row or {}).get("confirmed_by"),
             "confirmed_at": (direction_row or {}).get("confirmed_at"),
+            # The answer came from ANOTHER document in the same file (see
+            # apply_direction_to_upload): the screen says so, and still lets
+            # this one be changed on its own.
+            "inherited": (
+                (direction_row or {}).get("confirmed_by") is not None
+                and (direction_row or {}).get("scope") == INHERITED_DIRECTION_SCOPE
+            ),
             "needs_a_human": invoice_like and direction in (
                 DIRECTION_LIKELY_SALES, DIRECTION_LIKELY_PURCHASE, DIRECTION_UNDETERMINED,
             ),
@@ -1000,7 +1019,8 @@ def confirm_direction(
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
-            "UPDATE invoice_doc_direction SET direction = ?, confirmed_by = ?, confirmed_at = ? "
+            "UPDATE invoice_doc_direction SET direction = ?, confirmed_by = ?, confirmed_at = ?, "
+            "scope = NULL "
             "WHERE document_id = ?",
             (direction, actor, _now(), document_id),
         )
@@ -1009,6 +1029,112 @@ def confirm_direction(
         conn.close()
     return {"document_id": document_id, "direction": direction, "confirmed_by": actor,
             "alias": remembered}
+
+
+def direction_is_inherited(document_id: int, *, db_path=None) -> bool:
+    """Did this document's direction come from the rest of the file?
+
+    True when a CASCADE wrote it (``scope='upload'``) and no person has since
+    answered for this document on its own. The screen uses it to tell "you are
+    settling the file's open question" from "you are correcting this one
+    document" — the second must not move the others.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT confirmed_by, scope FROM invoice_doc_direction WHERE document_id = ?",
+            (int(document_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    return bool(row) and row[0] is not None and row[1] == INHERITED_DIRECTION_SCOPE
+
+
+def apply_direction_to_upload(
+    document_id: int, direction: str, *, actor: str, db_path=None,
+) -> dict[str, Any]:
+    """Give a person's direction answer to the REST of the file (upload).
+
+    The reviewer answers once per file; this applies the same answer to every
+    OTHER document that
+
+    * is a tax invoice or a no-GST expense (a supporting page, a ticket and a
+      not-a-voucher docket are never asked — and never touched), and
+    * has no direction the PERSON set themselves, and
+    * has no direction the RULE decided — a rule that read the client's GSTIN
+      or a known alias in that document never gets overridden, and its answer
+      never spreads either.
+
+    The inherited row is written with ``scope='upload'`` and a basis sentence
+    saying where the answer came from, so the screen can show "same as the rest
+    of this file" and the person can still change any one document on its own
+    (``confirm_direction`` clears the scope). ``confirmed_by`` is set — the
+    inherited answer is durable, and a later rules run (which only ever
+    replaces rows nobody confirmed) cannot undo it. Documents already carrying
+    an inherited answer are re-pointed, so the file stays coherent.
+    """
+    if direction not in (DIRECTION_SALES, DIRECTION_PURCHASE):
+        raise InvoiceExtractError("A confirmation must be 'sales' or 'purchase'.")
+    conn = _connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        document = _load_document(conn, document_id)
+        upload_id = document.get("upload_id")
+        if upload_id is None:
+            return {"document_id": int(document_id), "direction": direction, "inherited": []}
+        rows = conn.execute(
+            "SELECT d.document_id, dir.direction, dir.confirmed_by, dir.scope "
+            "FROM invoice_documents d "
+            "LEFT JOIN invoice_doc_direction dir ON dir.document_id = d.document_id "
+            "WHERE d.upload_id = ? AND d.document_id != ? AND d.category IN (?, ?) "
+            "ORDER BY d.ordinal",
+            (upload_id, int(document_id), *DIRECTION_CATEGORIES),
+        ).fetchall()
+        eligible: list[tuple[int, bool]] = []
+        for row in rows:
+            current, confirmed_by, scope = row[1], row[2], row[3]
+            rule_decided = confirmed_by is None and current not in (
+                None, DIRECTION_UNDETERMINED,
+            )
+            person_decided = confirmed_by is not None and scope != INHERITED_DIRECTION_SCOPE
+            if rule_decided or person_decided:
+                continue
+            if current == direction and confirmed_by is not None:
+                continue                      # already inherited as the same answer
+            eligible.append((int(row[0]), current is None))
+
+        inherited: list[int] = []
+        now = _now()
+        conn.execute("BEGIN")
+        try:
+            for target_id, needs_row in eligible:
+                if needs_row:
+                    conn.execute(
+                        "INSERT INTO invoice_doc_direction (document_id, direction, basis, "
+                        "match_json, confirmed_by, confirmed_at, scope) "
+                        "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+                        (target_id, direction, INHERITED_DIRECTION_BASIS, actor, now,
+                         INHERITED_DIRECTION_SCOPE),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE invoice_doc_direction SET direction = ?, basis = ?, "
+                        "confirmed_by = ?, confirmed_at = ?, scope = ? "
+                        "WHERE document_id = ?",
+                        (direction, INHERITED_DIRECTION_BASIS, actor, now,
+                         INHERITED_DIRECTION_SCOPE, target_id),
+                    )
+                inherited.append(target_id)
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+    return {
+        "document_id": int(document_id), "direction": direction,
+        "inherited": inherited, "inherited_count": len(inherited),
+    }
 
 
 def _likely_alias_text(document_id: int, *, db_path=None) -> Optional[str]:

@@ -50,6 +50,12 @@ def _quiet_label(text) -> rx.Component:
     return rx.text(text, style=t.TEXT["label"], color=t.Color.TEXT_SECONDARY.value)
 
 
+def _best_guess_note() -> rx.Component:
+    """The marking that a box holds a GUESS the reads disagreed on (or that only
+    one read produced) — never presented as a settled value."""
+    return rx.text("Best guess, please check", style=t.TEXT["micro"], color="#8A5A00")
+
+
 def _status_chip(text, *, tone: str = "neutral") -> rx.Component:
     """A state chip that always SAYS what the state is — never colour alone."""
     if tone == "ok":
@@ -337,37 +343,49 @@ def invoice_files_view() -> rx.Component:
 
 
 def _direction_card() -> rx.Component:
-    """The direction card — shown whenever the rules say a person must settle it."""
+    """The direction card — shown whenever a person must settle it, AND on a
+    document that INHERITED the answer from the rest of the file (so any one
+    document can still be changed on its own)."""
     return rx.cond(
-        S.doc_needs_a_human,
+        S.doc_needs_a_human | S.doc_direction_inherited,
         c.card(
             rx.vstack(
                 rx.hstack(
-                    _status_chip("Needs you", tone="warn"),
+                    _status_chip(
+                        rx.cond(S.doc_needs_a_human, "Needs you", "Inherited"),
+                        tone="warn",
+                    ),
                     rx.text("Which way does this invoice go?", style=t.TEXT["body"], font_weight="700"),
                     spacing="2",
                     align="center",
                 ),
                 rx.cond(
-                    S.doc_direction_basis != "",
+                    S.doc_direction_inherited,
                     rx.text(
-                        f"Rule says: {S.doc_direction_label} — {S.doc_direction_basis}",
+                        "This document follows YOUR answer for the rest of this file ("
+                        + S.doc_direction_label
+                        + "). Answer here to make it this document's own — the others keep theirs.",
                         style=t.TEXT["micro"],
                         color=t.Color.TEXT_SECONDARY.value,
                     ),
-                    rx.text(f"Rule says: {S.doc_direction_label}", style=t.TEXT["micro"]),
+                    rx.cond(
+                        S.doc_direction_basis != "",
+                        rx.text(
+                            f"Rule says: {S.doc_direction_label} — {S.doc_direction_basis}",
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                        ),
+                        rx.text(f"Rule says: {S.doc_direction_label}", style=t.TEXT["micro"]),
+                    ),
                 ),
                 rx.hstack(
-                    rx.button(
+                    c.btn_primary(
                         "This is a purchase (inward)",
                         on_click=lambda: S.settle_direction("purchase"),
-                        size="2",
                     ),
-                    rx.button(
+                    c.btn_primary(
                         "This is a sale (outward)",
                         on_click=lambda: S.settle_direction("sales"),
-                        size="2",
-                        variant="soft",
                     ),
                     spacing="2",
                     wrap="wrap",
@@ -534,20 +552,16 @@ def _card_row(card) -> rx.Component:
                         rx.fragment(),
                     ),
                     rx.hstack(
-                        rx.button(
+                        c.btn_secondary(
                             "Accept the figures as read",
                             # Accepting is its OWN act: it records the actor and
                             # the time on the check row and drops the card — it
                             # is NOT a value confirmation.
                             on_click=lambda: S.accept_check(card.check_key),
-                            size="1",
-                            variant="soft",
                         ),
-                        rx.button(
+                        c.btn_tertiary(
                             "Mark not applicable here",
                             on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
-                            size="1",
-                            variant="ghost",
                         ),
                         spacing="2",
                         wrap="wrap",
@@ -557,23 +571,62 @@ def _card_row(card) -> rx.Component:
                     align="start",
                 ),
                 rx.vstack(
-                    rx.input(
-                        placeholder="The printed value",
-                        value=S.field_inputs[card.input_key],
-                        on_change=lambda v: S.set_field_input(v, card.input_key),
-                        on_focus=lambda: S.focus_field(card.field_key),
-                        size="2",
-                        width="100%",
-                    ),
+                    # A DATE field asks with a picker (native date input), so a
+                    # date cannot be typed in the wrong order. The picker holds
+                    # ISO; the dd-mm-yyyy the reviewer reads is shown beside it.
                     rx.cond(
-                        (card.best_guess != "")
-                        & (card.best_guess == S.field_inputs[card.input_key]),
-                        rx.text(
-                            "Best guess, please check",
-                            style=t.TEXT["micro"],
-                            color="#8A5A00",
+                        card.is_date,
+                        rx.hstack(
+                            rx.input(
+                                type="date",
+                                value=S.date_inputs[card.input_key],
+                                on_change=lambda v: S.set_date_input(v, card.input_key),
+                                on_focus=lambda: S.focus_field(card.field_key),
+                                size="2",
+                                width="210px",
+                            ),
+                            rx.cond(
+                                S.date_labels.contains(card.input_key),
+                                rx.text(
+                                    "Chosen: " + S.date_labels[card.input_key] + " (dd-mm-yyyy)",
+                                    style=t.TEXT["micro"],
+                                    color=t.Color.TEXT_SECONDARY.value,
+                                ),
+                                rx.text(
+                                    "Pick a date — shown as dd-mm-yyyy",
+                                    style=t.TEXT["micro"],
+                                    color=t.Color.TEXT_MUTED.value,
+                                ),
+                            ),
+                            spacing="2",
+                            align="center",
+                            wrap="wrap",
                         ),
-                        rx.fragment(),
+                        rx.input(
+                            placeholder="The printed value",
+                            value=S.field_inputs[card.input_key],
+                            on_change=lambda v: S.set_field_input(v, card.input_key),
+                            on_focus=lambda: S.focus_field(card.field_key),
+                            size="2",
+                            width="100%",
+                        ),
+                    ),
+                    # "Best guess, please check" while the box still holds the
+                    # guess — the picker compares ISO, the text box its own text.
+                    rx.cond(
+                        card.is_date,
+                        rx.cond(
+                            (card.guess_iso != "")
+                            & (card.guess_iso == S.date_inputs[card.input_key]),
+                            _best_guess_note(),
+                            rx.fragment(),
+                        ),
+                        rx.cond(
+                            (card.best_guess != "")
+                            & (card.best_guess == S.field_inputs[card.input_key]),
+                            _best_guess_note(),
+                            rx.fragment(),
+                        ),
                     ),
                     rx.cond(
                         card.reads_line != "",
@@ -594,22 +647,17 @@ def _card_row(card) -> rx.Component:
                         rx.fragment(),
                     ),
                     rx.hstack(
-                        rx.button(
+                        c.btn_primary(
                             "Confirm value",
                             on_click=lambda: S.confirm_card(card.input_key),
-                            size="1",
                         ),
-                        rx.button(
+                        c.btn_secondary(
                             "Not printed on the document",
                             on_click=lambda: S.reject_card(card.input_key, "not_on_document"),
-                            size="1",
-                            variant="soft",
                         ),
-                        rx.button(
+                        c.btn_tertiary(
                             "Not applicable here",
                             on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
-                            size="1",
-                            variant="ghost",
                         ),
                         spacing="2",
                         wrap="wrap",
@@ -900,11 +948,10 @@ def _right_pane() -> rx.Component:
                             spacing="2",
                             align="center",
                         ),
-                        rx.button(
+                        c.btn_tertiary(
                             rx.cond(S.settled_collapsed, "Show", "Hide"),
                             on_click=S.toggle_settled,
                             size="1",
-                            variant="ghost",
                         ),
                         width="100%",
                         align="center",
@@ -948,11 +995,10 @@ def _right_pane() -> rx.Component:
                             rx.cond(
                                 S.open_read_only,
                                 rx.fragment(),
-                                rx.button(
+                                c.btn_tertiary(
                                     "Override",
                                     on_click=lambda: S.override_to_required(row.field_key),
                                     size="1",
-                                    variant="ghost",
                                 ),
                             ),
                             width="100%",
@@ -1009,12 +1055,15 @@ def _viewer_pane() -> rx.Component:
                 wrap="wrap",
             ),
             rx.spacer(),
-            rx.button(
-                rx.icon("crosshair", size=13),
-                "Jump to the field's page",
+            c.btn_secondary(
+                rx.hstack(
+                    rx.icon("crosshair", size=13),
+                    rx.text("Jump to the field's page"),
+                    spacing="1",
+                    align="center",
+                ),
                 on_click=S.jump_to_field_page,
                 size="1",
-                variant="soft",
             ),
             width="100%",
             align="center",
@@ -1109,17 +1158,15 @@ def _document_controls() -> rx.Component:
                     rx.cond(
                         S.doc_label != "",
                         rx.hstack(
-                            rx.button(
+                            c.btn_secondary(
                                 "Exclude this document",
                                 on_click=lambda: S.exclude_document("review screen: excluded by a person"),
                                 size="1",
-                                variant="ghost",
                             ),
-                            rx.button(
+                            c.btn_secondary(
                                 "Put it back in",
                                 on_click=S.include_document,
                                 size="1",
-                                variant="ghost",
                             ),
                             spacing="2",
                         ),
@@ -1135,7 +1182,7 @@ def _document_controls() -> rx.Component:
             rx.cond(
                 S.open_read_only,
                 rx.fragment(),
-                rx.button(
+                c.btn_primary(
                     "Mark reviewed",
                     on_click=S.mark_reviewed,
                     disabled=~S.can_mark_reviewed,
@@ -1153,39 +1200,41 @@ def _document_controls() -> rx.Component:
 def invoice_review_screen() -> rx.Component:
     return rx.vstack(
         rx.hstack(
-            rx.button(
-                rx.icon("arrow-left", size=13),
-                "Files",
+            c.btn_secondary(
+                rx.hstack(
+                    rx.icon("arrow-left", size=13),
+                    rx.text("Files"),
+                    spacing="1",
+                    align="center",
+                ),
                 on_click=S.back_to_files,
                 size="1",
-                variant="ghost",
             ),
             _status_chip(f"Document #{S.open_ordinal} of {S.document_count}"),
-            rx.button(
+            c.btn_secondary(
                 rx.icon("chevron-left", size=13),
+                aria_label="Previous document",
                 on_click=S.prev_document,
                 disabled=~S.can_go_prev,
                 size="1",
-                variant="soft",
             ),
-            rx.button(
+            c.btn_secondary(
                 rx.icon("chevron-right", size=13),
+                aria_label="Next document",
                 on_click=S.next_document,
                 disabled=~S.can_go_next,
                 size="1",
-                variant="soft",
             ),
-            rx.button(
+            c.btn_secondary(
                 "Next issue",
                 on_click=S.next_issue,
                 disabled=~S.has_next_issue,
                 size="1",
             ),
-            rx.button(
+            c.btn_secondary(
                 "Documents",
                 on_click=S.toggle_drawer,
                 size="1",
-                variant="soft",
             ),
             rx.spacer(),
             rx.cond(S.flash != "", rx.text(S.flash, style=t.TEXT["micro"]), rx.fragment()),
