@@ -444,3 +444,51 @@ flyctl ssh console -a setu-poc -C \
 Do not run this while another branch is mid-deploy on the same app, and rotate
 the live `admin` password: it is still set to the historical default that used
 to be seeded from source, so it must be treated as public knowledge.
+
+## 12. Do NOT deploy this branch onto the live volume as-is
+
+Section 11.2 above is **withdrawn**. Deploying `phase-2` over `setu-poc`'s
+existing database does not merely replace a build — it breaks reconciliation at
+runtime, because the live volume is on a *different schema lineage*.
+
+**The divergence.** `release-fly` (the branch the live app is built from) contains
+a client-identity refactor that `phase-2` never received: clients became integer
+keyed (`end_clients.client_id`), so `runs.client_id` + `client_name_at_run`
+replaced the old text `runs.client`, and `users.end_client_id` replaced
+`end_client_ref`. The two branches share only the ancestor `e2ea3f6`:
+
+- `phase-2` = `e2ea3f6` + `dfafdf2` (silos) + `e76a520` (WAL)
+- `release-fly` = `e2ea3f6` + ~60 commits, including the client-id migration
+- `git merge-base --is-ancestor dfafdf2 origin/release-fly` → **false**
+
+`phase-2` has no `RENAME` migration and does not know `client_name_at_run`, so
+nothing bridges the two naming schemes.
+
+**Measured, not inferred.** Building a database from the live schema
+(`sqlite_master` DDL, no rows) and running this branch's own boot sequence
+(`src.bootstrap.init_all`) against it: no module failed — but then
+
+```
+db.insert_run(...) → OperationalError: table runs has no column named client
+```
+
+Columns the live database lacks that this branch's code writes:
+
+| Table | Missing on live |
+| --- | --- |
+| `users` | `end_client_ref` (live has `end_client_id`), and the four silo columns — those four *are* added by `_migrate_users()`, `end_client_ref` is not |
+| `runs`, `review_state`, `result_field_overrides`, `per_client_team_assignments` | `client` (live has `client_id`) |
+| `ingestion_results`, `ingestion_shape_cache` | `client_ref` |
+
+By contrast `owner_user_id` is fine: `src/clients/schema.py` and
+`src/documents/schema.py` add it to `end_clients`, `documents`,
+`chart_of_accounts`, `contact_directory` and `historical_snapshots` on boot.
+
+Live data would also be invisible to this branch: 10 clients and 20 runs keyed by
+integer `client_id`, which our text-keyed reads cannot reach.
+
+**The safe route.** Port the silo work onto the `release-fly` lineage — take its
+client-id model as the base and re-apply `src/auth/access.py`, the auth changes,
+the ownership migrations and the seed script on top — and deploy that. The
+`end_clients.owner_user_id` design carries over unchanged; only the client key
+type in the scoped reads has to follow `client_id`.
