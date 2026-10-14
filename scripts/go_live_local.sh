@@ -41,12 +41,12 @@ echo "database:    ${SETU_DB_PATH}"
 echo "data root:   ${SETU_DATA_ROOT}"
 
 # ------------------------------------------------------------- boot + seed
-# The NORMAL boot path, run against the scratch pair only. `python main.py`
-# refuses nothing here because the database is explicit (not the repo's own);
-# on branches that carry the boot-safety guard the explicit flag for a
-# deliberate real-database migration is `SETU_ALLOW_BOOT_MIGRATE=1`.
+# The NORMAL boot path, run against the scratch pair only. The boot-safety
+# guard makes a bare `python main.py` refuse — migrations must be ASKED for —
+# so this explicit --migrate is the command (the same sequence the container
+# CMD runs via SETU_ALLOW_BOOT_MIGRATE=1).
 echo "== boot (migrations + seeds) against the scratch pair =="
-"${PY}" main.py
+"${PY}" main.py --migrate
 
 # ------------------------------------------------------------------ client
 # Idempotent: the client is created only when this GSTIN is not already there,
