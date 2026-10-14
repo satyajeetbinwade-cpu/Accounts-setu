@@ -75,6 +75,24 @@ NEEDS_YOU_TITLES = {
     "direction_unsettled": "Which way does this invoice go?",
 }
 
+#: Plain words for a document that was skipped by design (no value extraction).
+PLAIN_NOTES = {
+    "supporting": "This is a supporting document — kept with the file, not read for values.",
+    "ticket": "This is a ticket — kept with the file, not read for values.",
+    "not_a_voucher": "This is not a voucher — kept with the file, not read for values.",
+    "undetermined": "This page was not identified as an invoice — kept with the file, not read for values.",
+}
+
+
+def _plain_note_for(category: str, status: str, reason: str) -> str:
+    """Why this document asks no value questions, in plain words ("" if none)."""
+    if status != "skipped":
+        return ""
+    note = PLAIN_NOTES.get(category or "", "")
+    if not note:
+        note = (reason or "This document was not extracted for values.").rstrip(".") + "."
+    return note + " Nothing was extracted from it, so there are no values to check here."
+
 
 @dataclass
 class ClientPick:
@@ -147,6 +165,17 @@ class CardRow:
     page: int = 0
     handwriting_text: str = ""
     has_handwriting: bool = False
+
+    #: The input box this card owns, keyed by DOCUMENT + field (never the
+    #: field key alone — two documents can both ask about `invoice_total`).
+    input_key: str = ""
+    #: What each read produced, and the guess the box starts with — the card
+    #: says "Best guess, please check" while the box still holds it.
+    read_a: str = ""
+    read_b: str = ""
+    best_guess: str = ""
+    reads_line: str = ""
+
     #: The field's own box, cropped out of the upright page with padding —
     #: a real crop, not the whole page positioned by CSS.
     crop_src: str = ""
@@ -176,6 +205,9 @@ class CheckLine:
     status: str = ""
     detail: str = ""
     ok: bool = False
+    #: A person accepted this check's figures as read: the strip shows it
+    #: amber while the ORIGINAL status and detail stay as computed.
+    accepted: bool = False
     implicated: list[str] = dc_field(default_factory=list)
 
 
@@ -339,6 +371,9 @@ class InvoiceReviewState(SharedUploadState):
     remember_alias: bool = False
     page_line: str = ""
     page_tag: str = ""
+    #: Plain words for a skipped document (no values were extracted): "" for
+    #: an extracted invoice.
+    plain_note: str = ""
     cards: list[CardRow] = []
     settled: list[ValueRow] = []
     not_applicable: list[ValueRow] = []
@@ -347,7 +382,12 @@ class InvoiceReviewState(SharedUploadState):
     settled_document_order: bool = False
     settled_collapsed: bool = False
     drawer_open: bool = False
+    #: Keyed by "<document_id>:<field_key>" — NEVER by the field key alone.
+    #: Two documents can both ask about `invoice_total`; text typed on one
+    #: must never appear on the other (it did, before this key).
     field_inputs: dict[str, str] = {}
+    #: "Type the value…" under the one box it applies to, keyed the same way.
+    input_warnings: dict[str, str] = {}
     edited_was: dict[str, str] = {}
     open_reason_for: str = ""          # the settled row whose reason chips are open
     edit_value: str = ""
@@ -858,6 +898,11 @@ class InvoiceReviewState(SharedUploadState):
         self.flash = ""
         self.open_reason_for = ""
         self.drawer_open = False
+        # The typed text belongs to the document it was typed on: a new
+        # document starts with EMPTY boxes (the old bare-key dict carried
+        # one document's text onto another — seen in the review log).
+        self.field_inputs = {}
+        self.input_warnings = {}
         self._load_document()
 
     def _load_review(self, *, first: bool = False) -> None:
@@ -888,6 +933,7 @@ class InvoiceReviewState(SharedUploadState):
         self.not_applicable = []
         self.derived = []
         self.checks = []
+        self.plain_note = ""
         self.refusal = ""
         if not self.current_document_id:
             return
@@ -898,21 +944,34 @@ class InvoiceReviewState(SharedUploadState):
             # A document with no extraction yet is a normal state mid-run — and
             # the header must NOT keep the previous document's words while the
             # viewer already shows this one's pages (seen in a screenshot pass).
-            self.refusal = str(exc)
+            # A SUPPORTING page is the exception: it will never be extracted,
+            # so its missing extraction row is a finished state, not a wait —
+            # it gets the plain-words panel instead of a refusal.
             blank = next(
                 (d for d in self.documents if d.document_id == self.current_document_id),
                 DocRow(),
             )
+            self.plain_note = (
+                _plain_note_for(blank.category, "skipped", "")
+                if blank.category in PLAIN_NOTES else ""
+            )
+            self.refusal = "" if self.plain_note else str(exc)
             self.doc_label = blank.label
             self.doc_category = blank.category
             self.doc_category_label = blank.category_label
             self.doc_direction = ""
-            self.doc_direction_label = "No extraction yet"
+            self.doc_direction_label = "No extraction yet" if not self.plain_note else "Not extracted"
             self.doc_direction_basis = ""
             self.doc_needs_a_human = False
             self.page_tag = ""
-            self.page_line = f"{blank.label or 'This document'} has no extraction to review yet."
-            self.can_mark_reviewed = False
+            self.page_line = (
+                f"{blank.label or 'This document'} is kept with the file — no values to read."
+                if self.plain_note
+                else f"{blank.label or 'This document'} has no extraction to review yet."
+            )
+            # A kept-with-the-file page can be marked reviewed; a document
+            # still waiting for its extraction cannot (it has no questions yet).
+            self.can_mark_reviewed = bool(self.plain_note)
             self._load_field_boxes()
             self._load_viewer()
             return
@@ -934,12 +993,21 @@ class InvoiceReviewState(SharedUploadState):
                 status=str(chk.get("status")),
                 detail=str(chk.get("detail") or ""),
                 ok=str(chk.get("status")) == "pass",
+                accepted=bool(chk.get("accepted")),
                 implicated=list(chk.get("fields_implicated") or []),
             )
             for chk in model.get("checks") or []
         ]
         # The check rows, kept for the cards: the detail AND the inputs.
         self.check_rows_raw = [dict(chk) for chk in model.get("checks") or []]
+        # A SKIPPED extraction (supporting / ticket / not-a-voucher) has no
+        # fields and no checks: the screen says why in plain words instead of
+        # rendering empty question boxes for it.
+        self.plain_note = _plain_note_for(
+            doc.category,
+            str(model.get("extraction_status") or ""),
+            str(model.get("extraction_skipped_reason") or ""),
+        )
         # GROUP BY CAUSE. A failed check that implicates fields speaks for them:
         # one card titled with the cause, listing the fields it is about, is the
         # honest shape — a reviewer acts on the cause, not on five symptoms.
@@ -958,6 +1026,15 @@ class InvoiceReviewState(SharedUploadState):
             ):
                 continue
             self.cards.append(self._card(item, doc))
+        # What a read actually produced is PREFILLED into each empty box, so
+        # the reviewer edits rather than types — but a box that already holds
+        # something (typed text, or a value deliberately cleared) is never
+        # overwritten by a reload.
+        prefilled = dict(self.field_inputs)
+        for card in self.cards:
+            if card.best_guess and card.input_key not in prefilled:
+                prefilled[card.input_key] = card.best_guess
+        self.field_inputs = prefilled
         for item in model.get("settled") or []:
             self.settled.append(self._value_row(item))
         for item in model.get("not_applicable") or []:
@@ -1073,6 +1150,21 @@ class InvoiceReviewState(SharedUploadState):
             # against the first field it names.
             first = self.field_boxes.get(card.implicated[0]) or {}
             card.field_id = int(first.get("field_id") or 0)
+        # The input box is keyed by DOCUMENT + field — never by the field key
+        # alone (item 4: text must not leak between documents).
+        card.input_key = f"{self.current_document_id}:{field_key or card.check_key}"
+        if kind in ("missing_required", "below_threshold"):
+            card.read_a = str(item.get("value_a") or "")
+            card.read_b = str(item.get("value_b") or "")
+            # "Show what was read": the merged value if there is one, else the
+            # one read that found something — and the card SAYS it is a guess.
+            card.best_guess = str(item.get("value") or "") or card.read_a or card.read_b
+            shown: list[str] = []
+            if card.read_a:
+                shown.append(f"Read A: {card.read_a}")
+            if card.read_b:
+                shown.append(f"Read B: {card.read_b}")
+            card.reads_line = " · ".join(shown)
         return card
 
     def _page_render(self, page: int):
@@ -1178,6 +1270,9 @@ class InvoiceReviewState(SharedUploadState):
             label=_field_label(field_key),
             value=str(item.get("value") or ""),
             score_label="" if score is None else str(int(round(float(score)))),
+            # A HUMAN decision carries its own words ("You confirmed" /
+            # "Not printed (you confirmed)") — shown as a chip, never a score.
+            tag=str(item.get("human_label") or ""),
             page=int(item.get("page") or 0),
             edited_was=self.edited_was.get(field_key, ""),
         )
@@ -1420,29 +1515,88 @@ class InvoiceReviewState(SharedUploadState):
             return False
 
     @rx.event
-    def set_field_input(self, value: str, field_key: str):
+    def set_field_input(self, value: str, input_key: str):
         """The card inputs bind as ``on_change={value}`` — Reflex supplies the
-        value first, so the key rides as a partial argument."""
-        self.field_inputs = {**self.field_inputs, field_key: value}
+        value first, so the document+field key rides as a partial argument."""
+        self.field_inputs = {**self.field_inputs, input_key: value}
+        if input_key in self.input_warnings:
+            self.input_warnings = {
+                k: v for k, v in self.input_warnings.items() if k != input_key
+            }
+
+    def _clear_input(self, input_key: str) -> None:
+        self.field_inputs = {k: v for k, v in self.field_inputs.items() if k != input_key}
+        self.input_warnings = {k: v for k, v in self.input_warnings.items() if k != input_key}
 
     @rx.event
-    def confirm_card(self, field_key: str):
-        card = next((c for c in self.cards if c.field_key == field_key), None)
+    def confirm_card(self, input_key: str):
+        """Confirm stores the typed value THROUGH the service layer (one
+        transaction: reviewed value on the field row, human-reviewed marker,
+        correction log) — the screen reloads from the model afterwards."""
+        card = next((c for c in self.cards if c.input_key == input_key), None)
         if card is None:
             return
-        value = (self.field_inputs.get(field_key) or card.value or "").strip()
-        if self._log(card.field_id, ACTION_CONFIRMED, reason_code="correct", value_after=value or None):
-            self.flash = f"{card.label or field_key}: confirmed."
-            self._load_review()
+        if self.open_read_only:
+            self.refusal = "This file has been exported — its history must not move."
+            return
+        value = (self.field_inputs.get(input_key) or "").strip()
+        if not value:
+            # Write NOTHING; the box says what to do instead.
+            self.input_warnings = {
+                **self.input_warnings,
+                input_key: "Type the value, or use Not printed on the document.",
+            }
+            return
+        try:
+            doc_actions.apply_field_decision(
+                self.current_document_id, card.field_key, action="confirmed",
+                value=value, actor=self._actor(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.refusal = str(exc)
+            return
+        self._clear_input(input_key)
+        self.flash = f"{card.label or card.field_key}: confirmed."
+        self._load_review()
 
     @rx.event
-    def reject_card(self, field_key: str, reason: str):
-        card = next((c for c in self.cards if c.field_key == field_key), None)
+    def reject_card(self, input_key: str, reason: str):
+        """Not printed: an ANSWER, stored through the same service call — no
+        value, the human-reviewed marker, the log row."""
+        card = next((c for c in self.cards if c.input_key == input_key), None)
         if card is None:
             return
-        if self._log(card.field_id, ACTION_NOT_PRINTED, reason_code=reason or "not_on_document"):
-            self.flash = f"{card.label or field_key}: recorded as not printed on the document."
-            self._load_review()
+        if self.open_read_only:
+            self.refusal = "This file has been exported — its history must not move."
+            return
+        try:
+            doc_actions.apply_field_decision(
+                self.current_document_id, card.field_key, action="not_printed",
+                value=None, actor=self._actor(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.refusal = str(exc)
+            return
+        self._clear_input(input_key)
+        self.flash = f"{card.label or card.field_key}: recorded as not printed on the document."
+        self._load_review()
+
+    @rx.event
+    def accept_check(self, check_key: str):
+        """A person accepted a check's figures as read: recorded ON the check
+        row (actor + time), the card drops, the strip shows it amber."""
+        if self.open_read_only:
+            self.refusal = "This file has been exported — its history must not move."
+            return
+        try:
+            doc_actions.accept_check(
+                self.current_document_id, check_key, actor=self._actor(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.refusal = str(exc)
+            return
+        self.flash = "The figures were accepted as read."
+        self._load_review()
 
     @rx.event
     def not_applicable_card(self, field_key: str, reason: str):
@@ -1623,7 +1777,7 @@ class InvoiceReviewState(SharedUploadState):
     @rx.event
     def key_confirm_focused(self):
         if self.cards:
-            self.confirm_card(self.cards[0].field_key)
+            self.confirm_card(self.cards[0].input_key)
 
     @rx.event
     def key_edit_focused(self):

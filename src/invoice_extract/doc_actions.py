@@ -25,6 +25,7 @@ import json
 import sqlite3
 from typing import Any, Optional
 
+from src.invoice_extract import fields_v2 as fv2
 from src.invoice_extract.immutable import is_immutable_status, is_upload_immutable
 from src.invoice_extract.review_schema import (
     ACTION_EXCLUDED,
@@ -425,6 +426,236 @@ def unmark_reviewed(
         document_id, actor=actor, triggered_by=CLEARED_BY_REVIEWER,
         reason=reason or "withdrawn by a reviewer", db_path=db_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# Field-level decisions (the review screen's Confirm / Not printed)
+# ---------------------------------------------------------------------------
+
+#: The two human decisions a field row can carry. Stored as field STATUSES
+#: (``fv2.STATUS_CONFIRMED`` / ``fv2.STATUS_NOT_PRINTED_CONFIRMED``) plus a
+#: small JSON in the field row's ``review_json`` column (migration 0008), so
+#: the decision lives ON the row: every reader sees the same answer, and no
+#: re-run of rules or confidence can write over it.
+FIELD_ACTION_CONFIRMED = "confirmed"
+FIELD_ACTION_NOT_PRINTED = "not_printed"
+_FIELD_ACTIONS = (FIELD_ACTION_CONFIRMED, FIELD_ACTION_NOT_PRINTED)
+
+
+def field_review_decision(field_row: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The HUMAN decision stored on a field row, or None.
+
+    The decision lives ON THE FIELD ROW (status + ``review_json``) — the
+    ``invoice_field_corrections`` table is HISTORY and is deliberately never
+    read back as a decision, so an old log row cannot count as one.
+    """
+    raw = field_row.get("review_json")
+    if not raw or not isinstance(raw, str) or not raw.lstrip().startswith("{"):
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("reviewed") not in _FIELD_ACTIONS:
+        return None
+    return data
+
+
+def apply_field_decision(
+    document_id: int, field_key: str, *, action: str, value: Optional[str],
+    actor: str, db_path=None,
+) -> dict[str, Any]:
+    """Record ONE human decision about ONE field, in one transaction.
+
+    * it stores the decision on the field row itself — status
+      ``confirmed`` / ``not_printed_confirmed`` plus a JSON of the reviewed
+      value, actor and time — creating the row when the field has none;
+    * it writes the correction-log row (the audit trail), and
+    * it unsigns any standing document review.
+
+    Because the decision lives on ``invoice_doc_fields``, a later rules or
+    confidence re-run can never overwrite or un-settle it (neither writes that
+    table). An empty confirm is refused here as well — the screen's message is
+    not the only guard.
+    """
+    if action not in _FIELD_ACTIONS:
+        raise InvoiceExtractError(f"'{action}' is not a field decision.")
+    text = (value or "").strip()
+    if action == FIELD_ACTION_CONFIRMED and not text:
+        raise InvoiceExtractError("Type the value, or use Not printed on the document.")
+
+    from src.invoice_extract.confidence_schema import (
+        ACTION_CONFIRMED as LOG_CONFIRMED,
+        ACTION_MARKED_NOT_PRINTED as LOG_NOT_PRINTED,
+    )
+
+    conn = _connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        document = _document(conn, document_id)
+        _refuse_if_filed(document)
+
+        row = conn.execute(
+            "SELECT extraction_id FROM invoice_doc_extractions "
+            "WHERE document_id = ? AND is_active = 1 "
+            "ORDER BY extraction_id DESC LIMIT 1",
+            (int(document_id),),
+        ).fetchone()
+        if row is None:
+            raise InvoiceExtractError(
+                "This document has no active extraction to record the decision against."
+            )
+        extraction_id = int(row[0])
+
+        cur = conn.execute(
+            "SELECT f.field_id, f.value_a, f.value_b, f.is_handwritten, "
+            "s.score, s.threshold_used, s.formula_version, "
+            "e.provider_a, e.model_a, e.provider_b, e.model_b "
+            "FROM invoice_doc_fields f "
+            "LEFT JOIN invoice_doc_field_scores s ON s.field_id = f.field_id "
+            "LEFT JOIN invoice_doc_extractions e ON e.extraction_id = f.extraction_id "
+            "WHERE f.extraction_id = ? AND f.field_key = ? "
+            "ORDER BY f.field_id",
+            (extraction_id, field_key),
+        )
+        # A field can have MORE THAN ONE row in an extraction (the demo seed
+        # writes one per read pass). The review model reads the LAST row, so
+        # the decision must land on ALL of them — updating only the first left
+        # the screen showing the question it had just answered.
+        field_rows = [_dict_row(cur, row) for row in cur.fetchall()]
+        field = field_rows[-1] if field_rows else None
+
+        now = _now()
+        status = (fv2.STATUS_CONFIRMED if action == FIELD_ACTION_CONFIRMED
+                  else fv2.STATUS_NOT_PRINTED_CONFIRMED)
+        meta = {
+            "reviewed": action,
+            "value": text or None,
+            "by": actor,
+            "at": now,
+        }
+        value_before = (field or {}).get("value_a") or (field or {}).get("value_b")
+        score = (field or {}).get("score")
+        threshold = (field or {}).get("threshold_used")
+        was_flagged = score is None or (
+            threshold is not None and float(score) < float(threshold)
+        )
+        extraction_models = json.dumps({
+            "read_a": {"provider": (field or {}).get("provider_a"), "model": (field or {}).get("model_a")},
+            "read_b": {"provider": (field or {}).get("provider_b"), "model": (field or {}).get("model_b")},
+        })
+
+        conn.execute("BEGIN")
+        try:
+            if field is None:
+                cur = conn.execute(
+                    "INSERT INTO invoice_doc_fields "
+                    "(extraction_id, document_id, field_key, status, review_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (extraction_id, int(document_id), field_key, status, json.dumps(meta)),
+                )
+                field_id = int(cur.lastrowid)
+            else:
+                field_id = int(field["field_id"])
+                conn.execute(
+                    "UPDATE invoice_doc_fields SET status = ?, review_json = ? "
+                    "WHERE extraction_id = ? AND field_key = ?",
+                    (status, json.dumps(meta), extraction_id, field_key),
+                )
+            conn.execute(
+                "INSERT INTO invoice_field_corrections (field_id, document_id, client_id, "
+                "field_key, value_before, value_after, action, reason_code, reason_text, actor, "
+                "at, score_at_time, was_flagged, formula_version, document_category, "
+                "extraction_models, is_handwritten) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    field_id, int(document_id), document.get("client_id"), field_key,
+                    value_before, text or None,
+                    (LOG_CONFIRMED if action == FIELD_ACTION_CONFIRMED else LOG_NOT_PRINTED),
+                    ("correct" if action == FIELD_ACTION_CONFIRMED else "not_on_document"),
+                    actor, now, score, 1 if was_flagged else 0,
+                    (field or {}).get("formula_version"), document.get("category"),
+                    extraction_models, 1 if (field or {}).get("is_handwritten") else 0,
+                ),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    # A decision UN-SIGNS any standing review: the reviewer vouched for values
+    # that have now changed. Same rule as every other correction.
+    try:
+        clear_reviewed(
+            int(document_id), actor=actor, triggered_by="field_decision",
+            reason=f"decision on {field_key} ({action})", field_key=field_key,
+            db_path=db_path,
+        )
+    except Exception:  # noqa: BLE001 — the decision itself is already committed
+        pass
+
+    return {
+        "document_id": int(document_id), "field_id": field_id, "field_key": field_key,
+        "status": status, "action": action, "value": text or None,
+    }
+
+
+def accept_check(
+    document_id: int, check_key: str, *, actor: str, db_path=None,
+) -> dict[str, Any]:
+    """A person accepted a failed check's figures AS READ.
+
+    Stored INSIDE the check row's ``inputs_json`` (no schema change): the
+    original status and detail are kept, so the strip can still say what the
+    check found — the acceptance is what drops the card. First acceptance
+    stands. A later rules run regenerates check rows and therefore clears
+    acceptances; they vouch for the evidence in front of the reviewer.
+    """
+    conn = _connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        document = _document(conn, document_id)
+        _refuse_if_filed(document)
+        row = conn.execute(
+            "SELECT extraction_id FROM invoice_doc_extractions "
+            "WHERE document_id = ? AND is_active = 1 "
+            "ORDER BY extraction_id DESC LIMIT 1",
+            (int(document_id),),
+        ).fetchone()
+        if row is None:
+            raise InvoiceExtractError("This document has no active extraction.")
+        extraction_id = int(row[0])
+        cur = conn.execute(
+            "SELECT inputs_json FROM invoice_doc_checks "
+            "WHERE extraction_id = ? AND check_key = ?",
+            (extraction_id, check_key),
+        )
+        check = cur.fetchone()
+        if check is None:
+            raise InvoiceExtractError(f"This document has no '{check_key}' check to accept.")
+        try:
+            inputs = json.loads(check[0] or "{}")
+        except (TypeError, ValueError):
+            inputs = {}
+        if not isinstance(inputs, dict):
+            inputs = {}
+        if not inputs.get("accepted_by"):
+            inputs["accepted_by"] = actor
+            inputs["accepted_at"] = _now()
+            conn.execute(
+                "UPDATE invoice_doc_checks SET inputs_json = ? "
+                "WHERE extraction_id = ? AND check_key = ?",
+                (json.dumps(inputs, default=str), extraction_id, check_key),
+            )
+            conn.commit()
+        return {
+            "document_id": int(document_id), "check_key": check_key,
+            "accepted_by": inputs.get("accepted_by"), "accepted_at": inputs.get("accepted_at"),
+        }
+    finally:
+        conn.close()
 
 
 def clear_reviewed(

@@ -9,7 +9,9 @@ Migrations MUST be written to be idempotent themselves as well — a
 half-applied migration that was rolled back, or a table rebuilt by hand,
 must not break the next run. ``apply`` receives an open connection with
 foreign-key enforcement disabled; the runner re-enables it and runs
-``PRAGMA foreign_key_check`` after all migrations.
+``PRAGMA foreign_key_check`` whenever it actually applied something,
+raising only if the run ADDED violations (a legacy database may already
+carry orphans that are not this migration's fault).
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ def run_migrations(
     ordered = sorted(migrations, key=lambda m: m.version)
     already = applied_versions(conn)
     ran: list[int] = []
+    pending = [m for m in ordered if m.version not in already]
 
     # Explicit transaction control: the migrations themselves issue DDL that
     # sqlite refuses inside an implicit transaction in some paths, so drive
@@ -67,6 +70,16 @@ def run_migrations(
     prev_isolation = conn.isolation_level
     conn.isolation_level = None
     try:
+        # How many orphaned rows the database ALREADY had. A legacy database
+        # can carry orphans from before enforcement existed; a migration this
+        # run is only answerable for the violations it ADDS, so the post-check
+        # below compares against this number instead of demanding a spotless
+        # database (which would block every additive migration forever).
+        baseline = 0
+        if pending:
+            conn.execute("PRAGMA foreign_keys = ON")
+            baseline = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+
         for m in ordered:
             if m.version in already:
                 continue
@@ -87,12 +100,13 @@ def run_migrations(
                 print(f"  applied migration {m.version}: {m.name}")
 
         conn.execute("PRAGMA foreign_keys = ON")
-        violations = conn.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise RuntimeError(
-                f"foreign_key_check reported {len(violations)} violation(s) after "
-                f"migrations: {violations[:10]}"
-            )
+        if pending:
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if len(violations) > baseline:
+                raise RuntimeError(
+                    f"foreign_key_check reported {len(violations) - baseline} NEW "
+                    f"violation(s) after migrations: {violations[:10]}"
+                )
     finally:
         conn.isolation_level = prev_isolation
 

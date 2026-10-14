@@ -168,11 +168,17 @@ DOC_EXTRACT_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
-# NOTE: existing tables are deliberately left UNCHANGED by this phase. A model
-# call is attributed to its document through ``ai_call_log.reference_type``
+# NOTE: existing tables are deliberately CHANGED only additively. A model call
+# is attributed to its document through ``ai_call_log.reference_type``
 # ('doc_extraction') plus ``reference_id`` / ``upload_id``, which Phase 1
-# already records, so no new column is needed on an existing table.
-DOC_EXTRACT_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+# already records, so no new column is needed on an existing table for CALLS.
+# The one additive column is ``review_json`` (migration 0008): the human
+# review decision (Confirm / Not printed) a reviewer records on a field row,
+# stored ON the row so the decision survives every re-run. Kept here so the
+# migration and a fresh ``init_invoice_extract`` can never disagree.
+DOC_EXTRACT_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("invoice_doc_fields", "review_json", "TEXT"),
+)
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:

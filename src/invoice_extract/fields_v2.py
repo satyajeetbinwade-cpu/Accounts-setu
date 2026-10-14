@@ -48,13 +48,22 @@ STATUS_NOT_PRINTED = "not_printed"
 STATUS_UNREADABLE = "unreadable"
 STATUS_OUT_OF_REGION = "out_of_region"
 STATUS_NEEDS_PRINTED = "needs_printed"
+#: A HUMAN decision, stored on the field row itself (see
+#: ``doc_actions.apply_field_decision``): the reviewer confirmed the value
+#: ("confirmed") or decided it is not printed on the document
+#: ("not_printed_confirmed"). Both survive a later rules/confidence re-run and
+#: settle the field.
+STATUS_CONFIRMED = "confirmed"
+STATUS_NOT_PRINTED_CONFIRMED = "not_printed_confirmed"
 
-ALL_STATUSES = (
+STATUSES = (
     STATUS_READ,
     STATUS_NOT_PRINTED,
     STATUS_UNREADABLE,
     STATUS_OUT_OF_REGION,
     STATUS_NEEDS_PRINTED,
+    STATUS_CONFIRMED,
+    STATUS_NOT_PRINTED_CONFIRMED,
 )
 
 

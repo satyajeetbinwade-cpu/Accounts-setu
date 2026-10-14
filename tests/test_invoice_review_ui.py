@@ -145,26 +145,45 @@ def test_next_issue_wraps_and_keeps_going(scratch):
 
 def test_each_decision_records_its_action_code(scratch, monkeypatch):
     seen = capture_corrections(monkeypatch)
-    state = goto(open_upload(new_state()), 1)
+    state = open_upload(new_state())
 
-    card = state.cards[0]
-    state.set_field_input("1234", card.field_key)
-    state.confirm_card(card.field_key)
-    state.reject_card(card.field_key, "not_on_document")
-    state.not_applicable_card(card.field_key, "not_applicable_here")
+    # Confirm and Not printed write through the service layer's own
+    # single-transaction writer (field row + log row together) — read them
+    # back from the log table itself.
+    goto(state, 6)
+    first = state.cards[0]
+    state.set_field_input("500", first.input_key)
+    state.confirm_card(first.input_key)
+    second = next(c for c in state.cards if c.field_key and c.field_key != first.field_key)
+    state.reject_card(second.input_key, "not_on_document")
 
+    doc_id = state.current_document_id
+    conn = sqlite3.connect(scratch)
+    rows = conn.execute(
+        "SELECT action, reason_code, value_after FROM invoice_field_corrections "
+        "WHERE document_id = ? ORDER BY correction_id",
+        (doc_id,),
+    ).fetchall()
+    conn.close()
+    assert [(row[0], row[1]) for row in rows] == [
+        ("confirmed_as_is", "correct"), ("marked_not_printed", "not_on_document"),
+    ]
+    assert rows[0][2] == "500"          # the TYPED value is what got stored
+
+    # Not applicable and the settle-edit still log through record_correction.
+    goto(state, 2)
+    state.not_applicable_card(state.cards[0].field_key, "not_applicable_here")
+    goto(state, 3)
     settled = state.settled[0]
     state.confirm_settled(settled.field_key, "correct")
     state.set_edit_value("999")
     state.edit_settled(settled.field_key, "ocr_error")
 
     assert [action for action, _, _ in seen] == [
-        "confirmed_as_is", "marked_not_printed", "marked_not_applicable",
-        "confirmed_as_is", "edited",
+        "marked_not_applicable", "confirmed_as_is", "edited",
     ]
-    assert seen[1][1] == "not_on_document"
-    assert seen[2][1] == "not_applicable_here"
-    assert seen[4][1] == "ocr_error"
+    assert seen[0][1] == "not_applicable_here"
+    assert seen[2][1] == "ocr_error"
     assert all(field_id for _, _, field_id in seen)
 
 
@@ -192,8 +211,8 @@ def test_an_exported_upload_takes_no_decisions(scratch, monkeypatch):
     state = goto(open_upload(new_state()), 1)
     assert state.open_read_only is True
     assert state.open_read_only_note
-    state.confirm_card(state.cards[0].field_key)
-    state.reject_card(state.cards[0].field_key, "not_on_document")
+    state.confirm_card(state.cards[0].input_key)
+    state.reject_card(state.cards[0].input_key, "not_on_document")
     state.recategorise("supporting")
     state.mark_reviewed()
     assert seen == []
@@ -369,3 +388,118 @@ def test_a_v2_upload_is_stored_and_queued(scratch):
     assert result["run_id"]
     stored = ie.get_upload(result["upload_id"])
     assert stored and stored["extraction_path"] == "v2"
+
+
+# ===========================================================================
+# The 2026-27 fix round: a decision STORES, and the screen CHANGES
+# ===========================================================================
+
+
+def test_confirm_stores_the_typed_value_and_settles(scratch):
+    """Confirm goes through ONE service call: value on the field row (typed
+    text, not just the guess), human-reviewed, labelled "You confirmed" —
+    and a later review-model run (what a re-run hands the screen) still
+    shows it settled, never back in needs-you."""
+    from src.invoice_extract import rules as rules_mod
+
+    state = goto(open_upload(new_state()), 2)
+    card = state.cards[0]
+    assert card.field_key == "invoice_total"
+    state.set_field_input("1,180.00", card.input_key)
+    state.confirm_card(card.input_key)
+
+    row = next((s for s in state.settled if s.field_key == "invoice_total"), None)
+    assert row is not None and row.value == "1,180.00"
+    assert row.tag == "You confirmed"
+    assert not any(c.field_key == "invoice_total" for c in state.cards)
+    assert card.input_key not in state.field_inputs, "the box clears after confirm"
+
+    model = rules_mod.get_review_model(state.current_document_id)
+    hit = [s for s in model["settled"] if s["field_key"] == "invoice_total"]
+    assert hit and hit[0].get("human_label") == "You confirmed"
+    assert hit[0]["score"] is None, "a person's decision carries no score"
+    assert not any(i.get("field_key") == "invoice_total" for i in model["needs_you"])
+
+
+def test_not_printed_is_an_answer_with_no_value(scratch):
+    state = goto(open_upload(new_state()), 2)
+    card = state.cards[0]
+    state.reject_card(card.input_key, "not_on_document")
+
+    row = next((s for s in state.settled if s.field_key == "invoice_total"), None)
+    assert row is not None and row.value == ""
+    assert row.tag == "Not printed (you confirmed)"
+    assert not state.cards
+    assert state.can_mark_reviewed, "no question stands any more"
+
+
+def test_confirm_without_text_writes_nothing(scratch):
+    state = goto(open_upload(new_state()), 2)
+    card = state.cards[0]
+    state.set_field_input("", card.input_key)
+    state.confirm_card(card.input_key)
+
+    assert state.cards and state.cards[0].field_key == "invoice_total"
+    assert state.input_warnings[card.input_key] == (
+        "Type the value, or use Not printed on the document."
+    )
+    conn = sqlite3.connect(scratch)
+    count = conn.execute(
+        "SELECT COUNT(*) FROM invoice_field_corrections WHERE document_id = ?",
+        (state.current_document_id,),
+    ).fetchone()[0]
+    conn.close()
+    assert count == 0, "an empty confirm must not write anything"
+
+
+def test_accepting_a_failed_check_drops_its_card(scratch):
+    import json as json_mod
+
+    state = goto(open_upload(new_state()), 1)
+    check_card = next(c for c in state.cards if c.kind == "check_failed")
+    state.accept_check(check_card.check_key)
+
+    assert not any(c.kind == "check_failed" for c in state.cards)
+    line = next(chk for chk in state.checks if chk.check_key == check_card.check_key)
+    assert line.status == "fail", "the original status stays as computed"
+    assert line.accepted
+
+    conn = sqlite3.connect(scratch)
+    raw = conn.execute(
+        "SELECT c.inputs_json FROM invoice_doc_checks c "
+        "JOIN invoice_doc_extractions e ON e.extraction_id = c.extraction_id "
+        "WHERE e.document_id = ? AND c.check_key = ?",
+        (state.current_document_id, check_card.check_key),
+    ).fetchone()
+    conn.close()
+    stored = json_mod.loads(raw[0])
+    assert stored["accepted_by"] == "test:review" and stored["accepted_at"]
+
+
+def test_typed_text_does_not_leak_between_documents(scratch):
+    state = goto(open_upload(new_state()), 2)
+    card = state.cards[0]
+    state.set_field_input("typed on doc 2", card.input_key)
+    assert state.field_inputs[card.input_key] == "typed on doc 2"
+
+    goto(state, 3)
+    assert state.field_inputs == {}, "a new document starts empty"
+    goto(state, 2)
+    assert card.input_key not in state.field_inputs
+
+
+def test_a_skipped_document_shows_plain_words_and_asks_nothing(scratch):
+    state = goto(open_upload(new_state()), 7)
+    assert state.doc_category == "supporting"
+    assert state.plain_note.startswith("This is a supporting document")
+    assert state.plain_note.endswith("no values to check here.")
+    assert not state.cards and not state.checks and not state.settled
+    assert state.doc_needs_a_human is False, "no direction card for a kept page"
+    assert state.can_mark_reviewed
+
+
+def test_not_applicable_lands_in_its_own_card_with_an_override(scratch):
+    state = goto(open_upload(new_state()), 2)
+    state.not_applicable_card(state.cards[0].field_key, "not_applicable_here")
+    assert not state.cards
+    assert any(row.field_key == "invoice_total" for row in state.not_applicable)

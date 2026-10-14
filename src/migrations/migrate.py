@@ -33,8 +33,12 @@ from src.migrations.m0004_invoice_rules_v1 import MIGRATION as MIGRATION_4
 from src.migrations.m0005_invoice_confidence_v1 import MIGRATION as MIGRATION_5
 from src.migrations.m0006_invoice_review_services import MIGRATION as MIGRATION_6
 from src.migrations.m0007_pipeline_chains import MIGRATION as MIGRATION_7
+from src.migrations.m0008_field_review import MIGRATION as MIGRATION_8
 
-MIGRATIONS = [MIGRATION, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6, MIGRATION_7]
+MIGRATIONS = [
+    MIGRATION, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6,
+    MIGRATION_7, MIGRATION_8,
+]
 
 
 def _now_stamp() -> str:
@@ -147,8 +151,12 @@ def run(
             }
 
         if already_migrated(conn):
-            # Schema already migrated. Still run the folder step (idempotent) so
-            # a crash between the two steps self-heals on the next boot.
+            # Schema already client-id-migrated. That is NOT "nothing to do":
+            # a later release may have added numbered framework migrations
+            # (0002…0008), so bring them up to date — idempotent, each still
+            # runs in its own transaction — then run the folder step so a
+            # crash between the two steps self-heals on the next boot.
+            applied = framework.run_migrations(conn, MIGRATIONS, verbose=True)
             moves = folders_mod.plan_folder_moves(
                 resolve_mapping(conn, create=False, data_root=data_root), data_root
             )
@@ -156,6 +164,7 @@ def run(
             return {
                 "mode": "no-op",
                 "already_migrated": True,
+                "applied_migrations": applied,
                 "folder_moves": folder_result,
                 "row_counts_before": before,
                 "row_counts_after": _row_counts(conn),

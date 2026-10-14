@@ -132,8 +132,9 @@ def test_a_pre_migration_database_gains_the_table_through_the_framework(tmp_path
     from src.migrations import migrate as migrate_mod
 
     all_migrations = list(migrate_mod.MIGRATIONS)
-    assert len(all_migrations) == 7
-    assert all_migrations[-1].version == 7 and all_migrations[-1].name == "invoice_pipeline_chains"
+    assert len(all_migrations) == 8
+    assert all_migrations[-1].version == 8 and all_migrations[-1].name == "invoice_field_review"
+    assert all_migrations[-2].version == 7 and all_migrations[-2].name == "invoice_pipeline_chains"
 
     def tables(db_path):
         conn = recon_db.get_connection(db_path)

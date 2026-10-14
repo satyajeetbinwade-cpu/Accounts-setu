@@ -536,7 +536,10 @@ def _card_row(card) -> rx.Component:
                     rx.hstack(
                         rx.button(
                             "Accept the figures as read",
-                            on_click=lambda: S.confirm_card(card.field_key),
+                            # Accepting is its OWN act: it records the actor and
+                            # the time on the check row and drops the card — it
+                            # is NOT a value confirmation.
+                            on_click=lambda: S.accept_check(card.check_key),
                             size="1",
                             variant="soft",
                         ),
@@ -556,21 +559,49 @@ def _card_row(card) -> rx.Component:
                 rx.vstack(
                     rx.input(
                         placeholder="The printed value",
-                        value=S.field_inputs[card.field_key],
-                        on_change=lambda v: S.set_field_input(v, card.field_key),
+                        value=S.field_inputs[card.input_key],
+                        on_change=lambda v: S.set_field_input(v, card.input_key),
                         on_focus=lambda: S.focus_field(card.field_key),
                         size="2",
                         width="100%",
                     ),
+                    rx.cond(
+                        (card.best_guess != "")
+                        & (card.best_guess == S.field_inputs[card.input_key]),
+                        rx.text(
+                            "Best guess, please check",
+                            style=t.TEXT["micro"],
+                            color="#8A5A00",
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        card.reads_line != "",
+                        rx.text(
+                            card.reads_line,
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        S.input_warnings.contains(card.input_key),
+                        rx.text(
+                            S.input_warnings[card.input_key],
+                            style=t.TEXT["micro"],
+                            color="#8C2B2B",
+                        ),
+                        rx.fragment(),
+                    ),
                     rx.hstack(
                         rx.button(
                             "Confirm value",
-                            on_click=lambda: S.confirm_card(card.field_key),
+                            on_click=lambda: S.confirm_card(card.input_key),
                             size="1",
                         ),
                         rx.button(
                             "Not printed on the document",
-                            on_click=lambda: S.reject_card(card.field_key, "not_on_document"),
+                            on_click=lambda: S.reject_card(card.input_key, "not_on_document"),
                             size="1",
                             variant="soft",
                         ),
@@ -601,29 +632,85 @@ def _card_row(card) -> rx.Component:
 
 
 def _checks_strip() -> rx.Component:
+    """Every check, in ONE of four states — colour is never the only signal:
+
+    * ACCEPTED by a person (amber check, "accepted by you") — the acceptance
+      rides ON TOP of the original status, which is still shown;
+    * not applicable to this document (grey dash, with the reason as small
+      text, so "grey" is explained where it appears);
+    * passed (green check);
+    * failed (red cross).
+    """
     return c.card(
         rx.vstack(
             _quiet_label("Checks on this document"),
             rx.hstack(
                 rx.foreach(
                     S.checks,
-                    lambda chk: rx.hstack(
-                        rx.icon(
-                            rx.cond(chk.ok, "check", "x"),
-                            size=12,
-                            color=rx.cond(chk.ok, "#1F6B3B", "#8C2B2B"),
+                    lambda chk: rx.vstack(
+                        rx.hstack(
+                            rx.icon(
+                                rx.cond(
+                                    chk.accepted, "check",
+                                    rx.cond(
+                                        chk.ok, "check",
+                                        rx.cond(chk.status == "not_applicable", "minus", "x"),
+                                    ),
+                                ),
+                                size=12,
+                                color=rx.cond(
+                                    chk.accepted, "#8A5A00",
+                                    rx.cond(
+                                        chk.ok, "#1F6B3B",
+                                        rx.cond(chk.status == "not_applicable", t.Color.TEXT_MUTED.value, "#8C2B2B"),
+                                    ),
+                                ),
+                            ),
+                            rx.text(
+                                chk.label,
+                                font_size="11px",
+                                color=rx.cond(
+                                    chk.accepted, "#8A5A00",
+                                    rx.cond(
+                                        chk.ok, t.Color.TEXT_SECONDARY.value,
+                                        rx.cond(chk.status == "not_applicable", t.Color.TEXT_MUTED.value, "#8C2B2B"),
+                                    ),
+                                ),
+                                font_weight=rx.cond(chk.ok, "500", "700"),
+                            ),
+                            spacing="1",
+                            align="center",
+                            padding="2px 6px",
+                            border_radius="6px",
+                            background=rx.cond(
+                                chk.accepted, "#FFF7E6",
+                                rx.cond(
+                                    chk.ok, "transparent",
+                                    rx.cond(chk.status == "not_applicable", "transparent", "#FBEAEA"),
+                                ),
+                            ),
                         ),
-                        rx.text(
-                            chk.label,
-                            font_size="11px",
-                            color=rx.cond(chk.ok, t.Color.TEXT_SECONDARY.value, "#8C2B2B"),
-                            font_weight=rx.cond(chk.ok, "500", "700"),
+                        rx.cond(
+                            chk.status == "not_applicable",
+                            rx.text(
+                                chk.detail,
+                                font_size="10px",
+                                color=t.Color.TEXT_MUTED.value,
+                                max_width="220px",
+                            ),
+                            rx.fragment(),
                         ),
-                        spacing="1",
-                        align="center",
-                        padding="2px 6px",
-                        border_radius="6px",
-                        background=rx.cond(chk.ok, "transparent", "#FBEAEA"),
+                        rx.cond(
+                            chk.accepted,
+                            rx.text(
+                                "accepted by you",
+                                font_size="10px",
+                                color="#8A5A00",
+                            ),
+                            rx.fragment(),
+                        ),
+                        spacing="0",
+                        align="start",
                     ),
                 ),
                 spacing="3",
@@ -633,6 +720,38 @@ def _checks_strip() -> rx.Component:
             width="100%",
             align="start",
         ),
+    )
+
+
+def _plain_panel() -> rx.Component:
+    """A document that was skipped by design (supporting / ticket / not a
+    voucher): the category, why in plain words, its pages beside it, and the
+    standard actions (Move to / Exclude / Mark reviewed) below — NOT empty
+    question boxes, and no checks or settled cards with nothing in them.
+    """
+    return rx.cond(
+        S.plain_note != "",
+        c.card(
+            rx.vstack(
+                rx.hstack(
+                    _quiet_label("This document"),
+                    _status_chip(S.doc_category_label),
+                    spacing="2",
+                    align="center",
+                ),
+                rx.text(S.plain_note, style=t.TEXT["body"]),
+                rx.text(
+                    "Use the actions below: move it to another category, exclude it, "
+                    "or mark it reviewed.",
+                    style=t.TEXT["micro"],
+                    color=t.Color.TEXT_SECONDARY.value,
+                ),
+                spacing="2",
+                width="100%",
+                align="start",
+            ),
+        ),
+        rx.fragment(),
     )
 
 
@@ -654,7 +773,15 @@ def _settled_row(row) -> rx.Component:
                 rx.cond(
                     row.tag == "derived",
                     _status_chip("Derived", tone="neutral"),
-                    rx.fragment(),
+                    rx.cond(
+                        row.tag != "",
+                        # A HUMAN decision says who decided ("You confirmed" /
+                        # "Not printed (you confirmed)") — settled, but with
+                        # its own words, and with no score (a score is about
+                        # model agreement, not about a person's answer).
+                        _status_chip(row.tag, tone="ok"),
+                        rx.fragment(),
+                    ),
                 ),
                 rx.cond(
                     S.open_read_only,
@@ -755,49 +882,53 @@ def _right_pane() -> rx.Component:
             rx.fragment(),
         ),
         _direction_card(),
-        c.card(
-            rx.vstack(
-                rx.hstack(
-                    _quiet_label("Settled"),
-                    rx.spacer(),
+        rx.cond(
+            S.settled.length() > 0,
+            c.card(
+                rx.vstack(
                     rx.hstack(
-                        rx.text("Sort", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
-                        rx.switch(
-                            checked=S.settled_document_order,
-                            on_change=S.set_settled_order,
-                            size="1",
+                        _quiet_label("Settled"),
+                        rx.spacer(),
+                        rx.hstack(
+                            rx.text("Sort", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
+                            rx.switch(
+                                checked=S.settled_document_order,
+                                on_change=S.set_settled_order,
+                                size="1",
+                            ),
+                            rx.text("invoice order", style=t.TEXT["micro"]),
+                            spacing="2",
+                            align="center",
                         ),
-                        rx.text("invoice order", style=t.TEXT["micro"]),
-                        spacing="2",
+                        rx.button(
+                            rx.cond(S.settled_collapsed, "Show", "Hide"),
+                            on_click=S.toggle_settled,
+                            size="1",
+                            variant="ghost",
+                        ),
+                        width="100%",
                         align="center",
                     ),
-                    rx.button(
-                        rx.cond(S.settled_collapsed, "Show", "Hide"),
-                        on_click=S.toggle_settled,
-                        size="1",
-                        variant="ghost",
+                    rx.cond(
+                        S.settled_collapsed,
+                        rx.text(
+                            f"{S.settled.length()} value(s) settled",
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                        ),
+                        rx.grid(
+                            rx.foreach(S.settled, _settled_row),
+                            columns="2",
+                            spacing="2",
+                            width="100%",
+                        ),
                     ),
+                    spacing="2",
                     width="100%",
-                    align="center",
+                    align="start",
                 ),
-                rx.cond(
-                    S.settled_collapsed,
-                    rx.text(
-                        f"{S.settled.length()} value(s) settled",
-                        style=t.TEXT["micro"],
-                        color=t.Color.TEXT_SECONDARY.value,
-                    ),
-                    rx.grid(
-                        rx.foreach(S.settled, _settled_row),
-                        columns="2",
-                        spacing="2",
-                        width="100%",
-                    ),
-                ),
-                spacing="2",
-                width="100%",
-                align="start",
             ),
+            rx.fragment(),
         ),
         rx.cond(
             S.not_applicable.length() > 0,
@@ -1103,7 +1234,8 @@ def invoice_review_screen() -> rx.Component:
             rx.fragment(),
         ),
         _document_header(),
-        _checks_strip(),
+        _plain_panel(),
+        rx.cond(S.checks.length() > 0, _checks_strip(), rx.fragment()),
         rx.hstack(
             rx.box(_viewer_pane(), width="52%"),
             rx.box(_right_pane(), width="48%"),

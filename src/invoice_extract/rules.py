@@ -38,6 +38,7 @@ from src.invoice_extract import applicability as applicability_mod
 from src.invoice_extract import checks as checks_mod
 from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import direction as direction_mod
+from src.invoice_extract import doc_actions
 from src.invoice_extract import normalisers as nz_mod
 from src.invoice_extract.doc_context import DocContext, RuleConfig
 from src.invoice_extract.rules_schema import (
@@ -75,6 +76,22 @@ def _dict_row(cur: sqlite3.Cursor, row: Any) -> Optional[dict[str, Any]]:
     if row is None:
         return None
     return {c[0]: row[i] for i, c in enumerate(cur.description)}
+
+
+def _check_acceptance(row: dict[str, Any]) -> tuple[str, Optional[str]]:
+    """(accepted_by, accepted_at) stored in the check row's OWN inputs JSON.
+
+    No schema change: the original status and detail stay exactly as computed
+    — the acceptance rides alongside them, so the strip can say both what the
+    check found and that a person accepted it.
+    """
+    try:
+        inputs = json.loads(row.get("inputs_json") or "{}")
+    except (TypeError, ValueError):
+        return "", None
+    if not isinstance(inputs, dict):
+        return "", None
+    return str(inputs.get("accepted_by") or ""), inputs.get("accepted_at")
 
 
 # ---------------------------------------------------------------------------
@@ -574,8 +591,14 @@ def get_review_model(
         direction_row = _dict_row(cur, cur.fetchone())
 
         cur = conn.execute(
+            "SELECT status, skipped_reason FROM invoice_doc_extractions "
+            "WHERE extraction_id = ?", (extraction_id,),
+        )
+        extraction_row = _dict_row(cur, cur.fetchone()) or {}
+
+        cur = conn.execute(
             "SELECT f.field_key, f.status, f.value_a, f.value_b, f.reads_agree, f.field_id, "
-            "f.page, f.x, f.y, f.w, f.h, "
+            "f.page, f.x, f.y, f.w, f.h, f.review_json, "
             "s.score, s.signals_json, s.caps_json, s.threshold_used, s.formula_version "
             "FROM invoice_doc_fields f "
             "LEFT JOIN invoice_doc_field_scores s ON s.field_id = f.field_id "
@@ -583,6 +606,15 @@ def get_review_model(
             (extraction_id,),
         )
         fields = {str(r["field_key"]): r for r in (_dict_row(cur, row) for row in cur.fetchall())}
+        # HUMAN decisions live on the field row itself (status + review_json,
+        # see doc_actions.apply_field_decision). They settle the field, drop
+        # its cards, and — because nothing else writes invoice_doc_fields —
+        # survive any later rules/confidence re-run. The corrections LOG is
+        # deliberately not consulted: an old log row must not count as one.
+        decisions = {
+            key: doc_actions.field_review_decision(record) for key, record in fields.items()
+        }
+        human_keys = {key for key, decision in decisions.items() if decision is not None}
         # The handwritten figures on this document. They are never VALUES; they
         # are the reason a value needs a person (a figure written over a printed
         # amount), so the screen can name the figure instead of saying "flag".
@@ -605,21 +637,28 @@ def get_review_model(
             continue
         record = fields.get(key)
         has_value = bool(record and (record.get("value_a") or record.get("value_b")))
-        if not has_value:
-            missing.append({
-                "field_key": key,
-                # The ROW a decision is logged against: a screen taking a
-                # "not printed" decision needs the field row's id, and a missing
-                # value still has one.
-                "field_id": (record or {}).get("field_id"),
-                "status": (record or {}).get("status") or "not_extracted",
-                "reason": next(
-                    (r["reason"] for r in level_rows if r["field_key"] == key), "",
-                ),
-                "level_source": next(
-                    (r["source"] for r in level_rows if r["field_key"] == key), "rule",
-                ),
-            })
+        # A HUMAN decision resolves the gap: a confirmed value IS the value,
+        # and "not printed (you confirmed)" is an answer, not a gap.
+        if has_value or key in human_keys:
+            continue
+        missing.append({
+            "field_key": key,
+            # The ROW a decision is logged against: a screen taking a
+            # "not printed" decision needs the field row's id, and a missing
+            # value still has one.
+            "field_id": (record or {}).get("field_id"),
+            "status": (record or {}).get("status") or "not_extracted",
+            "reason": next(
+                (r["reason"] for r in level_rows if r["field_key"] == key), "",
+            ),
+            "level_source": next(
+                (r["source"] for r in level_rows if r["field_key"] == key), "rule",
+            ),
+            # What each read actually produced, so the screen can show the
+            # reviewer what was read before they decide.
+            "value_a": (record or {}).get("value_a"),
+            "value_b": (record or {}).get("value_b"),
+        })
 
     # ------------------------------------------------------------------ fields
     # Each field carries its Phase-4 score, its signals and its caps, so the
@@ -693,13 +732,15 @@ def get_review_model(
             "kind": "check_failed", "check_key": row["check_key"], "detail": row["detail"],
             "fields_implicated": json.loads(row["fields_implicated_json"] or "[]"),
         }
-        for row in check_rows if row["status"] == CHECK_FAIL
+        for row in check_rows
+        if row["status"] == CHECK_FAIL and not _check_acceptance(row)[0]
     ]
     missing_keys = {item["field_key"] for item in missing}
     below = sorted(
         (
             _field_view(key) for key, record in fields.items()
             if key not in missing_keys
+            and key not in human_keys
             and record.get("score") is not None
             and record.get("threshold_used") is not None
             and float(record["score"]) < float(record["threshold_used"])
@@ -707,8 +748,13 @@ def get_review_model(
         key=lambda item: (float(item["score"]), item["field_key"]),
     )
     needs_you += [{"kind": "below_threshold", **item} for item in below]
+    # The direction question is an INVOICE question: a supporting page, a
+    # ticket or a not-a-voucher docket has no sales/purchase direction to
+    # settle, so it never gets the card.
+    category = str(document.get("category") or "")
+    invoice_like = category in ("tax_invoice", "no_gst_expense")
     direction = str((direction_row or {}).get("direction") or DIRECTION_UNDETERMINED)
-    if direction not in (DIRECTION_SALES, DIRECTION_PURCHASE):
+    if invoice_like and direction not in (DIRECTION_SALES, DIRECTION_PURCHASE):
         needs_you.append({
             "kind": "direction_unsettled", "direction": direction,
             "basis": (direction_row or {}).get("basis"),
@@ -728,7 +774,25 @@ def get_review_model(
         and (fields[key].get("value_a") or fields[key].get("value_b"))
         and not key.startswith("line.")
         and not _is_below_threshold(fields[key])
+        and key not in human_keys
     ]
+    # A person's own decision settles the field — including one the model left
+    # empty. It is shown WITH the words that say who decided, never a score:
+    # a score is about model agreement, not about a human decision.
+    for key in sorted(human_keys):
+        decision = decisions[key]
+        settled.append({
+            **_field_view(key),
+            "value": str(decision.get("value") or ""),
+            "score": None,
+            "order": -1,
+            "human_label": (
+                "You confirmed" if decision.get("reviewed") == "confirmed"
+                else "Not printed (you confirmed)"
+            ),
+            "human_by": decision.get("by"),
+            "human_at": decision.get("at"),
+        })
     if order == "document":
         settled.sort(key=lambda item: item["order"])
     else:
@@ -751,6 +815,11 @@ def get_review_model(
         "document_id": document_id,
         "extraction_id": extraction_id,
         "category": document.get("category"),
+        # The extraction row's own state: a document whose extraction was
+        # SKIPPED (supporting/ticket/not-a-voucher) has 0 fields and 0 checks,
+        # and the screen renders its own panel for it instead of empty boxes.
+        "extraction_status": extraction_row.get("status"),
+        "extraction_skipped_reason": extraction_row.get("skipped_reason"),
         "index": document.get("ordinal"),
         "client_id": document.get("client_id"),
         "needs_you": needs_you,
@@ -772,6 +841,9 @@ def get_review_model(
                 "status": row["status"], "detail": row["detail"],
                 "inputs": json.loads(row["inputs_json"] or "{}"),
                 "fields_implicated": json.loads(row["fields_implicated_json"] or "[]"),
+                "accepted": bool(_check_acceptance(row)[0]),
+                "accepted_by": _check_acceptance(row)[0],
+                "accepted_at": _check_acceptance(row)[1],
             }
             for row in check_rows
         ],
@@ -781,7 +853,7 @@ def get_review_model(
             "match": json.loads((direction_row or {}).get("match_json") or "{}"),
             "confirmed_by": (direction_row or {}).get("confirmed_by"),
             "confirmed_at": (direction_row or {}).get("confirmed_at"),
-            "needs_a_human": direction in (
+            "needs_a_human": invoice_like and direction in (
                 DIRECTION_LIKELY_SALES, DIRECTION_LIKELY_PURCHASE, DIRECTION_UNDETERMINED,
             ),
         },
