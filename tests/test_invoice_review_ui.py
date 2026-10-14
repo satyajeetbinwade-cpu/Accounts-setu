@@ -503,3 +503,38 @@ def test_not_applicable_lands_in_its_own_card_with_an_override(scratch):
     state.not_applicable_card(state.cards[0].field_key, "not_applicable_here")
     assert not state.cards
     assert any(row.field_key == "invoice_total" for row in state.not_applicable)
+
+
+def test_a_cause_card_resolves_to_a_real_field_row(scratch, monkeypatch):
+    """``rules.field_boxes()`` must carry the field ROW, not just its rectangle.
+
+    A failed check's card has no field row of its own — the decision it takes
+    is logged against the first field it names, looked up in ``field_boxes``.
+    Before that SELECT carried ``field_id`` the lookup returned None, the
+    card's ``field_id`` was 0, and every decision on the card was refused with
+    "This item has no field row to record a decision against."
+    """
+    from src.invoice_extract import rules as rules_mod
+
+    seen = capture_corrections(monkeypatch)
+    # Document #6 (handwriting) is the demo whose failed checks NAME fields —
+    # those are the cards the lookup has to resolve.
+    state = goto(open_upload(new_state()), 6)
+
+    boxes = rules_mod.field_boxes(state.current_document_id)
+    assert boxes, "the document's fields must have boxes"
+    assert all(box.get("field_id") for box in boxes.values()), (
+        "every box must name its field row"
+    )
+
+    cause = next(c for c in state.cards if c.kind == "check_failed" and c.implicated)
+    assert cause.implicated, "the check names the fields it is about"
+    assert cause.field_id > 0, "the cause card must resolve to a real field row"
+
+    # The decision the card's buttons take — it used to be refused.
+    assert state._log(
+        cause.field_id, "marked_not_applicable", reason_code="not_applicable_here",
+    ) is True
+    assert [action for action, _, _ in seen] == ["marked_not_applicable"]
+    assert all(field_id for _, _, field_id in seen)
+    assert "no field row" not in state.refusal

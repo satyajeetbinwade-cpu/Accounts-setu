@@ -868,6 +868,12 @@ def field_boxes(document_id: int, *, db_path=None) -> dict[str, dict[str, Any]]:
     screen also has to point at the box of a field a FAILED CHECK named, and at
     the box of a settled field — both are ordinary rows, so their boxes come
     from here.
+
+    ``field_id`` is selected WITH the box because the caller needs the ROW, not
+    only the rectangle: a cause card (a failed check) has no field row of its
+    own, and its decisions are logged against the first field it names. Without
+    the id here that card's ``field_id`` was 0, and every decision on it was
+    refused with "This item has no field row to record a decision against."
     """
     conn = _connect(db_path)
     try:
@@ -875,7 +881,7 @@ def field_boxes(document_id: int, *, db_path=None) -> dict[str, dict[str, Any]]:
         if extraction_id is None:
             return {}
         cur = conn.execute(
-            "SELECT field_key, page, x, y, w, h FROM invoice_doc_fields "
+            "SELECT field_id, field_key, page, x, y, w, h FROM invoice_doc_fields "
             "WHERE extraction_id = ?",
             (extraction_id,),
         )
