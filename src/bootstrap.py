@@ -294,12 +294,18 @@ def run_migrations(
     except Exception as exc:  # noqa: BLE001
         failures.append(f"client-id migration: {type(exc).__name__}: {exc}")
 
-    for label, module_path, func_name in _BOOT_STEPS:
-        try:
-            module = importlib.import_module(module_path)
-            getattr(module, func_name)(db_path)
-        except Exception as exc:  # noqa: BLE001 — aggregate, then fail loudly
-            failures.append(f"{label}: {type(exc).__name__}: {exc}")
+    # A failed migration leaves the schema at its OLD version. Running the
+    # init_* steps on it is exactly what the migrate-FIRST ordering above
+    # exists to prevent (an init_* over a post-migration column shape aborts
+    # on the legacy table), and a failed boot must leave the database as it
+    # found it: report the migration failure and stop here.
+    if not failures:
+        for label, module_path, func_name in _BOOT_STEPS:
+            try:
+                module = importlib.import_module(module_path)
+                getattr(module, func_name)(db_path)
+            except Exception as exc:  # noqa: BLE001 — aggregate, then fail loudly
+                failures.append(f"{label}: {type(exc).__name__}: {exc}")
 
     if failures:
         raise RuntimeError(
