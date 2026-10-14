@@ -12,16 +12,15 @@
         "place_of_supply": "Uttar Pradesh",
         "line.1.hsn_sac": "997112",
         "line.1.amount": "1,000.00",
+        "taxable_value": "1,000.00",
+        "igst_rate": "18",
         "igst_amount": "180.00",
         "invoice_total": "1,180.00",
         "reference_no_date": "KMAP/2025-06/003 dt. 27-Apr-26"
       },
       "not_printed": ["buyers_order_no"],
       "handwritten_amounts": [],
-      "doubts": [
-        "igst_rate: the task notes it may not be printed. NOT asserted either way — the scorer reports what the reads returned for it.",
-        "taxable_value: the task gives 'taxable (line amount) 1,000.00'; whether the summary block prints a separate taxable value is unconfirmed, so only line.1.amount is asserted."
-      ]
+      "doubts": []
     },
     {
       "label": "p3 — KMAP/2026-27/002",
@@ -52,6 +51,7 @@
         "invoice_total": "12,917.00"
       },
       "not_printed": ["line.1.hsn_sac", "igst_rate", "taxable_value"],
+      "_note": "igst_rate and taxable_value are NOT printed on this invoice, and Phase 3 DERIVES the rate as 18.00% from the two amounts that ARE printed (igst_amount 1,970.46 over line.1.amount 10,947.00). A derived rate is still not a printed value: for igst_rate the only correct Phase-2 outcome is NULL from BOTH reads.",
       "handwritten_amounts": [],
       "doubts": [
         "The task states hsn_sac, igst_rate and taxable_value are NOT printed on this invoice, yet igst_amount 1,970.46 over 10,947.00 is 18%. Those three are asserted as not_printed exactly as the task describes."
@@ -99,7 +99,6 @@
       ],
       "handwritten_amounts": [],
       "doubts": [
-        "The task says only 'amount 9,000.00' with no GSTIN and no tax lines. invoice_total is asserted as 9,000.00 on the assumption that the bill's single amount IS the total — if the page prints no total line this assertion is wrong and the scorer will show it.",
         "The task lists no handwritten amounts for p23, so the handwriting guard is expected to fire ZERO times here."
       ]
     },

@@ -64,6 +64,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TOUCHPOINT_READ_A = "invoice_extraction_visual"     # the same 'read the page' job as Phase 1
 TOUCHPOINT_READ_B = "invoice_extraction_verify"     # the independent second read
 
+#: The two reads, IN ORDER, with the human name the pre-flight report uses.
+#: Read B must never be served by read A's provider — that is the whole point
+#: of paying for a second read.
+READS: tuple[tuple[str, str], ...] = (
+    ("read A", TOUCHPOINT_READ_A),
+    ("read B", TOUCHPOINT_READ_B),
+)
+
 # --- settings --------------------------------------------------------------
 KEY_ENABLED = "invoice_extract.v2.enabled"
 KEY_DPI = "invoice_extract.v2.dpi"
@@ -844,8 +852,11 @@ def extract_document(
             status = fv2.STATUS_OUT_OF_REGION
         elif a is None and b is None:
             status = fv2.STATUS_NOT_PRINTED
-        elif a is not None and a.is_handwritten:
-            # A handwritten value is not a field value: require the printed one.
+        elif a is not None and a.is_handwritten and spec.monetary:
+            # The model itself says it read the amount by hand. A monetary value
+            # must come from the printed block, so require the printed one — a
+            # handwritten invoice number or date is not an amount, so the field
+            # keeps its value.
             status = fv2.STATUS_NEEDS_PRINTED
         else:
             status = fv2.STATUS_READ
@@ -1469,43 +1480,123 @@ def fields_by_key(extraction: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {str(f["field_key"]): f for f in extraction.get("fields") or []}
 
 
+def configured_reads(*, db_path=None) -> list[dict[str, Any]]:
+    """What each read is configured to USE, in read-then-leg order.
+
+    One record per (read, leg): ``{read, touchpoint, leg, provider, model}``.
+    Read-only — it resolves the assignment and nothing else.
+    """
+    from src.ai_models import service as ai_models
+
+    out: list[dict[str, Any]] = []
+    for read, touchpoint in READS:
+        legs = ai_models.effective_leg(touchpoint, db_path=db_path) or {}
+        for leg_name in ("primary", "fallback"):
+            leg = legs.get(leg_name) or {}
+            out.append({
+                "read": read,
+                "touchpoint": touchpoint,
+                "leg": leg_name,
+                "provider": leg.get("provider") or "(unassigned)",
+                "model": leg.get("model"),
+            })
+    return out
+
+
+def _describe(record: dict[str, Any]) -> str:
+    """'read B (invoice_extraction_verify) primary leg 'anthropic' / 'claude-sonnet-4'."""
+    return (
+        f"{record['read']} ({record['touchpoint']}) {record['leg']} leg '"
+        f"{record['provider']}' / '{record['model'] or 'no model assigned'}'"
+    )
+
+
 def provider_preflight(*, db_path=None) -> tuple[list[dict[str, Any]], list[str]]:
     """What the two reads need, and whether the platform can supply it.
 
     Reports per provider ONLY whether a key is available — never a key, never a
-    decrypted secret. Returns ``(rows, problems)``; each problem is a sentence
-    naming what is missing, so a caller can stop BEFORE spending anything.
+    decrypted secret. Returns ``(rows, problems)``; each row names the read(s),
+    the leg and the model behind that provider, and each problem is a sentence
+    naming the READ, its configured PROVIDER and MODEL and the reason it is
+    refused:
+
+    * a read with no model assigned at all,
+    * no usable API key for a leg's provider,
+    * a model the catalogue says is text-only (the read sends page images),
+    * read B configured on the same provider as read A, so it could not be an
+      independent second opinion.
+
+    A caller can therefore stop BEFORE spending anything, and a human can see
+    what to change and where. Defaults are never altered here.
     """
     from src.ai_models import service as ai_models
 
     available = configured_providers(db_path=db_path)
-    needed: list[str] = []
-    # (read label, touchpoint, the model its PRIMARY leg would use)
-    reads: list[tuple[str, str, Optional[str]]] = []
-    for read, touchpoint in (("read A", TOUCHPOINT_READ_A), ("read B", TOUCHPOINT_READ_B)):
-        legs = ai_models.effective_leg(touchpoint, db_path=db_path) or {}
-        for leg in ("primary", "fallback"):
-            provider = (legs.get(leg) or {}).get("provider")
-            if provider and provider not in needed:
-                needed.append(provider)
-        reads.append((read, touchpoint, (legs.get("primary") or {}).get("model")))
-    ordered = sorted(set(needed) | set(available))
-    rows = [{"provider": key, "available": key in available} for key in ordered]
+    configured = configured_reads(db_path=db_path)
+
+    uses: dict[str, list[dict[str, Any]]] = {}
+    for record in configured:
+        uses.setdefault(record["provider"], []).append(record)
+    rows = [
+        {"provider": key, "available": key in available, "used_by": uses.get(key, [])}
+        for key in sorted(set(uses) | set(available))
+    ]
 
     problems: list[str] = []
-    # A read with NO model assigned cannot run at all. Reported plainly, and
+
+    # 0. A read with NO model assigned cannot run at all. Reported plainly, and
     # FIRST: a fresh database legitimately starts here, because the seed refuses
     # to guess a model — "no vision model assigned" is the honest report, and
     # quietly falling back to an expensive one is what this replaces.
-    for read, touchpoint, model in reads:
-        if not model:
+    for read, touchpoint in READS:
+        primary = next(
+            (r for r in configured if r["read"] == read and r["leg"] == "primary"),
+            None,
+        )
+        if not (primary or {}).get("model"):
             problems.append(
                 f"{read} ({touchpoint}) — refused: no vision model assigned for this read. "
                 "Choose an image-capable model for it on the AI Models screen."
             )
-    missing = [row["provider"] for row in rows if not row["available"] and row["provider"] in needed]
+
+    # 1. No usable key for a leg's provider — that read cannot be served. The
+    # summary names the providers; each detail line names the read, the leg and
+    # its model, so the AI Models screen can be fixed without guessing.
+    assigned = [r for r in configured if r.get("model")]
+    missing = sorted({r["provider"] for r in assigned if r["provider"] not in available})
     if missing:
         problems.append("No usable API key for: " + ", ".join(missing) + ".")
+        problems.extend(
+            f"{_describe(record)} — refused: no usable API key for '{record['provider']}'."
+            for record in assigned
+            if record["provider"] not in available
+        )
+
+    # 2. A text-only model cannot receive the page images a read sends.
+    for record in assigned:
+        allowed, reason = ai_models.vision_check(
+            record["provider"], record["model"], db_path=db_path,
+        )
+        if not allowed:
+            problems.append(f"{_describe(record)} — refused: {reason}.")
+
+    # 3. Read B must be a genuinely independent second opinion.
+    primary_a = next(
+        (r for r in configured if r["read"] == "read A" and r["leg"] == "primary"), {}
+    )
+    primary_b = next(
+        (r for r in configured if r["read"] == "read B" and r["leg"] == "primary"), {}
+    )
+    if (
+        primary_a.get("model")
+        and primary_b.get("model")
+        and primary_a.get("provider") == primary_b.get("provider")
+    ):
+        problems.append(
+            f"{_describe(primary_b)} is the SAME provider as {_describe(primary_a)} — "
+            "read B must come from a different provider, because two reads from one "
+            "provider are not an independent second opinion."
+        )
     if len(available) < 2:
         problems.append(
             "Read B must come from a different provider than read A (two reads from one "
