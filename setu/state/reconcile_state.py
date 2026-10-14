@@ -13,14 +13,14 @@ import asyncio
 import base64
 import json
 import shutil
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from urllib.parse import quote
 
 import reflex as rx
 
 from src import queries
 from src.config_loader import load_config
-from src.data_paths import data_dir, source_data_path
+from src.data_paths import REPLACED_DIR_NAME, data_dir, source_data_path, store_upload
 from src.f5 import service as f5
 from src.ingestion_ai import service as ingestion_ai
 from src.ingestion_ai import periods as period_utils
@@ -69,6 +69,137 @@ _ROLE_COLOR = {
     "neutral": _t.Color.NEUTRAL.value,
 }
 
+# ---------------------------------------------------------------------------
+# Stage-2 row microcopy
+# ---------------------------------------------------------------------------
+#
+# The row's prose lives here, not in the view, so every state reads from one
+# place and the view stays purely structural. Wording is the approved mockup's
+# (mockups/reconcile-upload-page.html), adapted only where our data differs.
+
+_WAITING_SUFFIX = " · choosing a file uploads & normalizes it"
+_UPLOADING_TEXT = (
+    "Uploading & normalizing — saving, detecting the layout, then checking it "
+    "with the model…"
+)
+_OPTIONAL_EMPTY_TEXT = (
+    "Skipped — a run without it still reconciles invoices, and the report "
+    "says so."
+)
+_NOT_INGESTED_TEXT = (
+    "On disk for this period, but never normalized — so it can't be reconciled yet."
+)
+_FAILED_TEXT = (
+    "Couldn't read it — corrupt, password-protected, or a layout we can't map. "
+    "Your original file is untouched."
+)
+_UNREADABLE_MESSAGE = "No usable table found in this file."
+
+# Every verdict `_slot_info` can return, and every row state the view can be
+# asked to draw. The view `rx.match`es on the state for a row's outline, tint,
+# lead icon and actions, so the two lists are a contract: a code with no state,
+# or a state with no branch, would fall through to the default and quietly
+# render as a waiting row.
+SLOT_CODES: tuple[str, ...] = (
+    "empty", "not_ingested", "ok", "reused", "review", "partial", "wrong", "failed",
+)
+ROW_STATES: tuple[str, ...] = (
+    "waiting", "optional", "uploading", "ok", "reused", "review", "partial",
+    "wrong", "not_ingested", "failed",
+)
+
+# Why a row blocks the run, when the engine gave us no message of its own.
+_BLOCKER_FALLBACK = {
+    "wrong": "holds a file that belongs in another row — nothing was filed",
+    "not_ingested": "is on disk but was never normalized",
+    "failed": "holds a file we couldn't read",
+}
+
+
+def _identification(stored: dict) -> str:
+    """How this result identified the file.
+
+    A percentage is shown ONLY when a model produced it. A deterministic
+    parser (the GSTR-2B/IMS/books layouts) and a trusted profile have no
+    confidence to report — printing one for them would be a number the user
+    could act on that nothing actually measured.
+    """
+    classification = stored.get("classification") or {}
+    confidence = classification.get("confidence")
+    if not stored.get("model_used") or confidence is None:
+        return "layout recognised"
+    try:
+        return f"identified {round(float(confidence))}%"
+    except (TypeError, ValueError):
+        return "layout recognised"
+
+
+def _shape_note(stored: dict) -> str:
+    """The stored sentence explaining a mapping that was reused from a
+    previously-confirmed shape ("…from cache…" / "…from a trusted profile…").
+
+    ``normalizer`` already wrote this sentence — so the row shows it verbatim
+    rather than paraphrasing it. Empty string when nothing was reused.
+    """
+    if not stored.get("llm_cached") and not any(
+        m.get("from_cache") or m.get("from_trusted_profile")
+        for m in (stored.get("mapping") or [])
+    ):
+        return ""
+    for note in stored.get("notes") or []:
+        if str(note).startswith("Mapping reused"):
+            return str(note)
+    return ""
+
+
+def _action_label(code: str, selected: str, is_optional: bool) -> str:
+    """What the row's own file input should say.
+
+    The label is a Var at render time, so it is decided here rather than with
+    a nested `rx.cond` in the view.
+    """
+    if code == "empty":
+        return "Add it anyway" if is_optional else "Choose file"
+    if code == "wrong":
+        return "Choose a different file"
+    return "Replace" if selected else "Choose file"
+
+
+def _still_needed_text(
+    *,
+    ready: bool,
+    has_blockers: bool,
+    portal_ok: bool,
+    books,
+    portals,
+    by_type: dict,
+    blocked_types: set[str],
+) -> str:
+    """The one line naming what the run is still waiting for.
+
+    Documents already called out in `blockers` are left out: the blocker says
+    the more specific thing ("holds a file that belongs in another row"), and
+    repeating it as "still needed" reads as two separate problems.
+    """
+    if ready or has_blockers:
+        # Either the run can go, or a blocker is already telling the user what
+        # to fix — a second line would only dilute it.
+        return ""
+    parts: list[str] = []
+    for src in books:
+        s = by_type.get(src)
+        if s is None or s.resolved or src in blocked_types:
+            continue
+        parts.append(s.label)
+    if not portal_ok:
+        names = [discovery.source_type_label(p) for p in portals]
+        parts.append(
+            names[0] if len(names) == 1 else f"at least one portal file ({', '.join(names)})"
+        )
+    if not parts:
+        return ""
+    return "Still needed: " + "; ".join(parts) + "."
+
 
 @dataclass
 class StageChip:
@@ -86,7 +217,8 @@ class SlotRow:
     is_books: bool
     files: list[str]
     selected: str
-    code: str          # empty | not_ingested | ok | review | partial | wrong
+    # empty | not_ingested | ok | reused | review | partial | wrong | failed
+    code: str
     chip_label: str
     chip_variant: str
     rows: int
@@ -95,14 +227,30 @@ class SlotRow:
     message: str
     caveats: list[str]
     resolved: bool
-    is_note: bool = False       # the optional books-side note register
-    is_optional: bool = False   # never blocks a run
+    # Two flags that happen to agree today (both are only ever set for
+    # ``credit_notes``) but mean different things, so they are kept apart:
+    # `is_note` is about HOW the document is handled (deterministic parser, no
+    # model re-run, exempt from readiness); `is_optional` is about how it is
+    # PRESENTED (the "optional" pill, the skipped-row wording). Adding a second
+    # optional slot must not silently make it a note register, and vice versa.
+    is_note: bool = False
+    is_optional: bool = False
     # --- Stage-2 row chrome (design B: one row per document) --------------
     upload_id: str = ""              # this row's own file input; ids must not collide
     busy: bool = False               # this row's file is being uploaded + normalized now
     error: str = ""                  # this row's own save/normalize failure
     suggested_source_type: str = ""  # the row this file probably belongs in instead
     suggested_label: str = ""        # its label, for the "move it" action
+    # --- presentation (the mockup's row anatomy) --------------------------
+    # waiting | optional | uploading | ok | reused | review | partial | wrong | failed |
+    # not_ingested — one key the view can `rx.match` on, so the row's border,
+    # tint, lead icon and actions all read from a single decision.
+    state: str = "waiting"
+    status_text: str = ""            # the row's one line of prose
+    identification: str = ""        # "identified 97%" | "layout recognised"
+    action_label: str = "Choose file"  # the row's own file input's label
+    primary_label: str = ""         # the state's primary action, when it has one
+    detail_lines: list[str] = field(default_factory=list)  # the expandable panel
 
 
 @dataclass
@@ -331,6 +479,12 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     portal_ok: bool = False
     ready: bool = False
     blockers: list[str] = []
+    still_needed: str = ""                  # "Still needed: …"; "" once the run can go
+    # Rows whose detail panel is unfolded. Presentation only — it changes
+    # nothing about a verdict, only whether a list is shown. The row reads it
+    # straight from here (rather than from a copy on `SlotRow`) so unfolding a
+    # panel is instant and does not re-run `_slot_info` for every row.
+    expanded_rows: list[str] = []
 
     @rx.var
     def can_manage_clients(self) -> bool:
@@ -729,14 +883,19 @@ class ReconcileState(PeriodPickerMixin, AuthState):
     def _reset_downstream(self) -> None:
         """Discard work started under the previous context.
 
-        A run, the staged selections and the stage position all belong to one
+        A run, the file selections and the stage position all belong to one
         context; changing any selector starts the flow again from Stage 1.
+        The per-row chrome goes with them — a failure message or an unfolded
+        panel describes a row of a context that no longer exists.
         """
         self.run_id = 0
         self.auto_ran = False
         self.started_fresh = False
         self.pause_before_run = False
         self.selections = {}
+        self.slot_errors = {}
+        self.expanded_rows = []
+        self.slot_busy = ""
         self.stage = 1
 
     @rx.var
@@ -800,7 +959,7 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         self._load_slots()
 
     def _seed_selections_from_run(self) -> None:
-        if self.selections or not self.run_id:
+        if not self.run_id:
             return
         run = queries.get_run(self.run_id)
         if not run:
@@ -809,6 +968,11 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if not names:
             return
         for source_type in discovery.slot_types_for(self.ctx_recon_type):
+            # A pick that is already one of THIS run's files needs no change;
+            # anything else yields to the run, which is the authoritative
+            # record of which file it was built from.
+            if self.selections.get(source_type) in names:
+                continue
             for filename in _list_files(self.ctx_client_id, self.ctx_period, source_type):
                 if filename in names:
                     self.selections[source_type] = filename
@@ -821,24 +985,42 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         if not (self.ctx_client_id and self.ctx_period and self.ctx_recon_type):
             # Context incomplete: nothing is offered and Stage 3 stays locked.
             self.slots = []
+            self.slot_rows = {}
             self.books_ok = False
             self.portal_ok = False
             self.ready = False
             self.blockers = []
+            self.still_needed = ""
             return
         books_types = set(discovery.BOOKS_SOURCE_TYPES)
         note_types = set(discovery.note_slot_types(self.ctx_recon_type))
         offered = set(discovery.slot_types_for(self.ctx_recon_type))
         out: list[SlotRow] = []
         for source_type in discovery.slot_types_for(self.ctx_recon_type):
-            filename = self.selections.get(source_type, "")
-            info = self._slot_info(source_type, filename)
+            files = _list_files(self.ctx_client_id, self.ctx_period, source_type)
+            filename = self._effective_file(source_type, files)
+            error = self.slot_errors.get(source_type, "")
+            info = self._slot_info(source_type, filename, row_error=error)
             is_note = source_type in note_types
+            is_optional = source_type in note_types
             is_books = source_type in books_types
             # Only offer to move a file to a row this run actually shows.
             suggested = info.get("suggested_source_type", "")
             if suggested not in offered:
                 suggested = ""
+            code = info["code"]
+            busy = self.slot_busy == source_type
+            # An optional row left empty says the MOCKUP's sentence, not its
+            # hint: the hint explains what the register is, and this row's job
+            # is to say that skipping it is fine. A busy row overrides both —
+            # while the file is being read, "what it found last time" is stale
+            # and "what this row wants" is no longer the question.
+            if busy:
+                status_text = _UPLOADING_TEXT
+            elif code == "empty" and is_optional:
+                status_text = _OPTIONAL_EMPTY_TEXT
+            else:
+                status_text = info["status_text"]
             out.append(
                 SlotRow(
                     source_type=source_type,
@@ -846,10 +1028,10 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                     hint=discovery.source_type_hint(source_type),
                     is_books=is_books,
                     is_note=is_note,
-                    is_optional=is_note,
-                    files=_list_files(self.ctx_client_id, self.ctx_period, source_type),
+                    is_optional=is_optional,
+                    files=files,
                     selected=filename,
-                    code=info["code"],
+                    code=code,
                     chip_label=info["chip_label"],
                     chip_variant=info["chip_variant"],
                     rows=info["rows"],
@@ -859,21 +1041,64 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                     caveats=info["caveats"],
                     resolved=info["resolved"],
                     upload_id=f"rc_up_{source_type}",
-                    busy=self.slot_busy == source_type,
-                    error=self.slot_errors.get(source_type, ""),
+                    busy=busy,
+                    error=error,
                     suggested_source_type=suggested,
                     suggested_label=discovery.source_type_label(suggested) if suggested else "",
+                    state=self._row_state(code, busy, is_optional),
+                    status_text=status_text,
+                    identification=info["identification"],
+                    action_label=_action_label(code, filename, is_optional),
+                    primary_label=info.get("primary_label", ""),
+                    detail_lines=list(info.get("detail_lines") or []),
                 )
             )
         self.slots = out
         self.slot_rows = {row.source_type: row for row in out}
         self._compute_readiness()
 
-    def _slot_info(self, source_type: str, filename: str) -> dict:
+    @staticmethod
+    def _row_state(code: str, busy: bool, is_optional: bool) -> str:
+        """The single key the view matches on for a row's look and actions.
+
+        `busy` wins over the code: while a file is being read the row is
+        "uploading" whatever its last verdict was.
+        """
+        if busy:
+            return "uploading"
+        if code == "empty":
+            return "optional" if is_optional else "waiting"
+        return code
+
+    def _effective_file(self, source_type: str, files: list[str]) -> str:
+        """Which file this row is about — and the ONE place a file is ever
+        chosen without the user picking it.
+
+        A row that has no entry in ``selections`` has never been answered, so
+        it preselects the newest file already on disk. Without that, a file
+        sitting in the folder would leave the row reading "waiting" while a
+        usable file is right there — and the mockup's "two candidates" row
+        explicitly promises "the newest is selected".
+
+        An EXPLICIT empty string means the user cleared the row (Remove), so
+        it is honoured: preselecting there would make Remove look broken.
+        """
+        if source_type in self.selections:
+            return self.selections.get(source_type) or ""
+        newest = _newest_file(self.ctx_client_id, self.ctx_period, source_type)
+        if newest:
+            self.selections[source_type] = newest
+        return newest
+
+    def _slot_info(self, source_type: str, filename: str, *, row_error: str = "") -> dict:
+        label = discovery.source_type_label(source_type)
+        hint = discovery.source_type_hint(source_type)
         empty = {
             "code": "empty", "chip_label": "— no file yet", "chip_variant": "placeholder",
             "rows": 0, "needs_review": 0, "required_missing": 0, "message": "", "caveats": [],
-            "resolved": False, "suggested_source_type": "",
+            "resolved": False, "suggested_source_type": "", "identification": "",
+            "primary_label": "", "detail_lines": [],
+            "status_text": (hint + _WAITING_SUFFIX) if hint else _WAITING_SUFFIX.strip(" ·"),
         }
         if not filename:
             return empty
@@ -881,13 +1106,25 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             self.ctx_client_id, self.ctx_period, source_type, filename
         )
         if stored is None:
+            if row_error:
+                # The file IS on disk, but the engine could not read it — a
+                # parse or model failure. That is not "never normalized": there
+                # is nothing to nudge, only to retry. The engine's own text is
+                # carried on the row as `error`, so it is shown verbatim rather
+                # than paraphrased here.
+                return {
+                    **empty, "code": "failed", "chip_label": "✕ couldn't read it",
+                    "chip_variant": "danger", "status_text": _FAILED_TEXT,
+                }
             return {
-                **empty, "code": "not_ingested",
-                "chip_label": "⚠ not ingested yet", "chip_variant": "ai",
+                **empty, "code": "not_ingested", "chip_label": "⚠ not ingested yet",
+                "chip_variant": "ai", "status_text": _NOT_INGESTED_TEXT,
             }
         status = stored.get("status")
         rows = int(stored.get("row_count_out") or 0)
+        rows_display = f"{rows:,}"
         mapping = stored.get("mapping") or []
+        identification = _identification(stored)
         # A canonical field with NO source column is NOT automatically a review
         # item — the same principle applied to confidence just below. `igst` on
         # an intra-state file, or `cess` when nothing is cess-liable, is simply
@@ -921,17 +1158,47 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             f"{c.get('label', c.get('code'))} — {c.get('detail', '')}"
             for c in (stored.get("caveats") or [])
         ]
+        classification = stored.get("classification") or {}
         if status in ("wrong_slot", "unrecognized"):
             # Name the row the file probably belongs in, straight from the
             # classification stored at normalize time, so the row can offer a
             # one-click "move it" instead of making the user work it out.
-            classification = stored.get("classification") or {}
+            suggested = ingestion_ai.suggested_slot(
+                source_type, classification.get("document_type", "")
+            ) or ""
+            if suggested:
+                status_text = (
+                    f"This looks like a {discovery.source_type_label(suggested)} export, "
+                    f"not your {label}. Nothing was filed."
+                )
+            else:
+                # A percentage is only shown when a model measured it — see
+                # `_identification`. "41% sure" from a rule-based read would be
+                # invented.
+                sure = (
+                    f" ({identification.split()[-1]} sure)"
+                    if stored.get("model_used") and "identified" in identification
+                    else ""
+                )
+                status_text = (
+                    f"Couldn't identify it{sure}. The file is kept — nothing is "
+                    "guessed — and this row stays unsorted."
+                )
             return {
                 **empty, "code": "wrong", "chip_label": "✕ looks like the wrong file type",
                 "chip_variant": "danger", "message": stored.get("message") or "",
-                "suggested_source_type": ingestion_ai.suggested_slot(
-                    source_type, classification.get("document_type", "")
-                ) or "",
+                "suggested_source_type": suggested, "status_text": status_text,
+                "identification": identification,
+            }
+        # An empty read or a hard-blocked one is NOT a success. It is its own
+        # outcome, and it must not count as supplied: both used to fall through
+        # to `ok` below, so a header-only workbook reported "✓ 0 rows, fully
+        # mapped" and unlocked Stage 3.
+        if status in ("empty", "blocked") and not required_missing:
+            return {
+                **empty, "code": "failed", "chip_label": "✕ couldn't read it",
+                "chip_variant": "danger", "rows": rows, "caveats": caveats,
+                "message": _UNREADABLE_MESSAGE, "status_text": _FAILED_TEXT,
             }
         if required_missing:
             return {
@@ -939,32 +1206,81 @@ class ReconcileState(PeriodPickerMixin, AuthState):
                 "required_missing": required_missing, "caveats": caveats,
                 "chip_label": f"⚠ {required_missing} required field(s) unmapped — partial report",
                 "resolved": True,
+                "status_text": (
+                    f"Normalized: {rows_display} rows · {required_missing} required "
+                    "field(s) unmapped — the report will be marked partial. It still runs."
+                ),
+                "primary_label": "See what's missing",
+                "detail_lines": caveats or [
+                    f"{f} — required column could not be mapped"
+                    for f in (stored.get("unmapped_required") or [])
+                ],
             }
         if status == "partial" or needs_review:
+            # What the unfoldable panel lists. Prefer the stored caveats (the
+            # capabilities this file's gaps cost the report); otherwise name the
+            # fields themselves, so the panel a review row offers is never EMPTY
+            # — a button that opens nothing is worse than no button.
+            review_fields = [
+                f"{m['canonical_field']} — mapped at "
+                f"{round(float(m['confidence']) * 100)}% confidence, below the "
+                f"{round(float(threshold) * 100)}% bar"
+                for m in low_conf
+            ]
+            review_fields += [
+                f"{m['canonical_field']} — required column could not be mapped"
+                for m in unmapped
+            ]
             if needs_review:
-                label = f"⚠ {needs_review} field(s) need review"
+                chip_label = f"⚠ {needs_review} field(s) need review"
+                status_text = (
+                    f"Normalized: {rows_display} rows · {needs_review} field(s) need review. "
+                    "This doesn't block the run — the report carries the caveat."
+                )
+                primary_label = f"Check the {needs_review} field(s)"
             else:
-                label = f"⚠ {rows} rows — partial report"
+                chip_label = f"⚠ {rows} rows — partial report"
+                status_text = (
+                    f"Normalized: {rows_display} rows — partial report. It still runs; "
+                    "the report states what couldn't be checked."
+                )
+                primary_label = "See what's missing"
             return {
                 **empty, "code": "review", "chip_variant": "ai", "rows": rows,
-                "needs_review": needs_review, "caveats": caveats,
-                "chip_label": label, "resolved": True,
+                "needs_review": needs_review, "caveats": caveats, "chip_label": chip_label,
+                "resolved": True, "status_text": status_text, "primary_label": primary_label,
+                "detail_lines": caveats or review_fields or [status_text],
+            }
+        reused = _shape_note(stored)
+        if reused:
+            return {
+                **empty, "code": "reused", "chip_variant": "rule", "rows": rows,
+                "caveats": caveats, "chip_label": f"✓ {rows} rows, fully mapped",
+                "resolved": True, "identification": identification,
+                "status_text": f"Normalized: {rows_display} rows, fully mapped — {reused}",
             }
         return {
             **empty, "code": "ok", "chip_variant": "rule", "rows": rows,
             "caveats": caveats, "chip_label": f"✓ {rows} rows, fully mapped", "resolved": True,
+            "identification": identification,
+            "status_text": f"{identification} · normalized: {rows_display} rows, fully mapped",
         }
 
     def _compute_readiness(self) -> None:
         # The note register is NOT part of readiness — it is optional, so a
-        # missing or unreadable one must never block a run. `books + portals`
-        # below both derive from RECON_SOURCE_TYPES, which excludes it.
+        # missing, mismatched or unreadable one must never block a run.
+        # `books + portals` below both derive from RECON_SOURCE_TYPES, which
+        # excludes it, so the exemption is structural: `credit_notes` can never
+        # appear in the loops that set `books_ok`/`portal_ok` or add blockers.
         books = discovery.BOOKS_SOURCE_TYPES
         portals = discovery.portal_source_types(self.ctx_recon_type)
         by_type = {s.source_type: s for s in self.slots}
         self.books_ok = all(by_type.get(b) and by_type[b].resolved for b in books)
         self.portal_ok = any(by_type.get(p) and by_type[p].resolved for p in portals)
         blockers: list[str] = []
+        # Rows that are not yet usable, so a "still needed" line can name them
+        # without repeating a blocker.
+        blocked_types: set[str] = set()
         if period_utils.is_unfiled(self.ctx_period):
             blockers.append(
                 "This period holds files filed without a period — file them to a period "
@@ -972,10 +1288,20 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             )
         for src in list(books) + list(portals):
             s = by_type.get(src)
-            if s and s.code in ("wrong", "not_ingested"):
-                blockers.append(f"{s.label} — {s.message or 'needs attention'}")
+            if s and s.code in _BLOCKER_FALLBACK:
+                blockers.append(f"{s.label} — {s.message or _BLOCKER_FALLBACK[s.code]}")
+                blocked_types.add(src)
         self.blockers = blockers
         self.ready = self.books_ok and self.portal_ok and not blockers
+        self.still_needed = _still_needed_text(
+            ready=self.ready,
+            has_blockers=bool(blockers),
+            portal_ok=self.portal_ok,
+            books=books,
+            portals=portals,
+            by_type=by_type,
+            blocked_types=blocked_types,
+        )
 
     @rx.event
     async def select_slot_file(self, source_type: str, filename: str):
@@ -1104,50 +1430,98 @@ class ReconcileState(PeriodPickerMixin, AuthState):
         f = files[0]
         filename = (getattr(f, "filename", "") or "upload").split("/")[-1]
         data = await f.read()
-        dest = source_data_path(self.ctx_client_id, self.ctx_period, source_type) / filename
         try:
-            dest.write_bytes(data)
+            outcome = store_upload(
+                self.ctx_client_id, self.ctx_period, source_type, filename, data
+            )
         except Exception as exc:  # noqa: BLE001
             self._set_slot_error(source_type, f"Couldn't save {filename}: {exc}")
             self._load_slots()
             return
 
-        self.selections[source_type] = dest.name
+        # The upload key is the file's COORDINATES (client/period/document/
+        # name), not its bytes — so replacing a file under the same name leaves
+        # the PREVIOUS bytes' verdict sitting on that key. Drop it first: if the
+        # re-read then fails, the row must not still say the old file was
+        # "fully mapped".
+        ingestion_ai.discard_stored_result(
+            self.ctx_client_id, self.ctx_period, source_type, outcome.path.name
+        )
+
+        self.selections[source_type] = outcome.path.name
         self.rail_return = False
         self.slot_busy = source_type
         self._load_slots()
         yield  # flush: the row now shows it is reading the file
 
         try:
-            self._normalize(source_type, dest.name)
+            self._normalize(source_type, outcome.path.name)
             if self.error:
                 self._set_slot_error(source_type, self.error)
                 self.error = ""
+            elif outcome.archived is not None:
+                self.flash = (
+                    f"{outcome.path.name} uploaded and normalized. The copy that was "
+                    f"already there is kept at {REPLACED_DIR_NAME}/{source_type}/"
+                    f"{outcome.archived.name}."
+                )
             else:
-                self.flash = f"{dest.name} uploaded and normalized."
+                self.flash = f"{outcome.path.name} uploaded and normalized."
         finally:
             self.slot_busy = ""
             self._load_slots()
 
     @rx.event
-    def normalize_slot(self, source_type: str):
-        """Normalize a file that is on disk for this row but was never
-        ingested — the "not ingested yet" state. Carries the file through the
-        same pipeline an upload would."""
+    async def normalize_slot(self, source_type: str):
+        """Normalize a file that is on disk for this row but has no usable
+        stored result — the "not ingested yet" and "unreadable" states.
+
+        Both states need the SAME work, so one handler serves them: "Normalize
+        it now" and "Try again" differ only in what they are called.
+
+        A normalization can be a live model call (~15-25s), so this is a
+        generator that marks the row busy and yields BEFORE the call — exactly
+        like an upload. Without it the row sits there looking frozen, which is
+        indistinguishable from a broken button. The flag is cleared in a
+        ``finally`` so a failure can never strand the row spinning.
+        """
         filename = self.selections.get(source_type, "")
         if not filename:
             return
-        self._normalize(source_type, filename)
-        if self.error:
-            self._set_slot_error(source_type, self.error)
-            self.error = ""
+        self._set_slot_error(source_type, "")
+        self.slot_busy = source_type
         self._load_slots()
+        yield  # flush: the row now shows the indeterminate bar
+        try:
+            await asyncio.to_thread(self._normalize, source_type, filename)
+            if self.error:
+                self._set_slot_error(source_type, self.error)
+                self.error = ""
+        finally:
+            self.slot_busy = ""
+            self._load_slots()
+
+    @rx.event
+    def toggle_row_detail(self, source_type: str):
+        """Fold/unfold one row's detail panel (its caveats, or the fields a
+        partial report is missing). Presentation only: no verdict, no run
+        input and nothing on disk changes."""
+        rows = [r for r in self.expanded_rows if r != source_type]
+        if len(rows) == len(self.expanded_rows):
+            rows.append(source_type)
+        self.expanded_rows = rows
 
     @rx.event
     def remove_slot(self, source_type: str):
         """Empty this row again. The file stays on disk — the row's own file
-        picker can hand it back — so nothing the user supplied is destroyed."""
-        self.selections.pop(source_type, None)
+        picker can hand it back — so nothing the user supplied is destroyed.
+
+        The recorded value is an EXPLICIT empty string, not an absent key: the
+        row has been answered (with "nothing"), so `_load_slots` must not
+        preselect the newest file on disk again the moment it rebuilds. With
+        `pop()` the row would refill itself and Remove would look broken.
+        """
+        self.selections[source_type] = ""
         self._set_slot_error(source_type, "")
         self.rail_return = False
         self._load_slots()
@@ -1165,7 +1539,9 @@ class ReconcileState(PeriodPickerMixin, AuthState):
             self._set_slot_error(source_type, problem)
             self._load_slots()
             return
-        self.selections.pop(source_type, None)
+        # The source row is now deliberately empty (see `remove_slot`), and the
+        # target row holds the file.
+        self.selections[source_type] = ""
         self.selections[target] = filename
         self._normalize(target, filename)
         if self.error:
@@ -2600,6 +2976,32 @@ def _list_files(client_id, period: str, source_type: str) -> list[str]:
     for pattern in ("*.csv", "*.xlsx", "*.xls"):
         files.extend(sorted(m.name for m in directory.glob(pattern)))
     return sorted(set(files))
+
+
+def _newest_file(client_id, period: str, source_type: str) -> str:
+    """The most recently MODIFIED file in this slot, or "".
+
+    Used to preselect a row's file when the user has not chosen one. Newest by
+    mtime rather than by name, because a re-export usually keeps the name — so
+    the alphabetically-last file is often the stale one, and the mockup's
+    "two candidates" row promises the user the newest.
+    """
+    try:
+        directory = data_dir(client_id, period, source_type)
+    except ValueError:
+        return ""
+    if not directory.exists():
+        return ""
+    candidates = [
+        m for pattern in ("*.csv", "*.xlsx", "*.xls") for m in directory.glob(pattern)
+    ]
+    if not candidates:
+        return ""
+    try:
+        newest = max(candidates, key=lambda p: (p.stat().st_mtime, p.name))
+    except OSError:
+        newest = max(candidates, key=lambda p: p.name)
+    return newest.name
 
 
 def _refile(

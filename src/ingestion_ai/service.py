@@ -1449,6 +1449,30 @@ def get_stored_result(*args, **kwargs):
     return normalizer.get_stored_result(*args, **kwargs)
 
 
+def discard_stored_result(
+    client_id: int, period: Optional[str], source_type: str, filename: str, *, db_path=None,
+) -> int:
+    """Delete a persisted ingestion result so the next read re-derives it.
+
+    Re-uploading a file keeps the SAME upload key
+    (``<client_id>/<period>/<source_type>/<filename>``), so without this a
+    re-read that fails would leave the PREVIOUS file's verdict on screen for
+    the new bytes — the row would still say "fully mapped" about a file the
+    engine never managed to read. Best-effort: never raises, returns the
+    number of rows removed (0 when there was nothing stored).
+    """
+    try:
+        conn = idb.connect(db_path)
+        try:
+            return idb.delete_ingestion_result(
+                conn, normalizer.upload_key(client_id, period, source_type, filename),
+            )
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def suggested_slot(source_type: str, doc_type: str):
     """The slot a mis-filed document probably belongs in, or None.
 

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from src.shared.periods import PERIOD_UNFILED, is_valid_period
@@ -118,6 +120,11 @@ def page_cache_path(key: str) -> Path:
 
 # Back-compat re-export: older imports read this set.
 VALID_SOURCE_TYPES = set(SOURCE_TYPES)
+
+# Where a copy pushed aside by a same-name re-upload goes. A SIBLING of the
+# slot folders, never inside one, and never a valid source_type name — so no
+# reader can mistake it for a slot or offer it as a candidate file.
+REPLACED_DIR_NAME = "_replaced"
 
 
 def use_data_root(path) -> Path:
@@ -222,6 +229,102 @@ def source_data_path(client_id, period: str, source_type: str) -> Path:
     path = data_dir(client_id, period, source_type)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def replaced_dir(client_id, period: str, source_type: str) -> Path:
+    """``data/<client_id>/<period>/_replaced/<source_type>/`` (created).
+
+    Where a same-name re-upload pushes the previous copy. Deliberately a
+    SIBLING of the slot folder, not a child: every reader globs the slot
+    folder itself (``reconcile_state._list_files``, ``discovery``,
+    ``ingestion_ai``), and ``discovery`` only ever looks at KNOWN source_type
+    names — so an archived copy can never be offered back as a candidate or
+    mistaken for a slot.
+    """
+    cid = require_client_id(client_id)
+    if str(period) != PERIOD_UNFILED and not is_valid_period(period):
+        raise ValueError(
+            f"Invalid period {period!r}; expected 'YYYY-MM' or the unfiled "
+            f"sentinel {PERIOD_UNFILED!r}"
+        )
+    if not is_valid_source_type(source_type):
+        raise ValueError(
+            f"Unknown source_type {source_type!r}; expected one of {sorted(SOURCE_TYPES)}"
+        )
+    path = DATA_ROOT / str(cid) / str(period) / REPLACED_DIR_NAME / str(source_type)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+@dataclass(frozen=True)
+class StoreOutcome:
+    """What :func:`store_upload` did with an uploaded file.
+
+    ``archived`` is the copy it pushed aside (None when the slot was empty or
+    the bytes were identical); ``written`` is False when the upload was a
+    no-op because the bytes on disk were already the same.
+    """
+
+    path: Path
+    archived: Path | None
+    written: bool
+
+
+def _safe_upload_name(filename: str) -> str:
+    """The basename to write, or a ``ValueError`` when there isn't one."""
+    name = str(filename or "").replace("\\", "/").split("/")[-1].strip()
+    if not name or name in {".", ".."}:
+        raise ValueError(f"Unsafe upload filename {filename!r}")
+    return name
+
+
+def store_upload(
+    client_id, period: str, source_type: str, filename: str, data: bytes
+) -> StoreOutcome:
+    """Write an uploaded file into its slot WITHOUT silently destroying a
+    different file that already has that name.
+
+    Re-uploading under the same name is normal — the user fixes a typo and
+    re-exports, or the portal reissues the same filename. Overwriting in place
+    made that a one-way door, and it left the OLD ingestion result keyed to the
+    same ``<client_id>/<period>/<source_type>/<filename>`` — so a failed re-read
+    would keep showing the previous file's verdict for the new bytes.
+
+    So: identical bytes are a no-op (there is nothing new to read); different
+    bytes move the previous copy to ``_replaced/<source_type>/<name>.<stamp>``
+    first, so the earlier file is still there if it was the one the user meant.
+    """
+    name = _safe_upload_name(filename)
+    dest = source_data_path(client_id, period, source_type) / name
+    if dest.exists():
+        if dest.read_bytes() == bytes(data):
+            return StoreOutcome(path=dest, archived=None, written=False)
+        archived = _archive_path(replaced_dir(client_id, period, source_type), name)
+        try:
+            dest.replace(archived)
+        except OSError:
+            # A cross-device or permission hiccup must not lose the new bytes:
+            # fall back to a copy + unlink, and if even that fails, let the
+            # caller report it rather than overwrite silently.
+            import shutil
+
+            shutil.copy2(dest, archived)
+            dest.unlink()
+    else:
+        archived = None
+    dest.write_bytes(bytes(data))
+    return StoreOutcome(path=dest, archived=archived, written=True)
+
+
+def _archive_path(archive_dir: Path, name: str) -> Path:
+    """A free ``<name>.<YYYYmmdd-HHMMSS>[-n]`` path inside ``archive_dir``."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = archive_dir / f"{name}.{stamp}"
+    n = 1
+    while candidate.exists():
+        candidate = archive_dir / f"{name}.{stamp}-{n}"
+        n += 1
+    return candidate
 
 
 def exports_dir(client_id, period: str) -> Path:
