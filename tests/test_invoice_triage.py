@@ -199,6 +199,122 @@ def test_stitch_coverage_invariant_on_random_inputs():
         assert covered | {u["page"] for u in unassigned} == set(range(1, n + 1))
 
 
+# ---------------------------------------------------------------------------
+# A COPY of an earlier page: the model's flag AND support, never one alone
+# ---------------------------------------------------------------------------
+
+
+def test_stitch_duplicate_copy_with_hash_support_is_excluded_not_attached():
+    """A copy the hash detector also sees becomes an EXCLUDED document: it is
+    neither appended to the page it copies nor counted as extractable."""
+    pages = [
+        _page_outcome(1, [_doc(label="INV-1", cn=True)]),
+        # The copy is labelled differently (a re-scan reads differently), so the
+        # hash is the only support here.
+        _page_outcome(2, [_doc(label="Airtel Wi-Fi Monthly Statement", cp=True,
+                               flags=[triage.DUPLICATE_PAGE_FLAG])]),
+    ]
+    pages[1].duplicate_of_page = 1              # the hash detector's own flag
+    docs, unassigned = triage._stitch(pages)
+    assert sorted({r["page"] for r in docs[0].regions}) == [1]     # NOT attached
+    assert len(docs) == 2
+    assert docs[1].excluded_reason.startswith("duplicate of page 1")
+    assert "hash" in docs[1].excluded_reason
+    assert triage.DUPLICATE_PAGE_FLAG in docs[1].flags
+    assert unassigned == []
+
+
+def test_stitch_duplicate_copy_with_a_matching_label_is_excluded():
+    """The same label on an earlier page is the other accepted support."""
+    pages = [
+        _page_outcome(1, [_doc(label="HF27071000796346", cn=True)]),
+        _page_outcome(2, [_doc(label="HF27071000796346", cp=True,
+                               flags=[triage.DUPLICATE_PAGE_FLAG])]),
+    ]
+    # No hash support at all — the label match carries the decision.
+    docs, unassigned = triage._stitch(pages)
+    assert len(docs) == 2
+    assert docs[1].excluded_reason.startswith("duplicate of page 1")
+    assert "label" in docs[1].excluded_reason
+    # The category is NOT rewritten — the document is excluded, which is what
+    # keeps it out of extraction and out of the counts.
+    assert docs[1].category == "tax_invoice"
+    assert unassigned == []
+
+
+def test_stitch_hash_match_alone_is_not_a_duplicate():
+    """Pages 2 and 3 of the real bundle: two DIFFERENT invoices the unreliable
+    64-bit average hash calls near-identical. Nothing may act on that alone."""
+    pages = [
+        _page_outcome(2, [_doc(label="KMAP/2026-27/003")]),
+        _page_outcome(3, [_doc(label="KMAP/2026-27/002")]),
+    ]
+    pages[1].duplicate_of_page = 2
+    docs, _ = triage._stitch(pages)
+    assert len(docs) == 2
+    assert all(d.excluded_reason is None for d in docs)
+    assert sorted({r["page"] for r in docs[1].regions}) == [3]
+    assert docs[1].last_page == 3
+
+
+def test_stitch_model_flag_alone_is_not_a_duplicate():
+    """A copy claim with nothing behind it changes nothing: it stays a
+    continuation, exactly as it did before this rule existed."""
+    pages = [
+        _page_outcome(1, [_doc(label="INV-1", cn=True)]),
+        _page_outcome(2, [_doc(label="a completely different label", cp=True,
+                               flags=[triage.DUPLICATE_PAGE_FLAG])]),
+    ]
+    # No hash flag, no matching label.
+    docs, _ = triage._stitch(pages)
+    assert len(docs) == 1
+    assert sorted({r["page"] for r in docs[0].regions}) == [1, 2]
+
+
+def test_stitch_duplicate_copy_is_recorded_once_and_covers_its_page(tmp_path):
+    """An unlabelled copy claim still goes through the coverage invariant."""
+    pages = [
+        _page_outcome(1, [_doc(label="INV-1", cn=True)]),
+        _page_outcome(2, [_doc(label="INV-1", cp=True,
+                               flags=[triage.DUPLICATE_PAGE_FLAG])]),
+        _page_outcome(3, [_doc(label="INV-2")]),
+    ]
+    docs, unassigned = triage._stitch(pages)       # asserts coverage internally
+    assert [d.ordinal for d in docs] == [1, 2, 3]
+    assert sorted({r["page"] for r in docs[1].regions}) == [2]   # the copy owns page 2
+    assert docs[2].label == "INV-2" and docs[2].excluded_reason is None
+    assert unassigned == []
+
+
+def test_normalizer_keeps_the_duplicate_page_flag():
+    """Flags are not whitelisted, but the pipeline must never lose this one."""
+    rendered = triage.RenderedPage(page=1, png=b"", px_w=1000, px_h=1000, text_layer_chars=0, content_hash="0")
+    _, _, docs = triage._normalize_page(
+        {"documents": [{"category": "tax_invoice", "label": "INV-1",
+                        "flags": [triage.DUPLICATE_PAGE_FLAG],
+                        "boxes": [{"x": 0.1, "y": 0.1, "w": 0.5, "h": 0.5}]}]},
+        rendered,
+    )
+    assert triage.DUPLICATE_PAGE_FLAG in docs[0].flags
+
+
+def test_prompt_states_the_statement_rule_and_the_duplicate_copy_rule():
+    """Contract for the two rules added for the page 23 / 30-31 / 7-9 findings."""
+    prompt = triage._SYSTEM_PROMPT
+    # (i) statements are never invoices, whatever they list.
+    assert "Statements, ledgers and passbooks" in prompt
+    assert "NEVER tax_invoice/no_gst_expense" in prompt
+    assert "even with charges or GST" in prompt
+    assert "are supporting" in prompt
+    # (ii) a copy of an earlier page is a flagged document, never a continuation.
+    assert triage.DUPLICATE_PAGE_FLAG in prompt
+    assert "COPY" in prompt
+    assert "continues_previous=false" in prompt
+    # The prompt must stay inside its length budget: it was 2012 characters
+    # before these two rules, and the ceiling is +15%.
+    assert len(prompt) <= 2314, f"system prompt grew to {len(prompt)} chars"
+
+
 # ===========================================================================
 # Box conversion + validation
 # ===========================================================================
@@ -289,6 +405,40 @@ def test_hamming_helper():
     assert triage._hamming_hex("00", "00") == 0
     assert triage._hamming_hex("0f", "00") == 4
     assert triage._hamming_hex("", "00") == 999
+
+
+def test_duplicate_copy_is_stored_excluded_with_a_decision_log_line(monkeypatch, tmp_path):
+    """End to end: a flagged copy of an earlier page is persisted EXCLUDED, with
+    its reason on the row and one decision line in the existing audit table."""
+    db_path, uid = _fresh_upload(tmp_path, pages=2)
+    _stub(monkeypatch, {
+        1: {"rotation_deg": 0, "page_is_blank": False,
+            "documents": [_doc(label="INV-1", cn=True)]},
+        2: {"rotation_deg": 0, "page_is_blank": False,
+            "documents": [_doc(label="INV-1", cp=True, flags=[triage.DUPLICATE_PAGE_FLAG])]},
+    })
+    _run_and_wait(uid, db_path)
+
+    conn = recon_db.get_connection(db_path)
+    try:
+        docs = conn.execute(
+            "SELECT ordinal, category, excluded, excluded_reason, flags_json FROM invoice_documents "
+            "WHERE upload_id = ? ORDER BY ordinal", (uid,)).fetchall()
+        log = conn.execute(
+            "SELECT action, after_json FROM document_region_log "
+            "WHERE action = 'page_duplicate_excluded'").fetchall()
+    finally:
+        conn.close()
+
+    assert len(docs) == 2
+    assert docs[0][2] == 0 and docs[0][3] is None          # the invoice itself is fine
+    assert docs[1][2] == 1                                  # the copy: excluded
+    assert docs[1][3].startswith("duplicate of page 1")
+    assert triage.DUPLICATE_PAGE_FLAG in docs[1][4]
+    assert len(log) == 1
+    payload = json.loads(log[0][1])
+    assert payload["page"] == 2
+    assert payload["reason"].startswith("duplicate of page 1")
 
 
 # ===========================================================================

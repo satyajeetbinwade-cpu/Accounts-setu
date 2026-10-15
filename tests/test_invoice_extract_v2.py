@@ -1738,6 +1738,9 @@ def test_triage_prompt_keeps_one_document_per_issuer():
         assert key in fields
     assert "Return exactly this JSON shape" in fields
 
-    # Keep the rewrite inside its ~30% size budget (the pre-rewrite prompt was
-    # 1545 chars) so the instruction weight on the model does not balloon.
-    assert len(prompt) <= 2100, f"system prompt grew to {len(prompt)} chars"
+    # Keep the rewrite inside its size budget so the instruction weight on the
+    # model does not balloon. History of the ceiling: the prompt was 1545 chars,
+    # this commit's one-document-per-issuer rules took it to 2012 under a ~+30%
+    # budget, and the later statement / duplicate-copy rules took it to 2308
+    # under a ~+15% budget — so the approved ceiling is now 2314.
+    assert len(prompt) <= 2314, f"system prompt grew to {len(prompt)} chars"

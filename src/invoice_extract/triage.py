@@ -69,6 +69,12 @@ CATEGORIES: tuple[str, ...] = (
 )
 DEFAULT_EXCLUDED_CATEGORY = "not_a_voucher"
 
+#: The flag the model uses for a page that repeats a page already read in the
+#: same bundle — a COPY of the same paper, not a continuation of it. Named here
+#: because the prompt asks for it by name AND ``_stitch`` reads it back, so the
+#: two must stay in step (the prompt interpolates this constant).
+DUPLICATE_PAGE_FLAG = "duplicate_page"
+
 CATEGORY_DEFINITIONS: dict[str, str] = {
     "tax_invoice": "a GST tax invoice — it shows a GSTIN and/or CGST/SGST/IGST tax.",
     "no_gst_expense": "an expense document with no GSTIN and no tax shown (e.g. a plain bill or cash memo).",
@@ -197,7 +203,7 @@ def get_config(*, db_path=None) -> TriageConfig:
 _SYSTEM_PROMPT = (
     "You are a document-triage engine for an Indian accounting firm. You see "
     "ONE page image from a scanned bundle: a page may hold several documents, or "
-    "one may span pages. Do NOT read out field values — find the documents, say "
+    "one may span pages. Do NOT read field values — find the documents, say "
     "what each IS and where it sits. Respond with JSON only.\n"
     "Rules:\n"
     "1. A document is everything ONE issuer printed under one document number or "
@@ -206,8 +212,7 @@ _SYSTEM_PROMPT = (
     "2. Terms, fare rules, baggage allowances, hazardous-goods notices, "
     "promotional/in-flight text, bill summaries, plan/service details, payment "
     "instructions, headers, footers, banners belong to their document, never "
-    "returned separately. A page of only that material continues that document "
-    "(continues_previous=true).\n"
+    "returned separately. A page of only that material continues that document.\n"
     "3. Handwritten notes, stamps and signatures on or beside a document are part "
     "of it, never separate.\n"
     "4. Split a page only for clearly different pieces of paper, or a different "
@@ -215,20 +220,25 @@ _SYSTEM_PROMPT = (
     "on one sheet. The SAME issuer is ONE document; most pages hold ONE, more "
     "than three is rare — double-check. If two items could differ in issuer or "
     "number, return TWO and add the flag \"unsure_split\".\n"
-    "5. Categorise each document as exactly one of: tax_invoice, no_gst_expense, "
-    "supporting, ticket, not_a_voucher.\n"
+    "5. Categorise each as exactly one of: tax_invoice, no_gst_expense, "
+    "supporting, ticket, not_a_voucher. Statements, ledgers and passbooks (bank, "
+    "card, loan, credit-limit, payable) are supporting, or not_a_voucher if only "
+    "a notice — NEVER tax_invoice/no_gst_expense, even with charges or GST.\n"
     "6. Give each a SHORT label read from the document (e.g. an invoice number, "
     "or \"Ajay General Store slip\").\n"
     "7. continues_next=true when the totals, signature or closing section are NOT "
     "on this page; continues_previous=true when this page has no issuer header or "
-    "invoice number of its own and continues a table or totals.\n"
-    "8. rotation_deg: clockwise degrees (0, 90, 180 or 270) to turn the page "
+    "number of its own and continues a table or totals.\n"
+    "8. rotation_deg: clockwise degrees (0, 90, 180, 270) to turn the page "
     "upright; boxes are on the UPRIGHT page.\n"
     "9. Boxes: x, y and w, h as FRACTIONS of the page width/height (0 to 1, "
-    "top-left origin).\n"
-    "10. Include a SHORT quoted evidence snippet justifying the category.\n"
+    "top-left).\n"
+    "10. Include a SHORT quoted evidence snippet for the category.\n"
     "11. A blank page: set page_is_blank and return no documents (rule-2 material "
     "is not blank).\n"
+    f"12. A page repeating an earlier page (same issuer, number, totals) is a "
+    f"COPY: return it with continues_previous=false, flagged "
+    f"\"{DUPLICATE_PAGE_FLAG}\" — never as a continuation.\n"
 )
 
 _USER_PROMPT_TEMPLATE = (
@@ -795,6 +805,10 @@ class _Doc:
     regions: list[dict[str, Any]]
     first_page: int
     last_page: int
+    #: Set when the document must NOT be counted or extracted even though its
+    #: category is extractable — today only a duplicate COPY of an earlier page.
+    #: ``_persist_documents`` turns this into excluded=1 + this reason.
+    excluded_reason: Optional[str] = None
 
 
 def _pick_open(open_docs: list[_Doc], label: str) -> Optional[_Doc]:
@@ -812,6 +826,39 @@ def _pick_open(open_docs: list[_Doc], label: str) -> Optional[_Doc]:
 def _region(page: int, box: tuple[float, float, float, float], order: int, source: str = "triage") -> dict[str, Any]:
     x, y, w, h = box
     return {"page": page, "x": x, "y": y, "w": w, "h": h, "order_in_doc": order, "source": source}
+
+
+def _duplicate_copy_of(
+    outcome: PageOutcome, *, flagged: bool, label: str, docs: list[_Doc],
+) -> tuple[Optional[int], Optional[str]]:
+    """(the earlier page this page copies, why) — or ``(None, None)``.
+
+    A page is only treated as a copy when the MODEL says so (``DUPLICATE_PAGE_FLAG``)
+    AND something independent supports it:
+
+    * its label repeats the label of a document already placed on an EARLIER page
+      — the same issuer and document number, which is what a copy is; or
+    * the hash detector independently flagged this page against an earlier page.
+
+    Nothing acts on the hash alone: the 64-bit average hash is not reliable
+    (on the real bundle it calls pages 2 and 3 near-identical, and they are two
+    different invoices), so a bare hash match keeps today's behaviour — a flag
+    on the page row and nothing more. Nothing acts on the model flag alone
+    either: an unsupported "duplicate_page" is left as a normal document.
+    """
+    if not flagged:
+        return None, None
+    wanted = label.strip().lower()
+    if wanted:
+        for d in docs:
+            if d.label and d.label.strip().lower() == wanted and d.first_page < outcome.page:
+                return (
+                    d.first_page,
+                    f"its label {label!r} repeats that of the document on page {d.first_page}",
+                )
+    if outcome.duplicate_of_page is not None and outcome.duplicate_of_page < outcome.page:
+        return outcome.duplicate_of_page, "the page hash matches that page"
+    return None, None
 
 
 def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]:
@@ -863,6 +910,33 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
                 for b in (entry.get("boxes") or [])
             ]
             cont_prev = bool(entry.get("continues_previous"))
+
+            duplicate_of, duplicate_why = _duplicate_copy_of(
+                outcome, flagged=DUPLICATE_PAGE_FLAG in flags, label=label, docs=docs,
+            )
+            if duplicate_of is not None:
+                # A COPY of paper this bundle already carries. It is NOT a
+                # continuation (attaching it would put the same page inside a
+                # document twice — page 9 of the real bundle did exactly that)
+                # and NOT an extractable document (it would be read and counted
+                # twice), so it becomes its own EXCLUDED document whose reason
+                # names the page it copies. Checked BEFORE the continuation
+                # branch on purpose: a model that marks a copy as a continuation
+                # must not get it attached anyway.
+                copy = _Doc(
+                    ordinal=len(docs) + 1,
+                    category=category,
+                    label=label,
+                    flags=set(flags),
+                    regions=[],
+                    first_page=outcome.page,
+                    last_page=outcome.page,
+                    excluded_reason=f"duplicate of page {duplicate_of} — {duplicate_why}",
+                )
+                for b in boxes:
+                    copy.regions.append(_region(outcome.page, b, len(copy.regions)))
+                docs.append(copy)
+                continue
 
             if cont_prev:
                 target = _pick_open(prev_open, label) if prev_open else None
@@ -1031,7 +1105,10 @@ def _persist_documents(
     conn: sqlite3.Connection, *, upload_id: int, run_id: int, docs: list[_Doc], unassigned: list[dict[str, Any]], actor: str,
 ) -> None:
     for doc in docs:
-        excluded = 1 if doc.category == DEFAULT_EXCLUDED_CATEGORY else 0
+        excluded_reason = doc.excluded_reason or (
+            DEFAULT_EXCLUDED_CATEGORY if doc.category == DEFAULT_EXCLUDED_CATEGORY else None
+        )
+        excluded = 1 if excluded_reason else 0
         cur = conn.execute(
             """
             INSERT INTO invoice_documents
@@ -1041,11 +1118,27 @@ def _persist_documents(
             """,
             (
                 upload_id, run_id, doc.ordinal, doc.category, doc.label, excluded,
-                DEFAULT_EXCLUDED_CATEGORY if excluded else None,
-                json.dumps(sorted(doc.flags)), _now(),
+                excluded_reason, json.dumps(sorted(doc.flags)), _now(),
             ),
         )
         document_id = int(cur.lastrowid)
+        if doc.excluded_reason:
+            # One decision line per duplicate copy, in the SAME audit table the
+            # unassigned pages already use (``page_unassigned``) — no new table,
+            # nothing to migrate. The reason is repeated here because this log
+            # is what a reviewer reads to see WHY a page was left out.
+            conn.execute(
+                """
+                INSERT INTO document_region_log
+                    (document_id, region_id, action, before_json, after_json, actor, at)
+                VALUES (?, NULL, 'page_duplicate_excluded', NULL, ?, ?, ?)
+                """,
+                (
+                    document_id,
+                    json.dumps({"page": doc.first_page, "reason": doc.excluded_reason}),
+                    actor, _now(),
+                ),
+            )
         for region in doc.regions:
             cur2 = conn.execute(
                 """
