@@ -20,6 +20,7 @@ from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import extract as ex
 from src.invoice_extract import fields_v2 as fv2
 from src.invoice_extract import normalisers as nz
+from src.invoice_extract import triage as triage_mod
 from src.invoice_extract.service import InvoiceExtractError
 
 FIXTURE_PDF = os.environ.get("SETU_TRIAGE_FIXTURE_PDF")
@@ -1386,3 +1387,57 @@ def test_fixture_pdf_crop_geometry_is_readable():
             {}, dpi=120, max_edge_px=1000,
         )
         assert crops[0].png[:4] == b"\x89PNG"
+
+
+# ===========================================================================
+# Triage prompt — one document per issuer (over-split fix)
+# ===========================================================================
+
+
+def test_triage_prompt_keeps_one_document_per_issuer():
+    """The triage system prompt must keep the rules that stop ONE sheet being
+    split into many documents, and must no longer tell the model to split when
+    it is unsure. Prompt text only — no model is called, no DB is touched."""
+    prompt = triage_mod._SYSTEM_PROMPT
+
+    # (a) one issuer = one document, sections are part of it.
+    assert "ONE issuer" in prompt
+    assert "ONE document, ONE box per page" in prompt
+    assert "its sections included" in prompt
+    assert "The SAME issuer is ONE document" in prompt
+
+    # (b) boilerplate / continuations of the same document are not documents.
+    assert "headers, footers" in prompt
+    assert "payment " in prompt and "instructions" in prompt
+    assert "continues_previous=true" in prompt
+
+    # (c) handwritten marks and annotations belong to their document.
+    assert "Handwritten notes" in prompt
+    assert "never separate" in prompt
+
+    # (d) the old "unsure" trigger that caused the over-split is gone.
+    assert "when you are UNSURE" not in prompt
+    # A second box may only be returned for genuinely different paper, and only
+    # with the "unsure_split" flag — never on a bare tie-break.
+    assert "could differ in issuer or number" in prompt
+    assert prompt.index("could differ in issuer or number") < prompt.index("unsure_split")
+    assert "most pages hold ONE" in prompt
+
+    # Unchanged contracts: categories, geometry, rotation, blank pages.
+    for category in ("tax_invoice", "no_gst_expense", "supporting", "ticket", "not_a_voucher"):
+        assert category in prompt
+    assert "FRACTIONS" in prompt
+    assert "rotation_deg" in prompt
+    assert "page_is_blank" in prompt
+    assert "evidence snippet" in prompt
+
+    # The reply shape and field names handed to the model are untouched.
+    fields = triage_mod._USER_PROMPT_TEMPLATE
+    for key in ('"category"', '"label"', '"continues_previous"', '"continues_next"',
+                '"flags"', '"evidence"', '"boxes"', '"x"', '"y"', '"w"', '"h"'):
+        assert key in fields
+    assert "Return exactly this JSON shape" in fields
+
+    # Keep the rewrite inside its ~30% size budget (the pre-rewrite prompt was
+    # 1545 chars) so the instruction weight on the model does not balloon.
+    assert len(prompt) <= 2100, f"system prompt grew to {len(prompt)} chars"
