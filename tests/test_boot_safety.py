@@ -183,6 +183,81 @@ def test_check_on_a_pre_migration_copy_lists_the_pending_versions_and_exits_1(tm
     assert _digest(db) == before        # still no schema_migrations table
 
 
+def test_a_current_by_version_database_missing_a_boot_column_is_refused(copy_db):
+    """Versions are not the whole story.
+
+    F1's access-role and login-lockout columns reach an existing ``users`` table
+    through ``init_auth``'s ``ALTER TABLE``, with no version bump — so a database
+    that predates them holds EVERY migration version and still cannot sign
+    anyone in. The app used to boot on it and then die mid-login with
+    ``sqlite3.OperationalError: no such column: locked_until``. Rebuild exactly
+    that shape: the gate must refuse it, and ``--migrate`` must be the fix.
+    """
+    root, db = copy_db
+    legacy_cols = "user_id, username, display_name, email, password_salt, " \
+                  "password_hash, role_id, is_active, is_end_client, " \
+                  "end_client_id, created_at, last_login_at"
+    conn = sqlite3.connect(db)
+    try:
+        conn.executescript(
+            f"""
+            PRAGMA legacy_alter_table = ON;
+            ALTER TABLE users RENAME TO users_modern;
+            CREATE TABLE users (
+                user_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                username       TEXT    NOT NULL UNIQUE,
+                display_name   TEXT    NOT NULL,
+                email          TEXT,
+                password_salt  TEXT    NOT NULL,
+                password_hash  TEXT    NOT NULL,
+                role_id        INTEGER NOT NULL REFERENCES roles(role_id),
+                is_active      INTEGER NOT NULL DEFAULT 1,
+                is_end_client  INTEGER NOT NULL DEFAULT 0,
+                end_client_id  INTEGER,
+                created_at     TEXT    NOT NULL,
+                last_login_at  TEXT
+            );
+            INSERT INTO users ({legacy_cols}) SELECT {legacy_cols} FROM users_modern;
+            DROP TABLE users_modern;
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = bootstrap.migration_status(db)
+    assert status["pending"] == []              # every version is applied ...
+    assert status["missing_columns"] == [       # ... and the columns are not
+        "users.role", "users.must_change_password",
+        "users.failed_login_count", "users.locked_until",
+    ]
+    assert status["current"] is False
+
+    with pytest.raises(bootstrap.SchemaMigrationPending) as exc:
+        bootstrap.ensure_schema_current(db)
+    assert str(exc.value) == bootstrap.MIGRATION_HINT
+    assert "users.locked_until" in exc.value.detail
+
+    # Refusing is read-only, and --check names the columns.
+    result = _run_main(["--check"], db=db, data=root / "data")
+    assert result.returncode == 1
+    assert "users.locked_until" in result.stdout
+    result = _run_main([], db=db, data=root / "data")
+    assert result.returncode == main_mod.EXIT_REFUSED
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        assert "locked_until" not in {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+    finally:
+        conn.close()
+
+    # ... and the documented command IS the fix, because init_auth carries the
+    # old table forward on the boot path.
+    bootstrap.run_migrations(db_path=db, data_root=root / "data")
+    status = bootstrap.migration_status(db)
+    assert status["missing_columns"] == []
+    assert status["current"] is True
+
+
 # ===========================================================================
 # 3. A bare start refuses, and only the opt-in lets it migrate
 # ===========================================================================

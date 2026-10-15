@@ -42,6 +42,7 @@ either finds a current schema or fails loudly with the command to run.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -93,6 +94,52 @@ def _required_versions() -> list[int]:
     return sorted(int(m.version) for m in MIGRATIONS)
 
 
+# (label, table, column): columns an ``init_*`` step adds to an EXISTING table
+# with ``ALTER TABLE``. A version number cannot express these — the step simply
+# brings the old table forward on every boot — so a database can hold every
+# migration version and still be missing one. Verified read-only below, because
+# the failure mode is otherwise invisible until a request needs the column.
+_REQUIRED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("F1  auth", "users", "end_client_id"),
+    ("F1  auth", "users", "role"),
+    ("F1  auth", "users", "must_change_password"),
+    ("F1  auth", "users", "failed_login_count"),
+    ("F1  auth", "users", "locked_until"),
+)
+
+
+def _missing_boot_columns(conn: sqlite3.Connection) -> list[str]:
+    """READ-ONLY: the ``table.column`` pairs this database is missing.
+
+    ``schema_migrations`` records the versioned migrations only, while some
+    ``init_*`` steps also carry an old table forward with ``ALTER TABLE`` — F1's
+    access-role and login-lockout columns on ``users`` are the ones that arrive
+    that way. Those never bump a version, so a database can be "current" by
+    version and still be missing a column: it boots, and the failure surfaces
+    later as a raw ``sqlite3.OperationalError: no such column`` in the middle of
+    a request — exactly how the lockout columns broke sign-in. Reporting them
+    here turns that into the boot refusal the operator can act on.
+
+    A table that is entirely absent counts as missing all of its columns.
+    """
+    try:
+        columns: dict[str, set[str]] = {}
+        for _label, table, _column in _REQUIRED_COLUMNS:
+            if table not in columns:
+                columns[table] = {
+                    row[1] for row in conn.execute(f"PRAGMA table_info({table})")
+                }
+    except sqlite3.Error:
+        # Unreadable or not a database: the caller's version read reports that
+        # already, and a status/gate function must not raise from here.
+        return []
+    return [
+        f"{table}.{column}"
+        for _label, table, column in _REQUIRED_COLUMNS
+        if column not in columns[table]
+    ]
+
+
 def expected_data_root(db_path: Path | str | None = None) -> Path:
     """The data root that BELONGS to this database.
 
@@ -125,6 +172,7 @@ def migration_status(db_path: Path | str | None = None) -> dict:
     path = Path(db_path) if db_path else Path(db.DB_PATH)
     required = _required_versions()
     applied: list[int] = []
+    missing_columns: list[str] = []
     error: Optional[str] = None
     if not path.exists():
         error = "the database file does not exist"
@@ -142,6 +190,7 @@ def migration_status(db_path: Path | str | None = None) -> dict:
                 except sqlite3.Error:
                     # No schema_migrations table: a pre-migration database.
                     applied = []
+                missing_columns = _missing_boot_columns(conn)
             finally:
                 conn.close()
     pending = sorted(set(required) - set(applied))
@@ -151,7 +200,8 @@ def migration_status(db_path: Path | str | None = None) -> dict:
         "applied": applied,
         "required": required,
         "pending": pending,
-        "current": not pending and error is None,
+        "missing_columns": missing_columns,
+        "current": not pending and not missing_columns and error is None,
         "error": error,
     }
 
@@ -207,14 +257,18 @@ def ensure_schema_current(db_path: Path | str | None = None) -> None:
         except sqlite3.Error:
             # No schema_migrations table at all — a pre-migration database.
             applied = set()
+        missing_columns = _missing_boot_columns(conn)
     finally:
         conn.close()
 
     missing = sorted(set(required) - applied)
-    if missing:
-        raise SchemaMigrationPending(
-            f"{where}; applied={sorted(applied)} missing={missing}"
-        )
+    if missing or missing_columns:
+        detail = f"{where}; applied={sorted(applied)} missing={missing}"
+        if missing_columns:
+            # Versions can be complete while an ALTER-carrying init_* has never
+            # run: name the columns, or the operator sees "nothing pending".
+            detail += f"; missing columns: {missing_columns}"
+        raise SchemaMigrationPending(detail)
 
 
 def run_migrations(

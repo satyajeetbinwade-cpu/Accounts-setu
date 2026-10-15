@@ -92,6 +92,10 @@ def _check() -> int:
     else:
         print(f"applied:   {status['applied']}")
         print(f"pending:   {status['pending']}")
+        if status["missing_columns"]:
+            # Versions can be complete while a column an init_* adds with
+            # ALTER TABLE is absent — this is what such a database reports.
+            print(f"missing:   columns {status['missing_columns']}")
     if status["current"]:
         print("schema is current.")
         return 0
