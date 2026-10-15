@@ -51,15 +51,22 @@ class CommunicationState(AuthState):
     show_send_form: bool = True
 
     def load_clients(self):
-        """Load clients list for the follow-up page."""
-        self.clients = client_svc.list_clients(include_inactive=False)
+        """Load the clients this user may see, for the follow-up page."""
+        self.clients = client_svc.list_clients(
+            viewer=self._viewer(), include_inactive=False
+        )
 
     def select_client(self, client_id: int):
-        """Select a client and load their contact info."""
+        """Select a client and load their contact info.
+
+        The id arrives from the event, so it is looked up through the viewer:
+        somebody else's client resolves to ``None`` and nothing is selected.
+        """
+        client = client_svc.find_client(int(client_id or 0), viewer=self._viewer())
+        if client is None:
+            return
         self.selected_client_id = client_id
-        client = client_svc.get_client(client_id)
-        if client:
-            self.selected_client_name = client["legal_name"]
+        self.selected_client_name = client["legal_name"]
 
         # Load follow-up preferences
         prefs = comms.get_client_followup_prefs(client_id)

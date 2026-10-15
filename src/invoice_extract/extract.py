@@ -1032,10 +1032,11 @@ def start_extraction(
             "is unaffected; turn the setting on (or pass force=True) to run this pass."
         )
 
+    from src.auth import access
     from src.invoice_extract.service import get_upload
     from src.invoice_extract.triage import get_triage
 
-    if get_upload(upload_id, db_path=db_path) is None:
+    if get_upload(upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path) is None:
         raise InvoiceExtractError(f"Unknown upload {upload_id}.")
     triage = get_triage(upload_id, db_path=db_path)
     documents = list(triage["documents"])
@@ -1178,6 +1179,7 @@ def _persist_outcome(
 def _execute_extraction(upload_id: int, *, actor: str, db_path=None) -> dict[str, Any]:
     """The worker body: read every unfinished document of one upload."""
     cfg = get_config(db_path=db_path)
+    from src.auth import access
     from src.invoice_extract.service import get_upload, get_upload_bytes
     from src.invoice_extract.triage import _page_total_and_text, get_triage
 
@@ -1186,9 +1188,11 @@ def _execute_extraction(upload_id: int, *, actor: str, db_path=None) -> dict[str
     docs_by_id = {int(d["document_id"]): d for d in triage["documents"]}
     rotations = {int(p["page"]): int(p["rotation_deg"] or 0) for p in triage["pages"]}
 
-    upload = get_upload(upload_id, db_path=db_path) or {}
+    upload = get_upload(upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path) or {}
     source_format = upload.get("source_format") or "pdf"
-    file_bytes = get_upload_bytes(upload_id, db_path=db_path) or b""
+    file_bytes = get_upload_bytes(
+        upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path
+    ) or b""
     if not file_bytes:
         # Nothing to read: fail every unfinished document loudly.
         conn = _connect(db_path)
@@ -1619,13 +1623,16 @@ def annotate_crops(
 
     from PIL import Image, ImageDraw
 
+    from src.auth import access
     from src.invoice_extract.service import get_upload, get_upload_bytes
     from src.invoice_extract.triage import get_triage
 
     cfg = cfg or get_config(db_path=db_path)
-    upload = get_upload(upload_id, db_path=db_path) or {}
+    upload = get_upload(upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path) or {}
     source_format = upload.get("source_format") or "pdf"
-    file_bytes = get_upload_bytes(upload_id, db_path=db_path) or b""
+    file_bytes = get_upload_bytes(
+        upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path
+    ) or b""
     if not file_bytes:
         return []
     rotations = {

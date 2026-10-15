@@ -15,6 +15,7 @@ the single "Details" tab. ``NewClientState`` (below) drives the standalone
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import reflex as rx
 
@@ -35,6 +36,9 @@ _SOURCE_LABELS = {"tally": "Tally", "gst_portal": "GST Portal", "traces": "TRACE
 PROFILE_TABS = ["Details", "Contacts", "Chart of Accounts", "Historical Snapshot", "Documents"]
 DEFAULT_PROFILE_TAB = "Details"
 
+# Label of the Admin roster's "do not filter by user" option.
+ALL_OWNERS_LABEL = "All users"
+
 
 @dataclass
 class ClientRow:
@@ -45,6 +49,9 @@ class ClientRow:
     gstin: str
     assigned_team: str
     is_active: bool
+    # Who created the client. Only the Admin roster renders it (a standard
+    # user only ever sees their own clients, so the column would be noise).
+    owner_username: str
 
 
 @dataclass
@@ -94,6 +101,13 @@ class ClientState(AuthState):
     roster_search: str = ""
     show_inactive: bool = False
     flash: str = ""
+    # Admin-only: narrow the roster to the clients one user created. Held as
+    # the option LABEL because that is what rx.select binds to; the label is
+    # resolved to a user id from ``owner_labels`` before the query runs.
+    # Ignored server-side for a standard user, whose scope is already their own.
+    owner_filter: str = "All users"
+    owner_options: list[str] = []
+    owner_labels: dict[str, str] = {}
 
     # ---- selected profile ----------------------------------------------
     selected_client_id: int = 0
@@ -282,7 +296,26 @@ class ClientState(AuthState):
         return value if value > 0 else 0
 
     def _load_roster(self) -> None:
-        rows = clients.list_clients(include_inactive=self.show_inactive)
+        # Owner labels come from the same ownership registry the rows do, so
+        # the filter can never offer a user who owns nothing.
+        owners = clients.list_client_owners()
+        labels = {int(o["user_id"]): str(o["username"]) for o in owners}
+        self.owner_labels = {username: str(uid) for uid, username in labels.items()}
+        self.owner_options = [ALL_OWNERS_LABEL, *sorted(self.owner_labels)]
+        if self.owner_filter not in self.owner_options:
+            self.owner_filter = ALL_OWNERS_LABEL
+        filter_owner = None
+        if self.owner_filter != ALL_OWNERS_LABEL:
+            try:
+                filter_owner = int(self.owner_labels[self.owner_filter])
+            except (KeyError, TypeError, ValueError):
+                filter_owner = None
+
+        rows = clients.list_clients(
+            viewer=self._viewer(),
+            include_inactive=self.show_inactive,
+            filter_owner_id=filter_owner,
+        )
         if self.roster_search:
             s = self.roster_search.lower()
             rows = [
@@ -302,12 +335,15 @@ class ClientState(AuthState):
                 gstin=_text(c, "gstin"),
                 assigned_team=_text(c, "assigned_team"),
                 is_active=bool(c["is_active"]),
+                owner_username=labels.get(
+                    int(c.get("owner_user_id") or 0), _text(c, "created_by") or "—"
+                ),
             )
             for c in rows
         ]
 
     def _load_profile(self) -> None:
-        client = clients.get_client(self.selected_client_id)
+        client = clients.find_client(self.selected_client_id, viewer=self._viewer())
         if client is None:
             self.selected_client_id = 0
             return
@@ -343,13 +379,15 @@ class ClientState(AuthState):
                 phone=c.get("phone") or "",
                 notes=c.get("notes") or "",
             )
-            for c in clients.list_contacts(self.selected_client_id)
+            for c in clients.list_contacts(self.selected_client_id, viewer=self._viewer())
         ]
         self.coa = [
             CoaRow(coa_id=r["coa_id"], code=r["code"], name=r["name"], account_type=r.get("account_type") or "")
-            for r in clients.list_coa(self.selected_client_id)
+            for r in clients.list_coa(self.selected_client_id, viewer=self._viewer())
         ]
-        self.snapshot_years = clients.list_snapshot_years(self.selected_client_id)
+        self.snapshot_years = clients.list_snapshot_years(
+            self.selected_client_id, viewer=self._viewer()
+        )
         if not self.snapshot_year and self.snapshot_years:
             self.snapshot_year = self.snapshot_years[0]
         self.snapshots = [
@@ -363,6 +401,7 @@ class ClientState(AuthState):
             for r in clients.list_snapshots(
                 self.selected_client_id,
                 self.snapshot_year if self.snapshot_year in self.snapshot_years else None,
+                viewer=self._viewer(),
             )
         ]
         self._load_history()
@@ -406,6 +445,21 @@ class ClientState(AuthState):
     def set_roster_search(self, v: str):
         self.roster_search = v
         self._load_roster()
+
+    def set_owner_filter(self, label: str):
+        """Admin-only: show the clients one user created.
+
+        Takes the option LABEL ("All users" or a username) because that is what
+        the select binds to; the user id is resolved in ``_load_roster``.
+        """
+        self.owner_filter = label
+        self._load_roster()
+
+    @rx.var
+    def show_owner_column(self) -> bool:
+        """Admins see who created each client. A standard user only ever has
+        their own, so the column is hidden rather than filled with their name."""
+        return self.is_firm_admin
 
     def set_show_inactive(self, v: bool):
         self.show_inactive = v
@@ -496,6 +550,7 @@ class ClientState(AuthState):
             clients.update_client_details(
                 self.selected_client_id,
                 actor=self.username,
+                viewer=self._viewer(),
                 legal_name=self.d_name,
                 assigned_team=self.d_team,
                 primary_contact_email=self.d_email,
@@ -525,7 +580,7 @@ class ClientState(AuthState):
         try:
             clients.update_client_field(
                 self.selected_client_id, field, value,
-                actor=self.username, reason=reason,
+                actor=self.username, reason=reason, viewer=self._viewer(),
             )
         except clients.ClientError as exc:
             self.flash = str(exc)
@@ -535,7 +590,9 @@ class ClientState(AuthState):
 
     @rx.event
     def set_client_active(self, active: bool):
-        clients.set_client_active(self.selected_client_id, active, actor=self.username)
+        clients.set_client_active(
+            self.selected_client_id, active, actor=self.username, viewer=self._viewer()
+        )
         self._load_profile()
         self._load_roster()
 
@@ -562,6 +619,7 @@ class ClientState(AuthState):
         try:
             clients.add_contact(
                 self.selected_client_id,
+                viewer=self._viewer(),
                 name=self.ac_name,
                 role_title=self.ac_role or None,
                 email=self.ac_email or None,
@@ -578,7 +636,7 @@ class ClientState(AuthState):
 
     @rx.event
     def remove_contact(self, contact_id: int):
-        clients.remove_contact(contact_id, actor=self.username)
+        clients.remove_contact(contact_id, actor=self.username, viewer=self._viewer())
         self._load_profile()
 
     # ------------------------------------------------------------------
@@ -599,7 +657,10 @@ class ClientState(AuthState):
     @rx.event
     def import_coa(self):
         try:
-            n = clients.bulk_import_coa(self.selected_client_id, self.coa_bulk, actor=self.username)
+            n = clients.bulk_import_coa(
+                self.selected_client_id, self.coa_bulk,
+                actor=self.username, viewer=self._viewer(),
+            )
             self.flash = f"Imported {n} row(s)."
             self.coa_bulk = ""
         except clients.ClientError as exc:
@@ -610,7 +671,8 @@ class ClientState(AuthState):
     def add_coa_row(self):
         try:
             clients.add_coa_row(
-                self.selected_client_id, self.coa_code, self.coa_name, self.coa_type, actor=self.username
+                self.selected_client_id, self.coa_code, self.coa_name, self.coa_type,
+                actor=self.username, viewer=self._viewer(),
             )
             self.flash = "Row added."
             self.coa_code = self.coa_name = self.coa_type = ""
@@ -620,7 +682,7 @@ class ClientState(AuthState):
 
     @rx.event
     def delete_coa_row(self, coa_id: int):
-        clients.delete_coa_row(coa_id, actor=self.username)
+        clients.delete_coa_row(coa_id, actor=self.username, viewer=self._viewer())
         self._load_profile()
 
     # ------------------------------------------------------------------
@@ -649,7 +711,10 @@ class ClientState(AuthState):
     def import_snapshot(self):
         year = self.snapshot_year or self.snap_new_year
         try:
-            n = clients.bulk_import_snapshot(self.selected_client_id, year, self.snap_bulk, actor=self.username)
+            n = clients.bulk_import_snapshot(
+                self.selected_client_id, year, self.snap_bulk,
+                actor=self.username, viewer=self._viewer(),
+            )
             self.flash = f"Imported {n} row(s) for {year}."
             self.snap_bulk = ""
         except clients.ClientError as exc:
@@ -662,7 +727,7 @@ class ClientState(AuthState):
         try:
             clients.add_snapshot_row(
                 self.selected_client_id, year, self.snap_item, self.snap_amount, self.snap_notes,
-                actor=self.username,
+                actor=self.username, viewer=self._viewer(),
             )
             self.flash = "Row added."
             self.snap_item = self.snap_amount = self.snap_notes = ""
@@ -672,7 +737,7 @@ class ClientState(AuthState):
 
     @rx.event
     def delete_snapshot_row(self, snapshot_id: int):
-        clients.delete_snapshot_row(snapshot_id, actor=self.username)
+        clients.delete_snapshot_row(snapshot_id, actor=self.username, viewer=self._viewer())
         self._load_profile()
 
 
@@ -773,8 +838,20 @@ class NewClientState(AuthState):
 
     @rx.event
     def cancel(self):
-        """Secondary action — back to the roster, nothing saved."""
+        """Secondary action — nothing saved. Returns to wherever the user came
+        from, so cancelling out of the guided flow lands back in the flow."""
+        if self._next_target() == "reconcile":
+            return rx.redirect("/reconcile")
         return rx.redirect("/clients")
+
+    def _next_target(self) -> str:
+        """The ``?next=`` intent, when this screen was opened from a flow that
+        wants to continue after the client is saved."""
+        try:
+            params = dict(self.router.page.params or {})
+        except Exception:  # noqa: BLE001 — a missing router must not break the form
+            params = {}
+        return str(params.get("next") or "").strip().lower()
 
     @rx.event
     def submit(self):
@@ -785,6 +862,11 @@ class NewClientState(AuthState):
         route change would reset.
         """
         self.error = ""
+        # Ownership comes from the SESSION, never from the form: a standard
+        # user cannot create a client on somebody else's behalf.
+        viewer = self._viewer()
+        if viewer is None:
+            return rx.redirect("/login")
         try:
             client_id = clients.create_client(
                 legal_name=self.legal_name,
@@ -795,10 +877,18 @@ class NewClientState(AuthState):
                 primary_contact_email=self.email,
                 primary_contact_phone=self.phone,
                 primary_contact_address=self.address,
-                actor=self.username,
+                actor=str(viewer.get("username") or ""),
+                owner_user_id=int(viewer["user_id"]),
             )
         except clients.ClientError as exc:
             self.error = str(exc)
             return
+
+        came_from_reconcile = self._next_target() == "reconcile"
         self._reset()
+
+        if came_from_reconcile:
+            # Straight back to the guided flow with the new client selected, so
+            # creating one is a step in the flow rather than a detour out of it.
+            return rx.redirect(f"/reconcile?client={client_id}")
         return rx.redirect(f"/clients?client={client_id}")

@@ -14,12 +14,28 @@ import sqlite3
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.auth import db as adb
 from src.auth import security
 from src.auth.schema import init_auth_schema
 from src.auth.seed import run_seed
 
-FAILED_LOGIN_ESCALATION_THRESHOLD = 5  # repeated failures -> escalation event, never a silent lockout
+FAILED_LOGIN_ESCALATION_THRESHOLD = 5  # repeated failures -> escalation event
+
+# Brute-force policy: after this many consecutive failures the ACCOUNT is
+# locked for this long. The counter lives on the user row (not just in the
+# security-event log), so the lock survives a restart and applies no matter
+# which endpoint the guess arrives at.
+MAX_FAILED_LOGIN_ATTEMPTS = 5
+LOCKOUT_MINUTES = 15
+
+# Inactivity window, on top of the absolute session lifetime. Overridable so
+# a deployment can tighten it without a code change.
+DEFAULT_IDLE_TIMEOUT_MINUTES = 60
+
+# Deliberately identical for every failure mode (unknown user, wrong password,
+# locked account is the one exception the operator must be able to act on).
+GENERIC_LOGIN_FAILURE = "Invalid ID or password."
 
 
 class AuthError(Exception):
@@ -49,28 +65,81 @@ def _connect(db_path=None) -> sqlite3.Connection:
 def login(username: str, password: str, *, db_path=None) -> str:
     """Authenticate and return a new session token, or raise AuthError.
 
-    Every failed attempt produces a SecurityEvent (never a silent
-    lockout); repeated failures also log an 'escalation' event.
+    Every failed attempt is recorded as a SecurityEvent AND counted on the
+    user row; at ``MAX_FAILED_LOGIN_ATTEMPTS`` consecutive failures the
+    account is locked for ``LOCKOUT_MINUTES``. The message returned to the
+    caller is generic for every credential failure — it never says whether
+    the ID or the password was the wrong one, and never whether the account
+    exists.
     """
+    from datetime import datetime, timedelta, timezone
+
     conn = _connect(db_path)
     try:
         user = adb.get_user_by_username(conn, username)
-        if user is None or not user["is_active"]:
-            adb.log_security_event(conn, "login_failed", username=username, detail="unknown or inactive user")
-            raise AuthError("Invalid username or password.")
 
+        # 1. Locked accounts are refused before any password work is done, so
+        #    a locked account costs a guesser nothing but time.
+        if user is not None:
+            until = adb.locked_until(conn, user["user_id"])
+            if until:
+                try:
+                    locked_until = datetime.fromisoformat(until)
+                except ValueError:
+                    locked_until = None
+                if locked_until is not None and locked_until > datetime.now(timezone.utc):
+                    adb.log_security_event(
+                        conn, "login_locked", username=username, user_id=user["user_id"],
+                        detail=f"locked until {until}",
+                    )
+                    minutes = max(1, int((locked_until - datetime.now(timezone.utc)).total_seconds() // 60) + 1)
+                    raise AuthError(
+                        f"Too many failed attempts. Try again in {minutes} minute(s)."
+                    )
+                # A lock that has elapsed is spent: clear it and allow the try.
+                adb.clear_login_failures(conn, user["user_id"])
+
+        # 2. Unknown or inactive account: same generic answer, one security
+        #    event, and no counter to increment (there is no row to hold it).
+        if user is None or not user["is_active"]:
+            adb.log_security_event(
+                conn, "login_failed", username=username, detail="unknown or inactive user"
+            )
+            raise AuthError(GENERIC_LOGIN_FAILURE)
+
+        # 3. Wrong password: count it, lock at the threshold, and log both the
+        #    failure and the escalation.
         if not security.verify_password(password, user["password_salt"], user["password_hash"]):
+            new_count = adb.failed_login_count(conn, user["user_id"]) + 1
+            lock_until = (
+                (datetime.now(timezone.utc) + timedelta(minutes=LOCKOUT_MINUTES)).isoformat()
+                if new_count >= MAX_FAILED_LOGIN_ATTEMPTS
+                else None
+            )
+            failures = adb.register_failed_login(conn, user["user_id"], lock_until=lock_until)
             adb.log_security_event(
                 conn, "login_failed", username=username, user_id=user["user_id"],
                 detail="wrong password",
             )
-            recent_failures = adb.failed_login_count_recent(conn, username)
-            if recent_failures >= FAILED_LOGIN_ESCALATION_THRESHOLD:
+            if failures >= FAILED_LOGIN_ESCALATION_THRESHOLD:
                 adb.log_security_event(
                     conn, "escalation", username=username, user_id=user["user_id"],
-                    detail=f"{recent_failures} failed logins in the last 15 minutes",
+                    detail=f"{failures} consecutive failed logins",
                 )
-            raise AuthError("Invalid username or password.")
+            if failures >= MAX_FAILED_LOGIN_ATTEMPTS:
+                adb.log_security_event(
+                    conn, "account_locked", username=username, user_id=user["user_id"],
+                    detail=f"locked for {LOCKOUT_MINUTES} minutes after {failures} failures",
+                )
+                raise AuthError(
+                    f"Too many failed attempts. The account is locked for {LOCKOUT_MINUTES} minutes."
+                )
+            raise AuthError(GENERIC_LOGIN_FAILURE)
+
+        # 4. Success: clear the failure state and upgrade a legacy hash while
+        #    the plaintext is in hand for the one and only moment it exists.
+        if security.needs_rehash(user["password_salt"], user["password_hash"]):
+            adb.set_user_password(conn, user["user_id"], password)
 
         token = adb.create_session(conn, user["user_id"])
         adb.touch_last_login(conn, user["user_id"])
@@ -78,6 +147,22 @@ def login(username: str, password: str, *, db_path=None) -> str:
         return token
     finally:
         conn.close()
+
+
+def _idle_timeout_minutes() -> float:
+    """The inactivity window (minutes). Env-overridable, defaulting to
+    DEFAULT_IDLE_TIMEOUT_MINUTES."""
+    import os
+
+    raw = os.environ.get("SETU_SESSION_IDLE_MINUTES")
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return DEFAULT_IDLE_TIMEOUT_MINUTES
 
 
 def logout(session_token: str, *, db_path=None) -> None:
@@ -117,24 +202,93 @@ def extend_session(session_token: str, *, db_path=None) -> None:
 
 
 def current_user(session_token: Optional[str], *, db_path=None) -> Optional[dict[str, Any]]:
-    """Resolve a session token to the user dict, or None if missing/expired/
-    revoked/deactivated. Touches last_seen_at on success."""
+    """Resolve a session token to the user dict, or None if missing/revoked/
+    expired/idle-timed-out/deactivated. Touches last_seen_at on success.
+
+    Expiry is enforced on the SERVER for every request — the cookie's own
+    max-age is only a client-side hint and is never relied on.
+    """
     if not session_token:
         return None
     conn = _connect(db_path)
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
         sess = adb.get_session(conn, session_token)
         if sess is None or sess["is_revoked"]:
             return None
-        if sess["expires_at"] < datetime.now(timezone.utc).isoformat():
+
+        now = datetime.now(timezone.utc)
+
+        # Absolute lifetime.
+        try:
+            if datetime.fromisoformat(sess["expires_at"]) <= now:
+                return None
+        except ValueError:
             return None
+
+        # Inactivity: a session idle longer than the window is dead, even
+        # though its absolute expiry has not passed.
+        try:
+            last_seen = datetime.fromisoformat(sess["last_seen_at"])
+            if now - last_seen > timedelta(minutes=_idle_timeout_minutes()):
+                adb.revoke_session(conn, session_token)
+                return None
+        except ValueError:
+            return None
+
         user = adb.get_user_by_id(conn, sess["user_id"])
         if user is None or not user["is_active"]:
             return None
         adb.touch_session(conn, session_token)
         return user
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Access role + password lifecycle
+# ---------------------------------------------------------------------------
+
+
+def is_admin_user(user: Optional[dict[str, Any]]) -> bool:
+    """True when this user has firm-wide visibility (access role 'admin')."""
+    return access.is_admin(user)
+
+
+def must_change_password(user: Optional[dict[str, Any]]) -> bool:
+    """True when the account is signed in but may not use the app until it
+    replaces a password somebody else issued (seeded or Admin-reset)."""
+    return bool((user or {}).get("must_change_password"))
+
+
+def change_own_password(user: dict[str, Any], current_password: str, new_password: str, *, db_path=None) -> None:
+    """Self-service password change: requires the current password, applies
+    the strength policy, and clears the must-change flag."""
+    conn = _connect(db_path)
+    try:
+        row = adb.get_user_by_id(conn, user["user_id"])
+        if row is None or not row["is_active"]:
+            raise AuthError("Account not available.")
+        if not security.verify_password(
+            current_password, row["password_salt"], row["password_hash"]
+        ):
+            adb.log_security_event(
+                conn, "password_change_failed", username=row["username"], user_id=row["user_id"],
+                detail="current password mismatch",
+            )
+            raise AuthError("Your current password is not correct.")
+        weak = security.validate_password_strength(new_password)
+        if weak:
+            raise AuthError(weak)
+        if security.verify_password(new_password, row["password_salt"], row["password_hash"]):
+            raise AuthError("Choose a password you have not used here before.")
+        adb.set_user_password(
+            conn, row["user_id"], new_password, must_change_password=False, revoke_sessions=False
+        )
+        adb.log_security_event(
+            conn, "password_changed", username=row["username"], user_id=row["user_id"]
+        )
     finally:
         conn.close()
 
@@ -359,6 +513,7 @@ def create_user(
     actor: str,
     is_end_client: bool = False,
     end_client_id: Optional[int] = None,
+    must_change_password: bool = True,
     db_path=None,
 ) -> int:
     weak = security.validate_password_strength(password)
@@ -373,6 +528,7 @@ def create_user(
             username=username, display_name=display_name, email=email,
             password=password, role_id=role_id,
             is_end_client=is_end_client, end_client_id=end_client_id,
+            must_change_password=must_change_password,
         )
         adb.log_change(conn, "user", username, field="created", changed_by=actor, db_path=db_path)
         return user_id
@@ -423,17 +579,43 @@ def set_user_active(user_id: int, is_active: bool, *, actor: str, db_path=None) 
         conn.close()
 
 
-def reset_user_password(user_id: int, new_password: str, *, actor: str, db_path=None) -> None:
+def reset_user_password(
+    user_id: int, new_password: str, *, actor: str, require_change: bool = True, db_path=None
+) -> None:
+    """Replace a user's password (Admin action).
+
+    Revokes that user's live sessions — the whole point of a reset is to end
+    the old credential's access — and flags the account so the password the
+    Admin just transmitted cannot stay in use: the user must choose their own
+    at the next sign-in.
+    """
     weak = security.validate_password_strength(new_password)
     if weak:
         raise AuthError(weak)
     conn = _connect(db_path)
     try:
         user = adb.get_user_by_id(conn, user_id)
-        adb.set_user_password(conn, user_id, new_password)
+        adb.set_user_password(
+            conn, user_id, new_password, must_change_password=require_change, revoke_sessions=True
+        )
         adb.log_change(
             conn, "user", user["username"] if user else str(user_id),
-            field="password", new_value="(reset)", changed_by=actor, db_path=db_path)
+            field="password", new_value="(reset)", changed_by=actor, db_path=db_path,
+        )
+        adb.log_security_event(
+            conn, "password_reset",
+            username=user["username"] if user else None, user_id=user_id,
+            detail=f"reset by {actor}; all sessions revoked",
+        )
+    finally:
+        conn.close()
+
+
+def set_must_change_password(user_id: int, required: bool, *, db_path=None) -> None:
+    """Force (or clear) the first-sign-in password change for an account."""
+    conn = _connect(db_path)
+    try:
+        adb.set_must_change_password(conn, user_id, required)
     finally:
         conn.close()
 

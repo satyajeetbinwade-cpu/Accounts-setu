@@ -19,6 +19,7 @@ import pytest
 from src import db as recon_db
 from src.ai_models import gateway, providers as prov, service as ams
 from src.invoice_extract import db as idb
+from src.auth import access
 from src.invoice_extract import service as ie
 from src.invoice_extract import triage
 
@@ -360,7 +361,9 @@ def test_re_extract_preserves_history_in_ai_call_log(tmp_path, monkeypatch):
     # The re-extract attributed the call to the upload, so the log holds history.
     assert captured["upload_id"] == uid
     assert res["extraction_touchpoint"] == "invoice_extraction_structured"
-    assert ie.get_upload(uid, db_path=db_path)["extraction_touchpoint"] == "invoice_extraction_structured"
+    assert ie.get_upload(
+        uid, viewer=access.SYSTEM_VIEWER, db_path=db_path
+    )["extraction_touchpoint"] == "invoice_extraction_structured"
 
 
 # ===========================================================================

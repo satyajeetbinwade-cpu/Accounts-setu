@@ -500,11 +500,11 @@ class InvoiceReviewState(SharedUploadState):
             return rx.redirect(deny)
         self.client_options = [
             ClientPick(client_id=int(c["client_id"]), legal_name=str(c["legal_name"]))
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self.client_label_map = {
             str(c["client_id"]): str(c["legal_name"])
-            for c in clients.list_clients(include_inactive=True)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=True)
         }
         self._read_flag()
         self._load_models_line()
@@ -594,7 +594,7 @@ class InvoiceReviewState(SharedUploadState):
             self.poll_active = False
             return
         rows: list[JobRow] = []
-        for upload in ie.list_uploads(client_id=self.upload_client_id):
+        for upload in ie.list_uploads(client_id=self.upload_client_id, viewer=self._viewer()):
             rows.append(self._job_row(upload))
         rows.sort(key=lambda r: (-r.running, not r.started, -r.upload_id))
         self.jobs = rows
@@ -834,7 +834,7 @@ class InvoiceReviewState(SharedUploadState):
         self._load_jobs()
 
     def _load_upload(self) -> None:
-        upload = ie.get_upload(self.open_upload_id) or {}
+        upload = ie.get_upload(self.open_upload_id, viewer=self._viewer()) or {}
         self.open_filename = str(upload.get("filename") or "")
         self.open_client_label = self._label(upload.get("client_id"))
         from src.invoice_extract.immutable import is_immutable_status
@@ -1278,8 +1278,8 @@ class InvoiceReviewState(SharedUploadState):
             return _RENDER_CACHE[key]
         rendered = None
         try:
-            data = ie.get_upload_bytes(self.open_upload_id) or b""
-            upload = ie.get_upload(self.open_upload_id) or {}
+            data = ie.get_upload_bytes(self.open_upload_id, viewer=self._viewer()) or b""
+            upload = ie.get_upload(self.open_upload_id, viewer=self._viewer()) or {}
             rendered = crops_mod.render_upright_page(
                 data, str(upload.get("source_format") or "pdf"), int(page),
                 dpi=review_api.DEFAULT_PAGE_DPI,

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.documents import service as documents
 from src.documents import db as ddb
 from src.ingestion_ai import db as idb
@@ -332,13 +333,26 @@ def materialize_upload_to_disk(
         return None
 
 
-def suggest_period_for_upload(upload_id: int, *, db_path=None) -> tuple[Optional[str], str]:
+def _upload_is_viewers(upload_id: int, viewer, *, db_path=None) -> bool:
+    """Whether this viewer may act on that upload.
+
+    Delegates to ``get_upload``, so "not yours" and "no such upload" are the
+    same answer and the rule lives in one place.
+    """
+    return get_upload(upload_id, viewer=viewer, db_path=db_path) is not None
+
+
+def suggest_period_for_upload(
+    upload_id: int, *, viewer=None, db_path=None
+) -> tuple[Optional[str], str]:
     """Best-effort period suggestion for an upload, with its evidence.
 
     Returns ``(period, source)`` — see ``periods.suggest_period``. Used by
     the upload form to pre-fill the (now required) Period field, and by the
     "File to period" action to propose a value for a stranded upload.
     """
+    if not _upload_is_viewers(upload_id, viewer, db_path=db_path):
+        return None, ""
     conn = _connect(db_path)
     try:
         upload = idb.get_raw_upload(conn, upload_id)
@@ -370,7 +384,7 @@ def unfiled_uploads(*, db_path=None) -> list[dict[str, Any]]:
 
 
 def set_upload_period(
-    upload_id: int, period: str, *, actor: str, db_path=None,
+    upload_id: int, period: str, *, actor: str, viewer=None, db_path=None,
 ) -> dict[str, Any]:
     """Re-file an upload under a real period so reconciliation can see it.
 
@@ -388,6 +402,8 @@ def set_upload_period(
     Returns ``{period, moved, rekeyed, from_period}``. Raises
     ``IngestionAIError`` for an unknown upload or an invalid period.
     """
+    if not _upload_is_viewers(upload_id, viewer, db_path=db_path):
+        raise IngestionAIError("No such upload.")
     if not period_utils.is_valid_period(period):
         raise IngestionAIError(
             f"'{period}' is not a valid period. Use YYYY-MM (for example 2026-08)."
@@ -542,12 +558,23 @@ def _apply_trusted_profile(tiered: list[dict[str, Any]], column_map: dict[str, O
 # ---------------------------------------------------------------------------
 
 
-def get_upload(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+def get_upload(upload_id: int, *, viewer=None, db_path=None) -> Optional[dict[str, Any]]:
+    """One upload, or None when it isn't this viewer's.
+
+    ``upload_id`` arrives from the UI, so the upload's client is checked before
+    the row (and anything derived from it) is handed back. None is the same
+    answer for "no such upload" and "not yours"."""
     conn = _connect(db_path)
     try:
-        return idb.get_raw_upload(conn, upload_id)
+        row = idb.get_raw_upload(conn, upload_id)
     finally:
         conn.close()
+    if row is None:
+        return None
+    owned = access.owned_client_ids(viewer)
+    if owned is not None and int(row.get("client_id") or 0) not in owned:
+        return None
+    return row
 
 
 def get_report(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
@@ -558,16 +585,28 @@ def get_report(upload_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
         conn.close()
 
 
-def list_uploads(*, client_id: Optional[int] = None, status: Optional[str] = None, db_path=None) -> list[dict[str, Any]]:
+def list_uploads(
+    *, client_id: Optional[int] = None, status: Optional[str] = None, viewer=None, db_path=None
+) -> list[dict[str, Any]]:
+    """Uploads, restricted to the viewer's own clients."""
     conn = _connect(db_path)
     try:
-        return idb.list_raw_uploads(conn, client_id=client_id, status=status)
+        rows = idb.list_raw_uploads(conn, client_id=client_id, status=status)
     finally:
         conn.close()
+    return _scoped_uploads(rows, viewer)
+
+
+def _scoped_uploads(rows: list[dict[str, Any]], viewer) -> list[dict[str, Any]]:
+    """Drop uploads whose client this viewer doesn't own (None = admin)."""
+    owned = access.owned_client_ids(viewer)
+    if owned is None:
+        return rows
+    return [r for r in rows if int(r.get("client_id") or 0) in owned]
 
 
 def list_uploads_with_context(
-    *, client_id: Optional[int] = None, status: Optional[str] = None, db_path=None,
+    *, client_id: Optional[int] = None, status: Optional[str] = None, viewer=None, db_path=None,
 ) -> list[dict[str, Any]]:
     """Uploads joined to their document's period, plus the row accounting
     from the persisted ingestion result.
@@ -583,6 +622,7 @@ def list_uploads_with_context(
         rows = idb.list_raw_uploads_with_context(conn, client_id=client_id, status=status)
     finally:
         conn.close()
+    rows = _scoped_uploads(rows, viewer)
 
     out: list[dict[str, Any]] = []
     for u in rows:
@@ -1140,7 +1180,7 @@ def provenance(upload_id: int, *, db_path=None) -> dict[str, Any]:
 
 
 def re_run_mapping(
-    upload_id: int, *, actor: str, db_path=None,
+    upload_id: int, *, actor: str, viewer=None, db_path=None,
 ) -> dict[str, Any]:
     """Force a fresh model mapping for an already-ingested file.
 
@@ -1158,6 +1198,8 @@ def re_run_mapping(
     NOTE: this is a live model call (~15-25s). Callers should confirm with
     the user before invoking it.
     """
+    if not _upload_is_viewers(upload_id, viewer, db_path=db_path):
+        raise IngestionAIError("No such upload.")
     conn = _connect(db_path)
     try:
         upload = idb.get_raw_upload(conn, upload_id)

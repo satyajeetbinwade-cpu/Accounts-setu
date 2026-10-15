@@ -26,11 +26,16 @@ _WRAP_COLUMNS = {"match_reason"}
 
 
 def _client_name(client_id, *, db_path=None) -> str:
-    """The client's CURRENT legal name (display only — identity is client_id)."""
+    """The client's CURRENT legal name (display only — identity is client_id).
+
+    A trusted internal display lookup for an id the caller already holds, so
+    it reads through the SYSTEM_VIEWER explicitly.
+    """
     try:
+        from src.auth import access
         from src.clients import service as clients
 
-        c = clients.get_client(int(client_id), db_path=db_path)
+        c = clients.get_client(int(client_id), viewer=access.SYSTEM_VIEWER, db_path=db_path)
         if c:
             return str(c["legal_name"])
     except Exception:  # noqa: BLE001

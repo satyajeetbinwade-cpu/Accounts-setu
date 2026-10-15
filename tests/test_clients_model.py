@@ -28,7 +28,12 @@ import pytest
 
 from src import bootstrap
 from src import db as recon_db
+from src.auth import access
 from src.clients import service as clients
+
+# The seeded first admin owns everything that pre-dates ownership, and is the
+# viewer these data-layer tests act as (firm-wide visibility).
+ADMIN = {"user_id": 1, "username": "admin", "role": access.ADMIN_ROLE, "role_name": "Admin"}
 
 
 @pytest.fixture(scope="session")
@@ -60,6 +65,7 @@ def _valid(**overrides):
         primary_contact_phone="+91 22 4000 0000",
         primary_contact_address="Mumbai, Maharashtra",
         actor="admin",
+        owner_user_id=ADMIN["user_id"],
     )
     base.update(overrides)
     return base
@@ -80,7 +86,7 @@ def test_create_requires_pan_or_tan(db_path):
     alone is refused, and neither row is written."""
     with pytest.raises(clients.ClientError, match="PAN or TAN"):
         clients.create_client(**{**_valid(), "pan": "", "tan": ""}, db_path=db_path)
-    assert [c["legal_name"] for c in clients.list_clients(db_path=db_path)] == []
+    assert [c["legal_name"] for c in clients.list_clients(viewer=ADMIN, db_path=db_path)] == []
 
 
 def test_create_treats_whitespace_as_blank(db_path):
@@ -92,7 +98,7 @@ def test_create_treats_whitespace_as_blank(db_path):
 def test_create_accepts_pan_only(db_path):
     """Either identity alone is enough — TAN is not privileged."""
     cid = clients.create_client(**{**_valid(), "tan": ""}, db_path=db_path)
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["pan"] == "AABCM1234K"
     assert row["tan"] is None
 
@@ -100,7 +106,7 @@ def test_create_accepts_pan_only(db_path):
 def test_create_accepts_tan_only(db_path):
     """Either identity alone is enough — PAN is not privileged."""
     cid = clients.create_client(**{**_valid(), "pan": "", "tan": "MUMA12345B"}, db_path=db_path)
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["pan"] is None
     assert row["tan"] == "MUMA12345B"
 
@@ -109,7 +115,7 @@ def test_create_accepts_both_identity_numbers(db_path):
     cid = clients.create_client(
         **{**_valid(), "pan": "AABCM1234K", "tan": "MUMA12345B"}, db_path=db_path
     )
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["pan"] == "AABCM1234K"
     assert row["tan"] == "MUMA12345B"
 
@@ -124,8 +130,10 @@ def test_a_record_without_pan_or_tan_stays_editable(db_path):
         conn.commit()
     finally:
         conn.close()
-    clients.update_client_details(cid, actor="admin", assigned_team="Mumbai", db_path=db_path)
-    assert clients.get_client(cid, db_path=db_path)["assigned_team"] == "Mumbai"
+    clients.update_client_details(
+        cid, actor="admin", viewer=ADMIN, assigned_team="Mumbai", db_path=db_path
+    )
+    assert clients.get_client(cid, viewer=ADMIN, db_path=db_path)["assigned_team"] == "Mumbai"
 
 
 @pytest.mark.parametrize(
@@ -136,7 +144,7 @@ def test_create_leaves_the_primary_contact_block_optional(db_path, field):
     """Each contact field may be blank — a client is onboarded before its
     contact details are known."""
     cid = clients.create_client(**{**_valid(), field: ""}, db_path=db_path)
-    assert clients.get_client(cid, db_path=db_path)[field] is None
+    assert clients.get_client(cid, viewer=ADMIN, db_path=db_path)[field] is None
 
 
 def test_create_accepts_no_contact_block_at_all(db_path):
@@ -149,7 +157,7 @@ def test_create_accepts_no_contact_block_at_all(db_path):
         },
         db_path=db_path,
     )
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert (row["primary_contact_email"], row["primary_contact_phone"], row["primary_contact_address"]) == (
         None,
         None,
@@ -160,14 +168,14 @@ def test_create_accepts_no_contact_block_at_all(db_path):
 
 def test_create_stores_exactly_one_gstin(db_path):
     cid = clients.create_client(**{**_valid(), "gstin": " 27AABCM1234K1Z9 "}, db_path=db_path)
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["gstin"] == "27AABCM1234K1Z9"  # trimmed
     assert not isinstance(row["gstin"], (list, tuple))
 
 
 def test_list_clients_carries_no_branch_dimension(db_path):
     clients.create_client(**_valid(), db_path=db_path)
-    row = clients.list_clients(db_path=db_path)[0]
+    row = clients.list_clients(viewer=ADMIN, db_path=db_path)[0]
     assert "branch_count" not in row
     assert "primary_gstin" not in row
     assert row["gstin"] == "27AABCM1234K1Z9"
@@ -181,17 +189,17 @@ def test_list_clients_carries_no_branch_dimension(db_path):
 def test_identity_edit_requires_a_reason(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     with pytest.raises(clients.ClientError, match="reason is required"):
-        clients.update_client_field(cid, "gstin", "27AABCM9999K1Z5", actor="admin", db_path=db_path)
+        clients.update_client_field(cid, "gstin", "27AABCM9999K1Z5", actor="admin", viewer=ADMIN, db_path=db_path)
 
 
 def test_identity_edit_succeeds_with_a_reason_and_records_history(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     clients.update_client_field(
-        cid, "tan", "MUMA12345B", actor="admin", reason="TAN missing at onboarding", db_path=db_path
+        cid, "tan", "MUMA12345B", actor="admin", viewer=ADMIN, reason="TAN missing at onboarding", db_path=db_path
     )
-    assert clients.get_client(cid, db_path=db_path)["tan"] == "MUMA12345B"
+    assert clients.get_client(cid, viewer=ADMIN, db_path=db_path)["tan"] == "MUMA12345B"
 
-    entries = clients.list_edit_log(cid, db_path=db_path)
+    entries = clients.list_edit_log(cid, viewer=ADMIN, db_path=db_path)
     assert [e["field"] for e in entries] == ["tan"]
     assert entries[0]["reason"] == "TAN missing at onboarding"
 
@@ -201,8 +209,8 @@ def test_contact_fields_can_be_cleared(db_path):
     legal name is protected from being blanked."""
     cid = clients.create_client(**_valid(), db_path=db_path)
     for field in ("primary_contact_email", "primary_contact_phone", "primary_contact_address"):
-        clients.update_client_field(cid, field, "", actor="admin", db_path=db_path)
-    row = clients.get_client(cid, db_path=db_path)
+        clients.update_client_field(cid, field, "", actor="admin", viewer=ADMIN, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert (row["primary_contact_email"], row["primary_contact_phone"], row["primary_contact_address"]) == (
         None,
         None,
@@ -213,7 +221,7 @@ def test_contact_fields_can_be_cleared(db_path):
 def test_legal_name_cannot_be_blanked(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     with pytest.raises(clients.ClientError, match="can't be blank"):
-        clients.update_client_field(cid, "legal_name", "  ", actor="admin", db_path=db_path)
+        clients.update_client_field(cid, "legal_name", "  ", actor="admin", viewer=ADMIN, db_path=db_path)
 
 
 def test_identity_fields_can_be_cleared(db_path):
@@ -221,8 +229,8 @@ def test_identity_fields_can_be_cleared(db_path):
     and Manager+, but no empty-identity guard). The PAN-or-TAN requirement is
     scoped to CREATION — see test_a_record_without_pan_or_tan_stays_editable."""
     cid = clients.create_client(**_valid(), db_path=db_path)
-    clients.update_client_field(cid, "pan", "", actor="admin", reason="PAN not issued", db_path=db_path)
-    row = clients.get_client(cid, db_path=db_path)
+    clients.update_client_field(cid, "pan", "", actor="admin", viewer=ADMIN, reason="PAN not issued", db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["pan"] is None
     assert row["tan"] is None
 
@@ -233,7 +241,7 @@ def test_details_save_accepts_a_blank_contact_block(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     clients.update_client_details(
         cid,
-        actor="admin",
+        actor="admin", viewer=ADMIN,
         legal_name="Meridian Fabrics",
         assigned_team="Team A",
         primary_contact_email="",
@@ -241,7 +249,7 @@ def test_details_save_accepts_a_blank_contact_block(db_path):
         primary_contact_address="",
         db_path=db_path,
     )
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["assigned_team"] == "Team A"
     assert row["primary_contact_email"] is None
 
@@ -251,7 +259,7 @@ def test_details_save_still_refuses_to_blank_the_legal_name(db_path):
     with pytest.raises(clients.ClientError, match="Legal name"):
         clients.update_client_details(
             cid,
-            actor="admin",
+            actor="admin", viewer=ADMIN,
             legal_name="   ",
             assigned_team=None,
             primary_contact_email=None,
@@ -265,7 +273,7 @@ def test_details_save_updates_every_field(db_path):
     cid = clients.create_client(**_valid(), db_path=db_path)
     clients.update_client_details(
         cid,
-        actor="admin",
+        actor="admin", viewer=ADMIN,
         legal_name="Meridian Fabrics Pvt Ltd",
         assigned_team="Team A",
         primary_contact_email="ap@meridian.example",
@@ -273,7 +281,7 @@ def test_details_save_updates_every_field(db_path):
         primary_contact_address="Pune, Maharashtra",
         db_path=db_path,
     )
-    row = clients.get_client(cid, db_path=db_path)
+    row = clients.get_client(cid, viewer=ADMIN, db_path=db_path)
     assert row["legal_name"] == "Meridian Fabrics Pvt Ltd"
     assert row["assigned_team"] == "Team A"
     assert row["primary_contact_address"] == "Pune, Maharashtra"
@@ -318,11 +326,11 @@ def test_gstin_blocked_while_open_recon_work_exists(db_path):
 
     with pytest.raises(clients.ClientError, match="open reconciliation work"):
         clients.update_client_field(
-            cid, "gstin", "27AABCM9999K1Z5", actor="admin", reason="wrong GSTIN", db_path=db_path
+            cid, "gstin", "27AABCM9999K1Z5", actor="admin", viewer=ADMIN, reason="wrong GSTIN", db_path=db_path
         )
     # A NON-gstin identity edit is unaffected by the gate.
-    clients.update_client_field(cid, "tan", "MUMA12345B", actor="admin", reason="adding TAN", db_path=db_path)
-    assert clients.get_client(cid, db_path=db_path)["tan"] == "MUMA12345B"
+    clients.update_client_field(cid, "tan", "MUMA12345B", actor="admin", viewer=ADMIN, reason="adding TAN", db_path=db_path)
+    assert clients.get_client(cid, viewer=ADMIN, db_path=db_path)["tan"] == "MUMA12345B"
 
 
 def test_resolved_exceptions_do_not_block(db_path):

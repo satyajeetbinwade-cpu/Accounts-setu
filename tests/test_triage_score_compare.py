@@ -69,7 +69,7 @@ def source_db(tmp_path):
     bootstrap.run_migrations(db_path=path, data_root=tmp_path / "srcdata")
     vault.init_vault(path)
     clients.create_client(legal_name="Scratch Client", pan="AAAAA0000A",
-                          actor="test", db_path=path)
+                          actor="test", owner_user_id=1, db_path=path)
     return path
 
 

@@ -17,6 +17,8 @@ import pytest
 from src import bootstrap
 from src import data_paths
 from src import db as recon_db
+from src.auth import access
+from src.auth import service as auth_service
 from src.invoice_extract import demo_seed
 from src.invoice_extract import doc_actions
 from src.invoice_extract import extract as extract_mod
@@ -42,6 +44,11 @@ def scratch(tmp_path, monkeypatch):
     monkeypatch.setattr(data_paths, "DATA_ROOT", root / "data")
     # The render cache is process-wide: a test must not read another test's page.
     review_state_mod._RENDER_CACHE.clear()
+    # Every scoped read resolves its viewer from the session; these tests act as
+    # the Admin (unrestricted), so fake the signed-in user.
+    monkeypatch.setattr(
+        auth_service, "current_user", lambda *_a, **_kw: dict(access.SYSTEM_VIEWER)
+    )
     return db_path
 
 
@@ -53,7 +60,8 @@ def new_state() -> S:
     """
     state = S(_reflex_internal_init=True)
     state.parent_state = SimpleNamespace(
-        username="test:review", viewer_title="", viewer_kind="", viewer_image_src="",
+        username="test:review", session_token="test-session-token",
+        viewer_title="", viewer_kind="", viewer_image_src="",
         viewer_page=1, viewer_page_count=0, dirty_substates=set(), dirty_vars=set(),
         _mark_dirty=lambda: None, get_name=lambda: "shim",
     )
@@ -386,7 +394,7 @@ def test_a_v2_upload_is_stored_and_queued(scratch):
     assert result["status"] == "queued"
     assert result["queued"] is True
     assert result["run_id"]
-    stored = ie.get_upload(result["upload_id"])
+    stored = ie.get_upload(result["upload_id"], viewer=access.SYSTEM_VIEWER)
     assert stored and stored["extraction_path"] == "v2"
 
 

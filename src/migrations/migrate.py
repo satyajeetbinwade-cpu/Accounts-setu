@@ -17,7 +17,6 @@ Safety:
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
@@ -75,15 +74,24 @@ def _backup(db_path: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     dest = backup_dir / f"poc_pre_clientid_{_now_stamp()}.db"
     try:
-        shutil.copy2(db_path, dest)
-        # verify the copy is a readable sqlite db with the same table count
+        # NOT a file copy. The database runs in WAL mode, so the newest
+        # committed pages can live in the -wal sidecar: copying the main file
+        # alone can produce a backup that is missing committed rows (measured:
+        # sqlite_master 28 vs 14). SQLite's own backup API takes a consistent
+        # snapshot and folds the WAL in, so the copy is restorable on its own —
+        # that is the only thing we are willing to certify as a backup.
         src = sqlite3.connect(db_path)
-        dst = sqlite3.connect(dest)
         try:
-            a = src.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0]
-            b = dst.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0]
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+                # verify the copy is a readable sqlite db with the same table count
+                a = src.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0]
+                b = dst.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0]
+            finally:
+                dst.close()
         finally:
-            src.close(); dst.close()
+            src.close()
         if a != b:
             raise RuntimeError(f"backup row-count mismatch ({a} vs {b})")
     except Exception as exc:  # noqa: BLE001

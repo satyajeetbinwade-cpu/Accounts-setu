@@ -49,6 +49,7 @@ def client_id(db_path):
         pan="AABCM1234K",
         gstin=GSTIN,
         actor="admin",
+        owner_user_id=1,
         db_path=db_path,
     )
 

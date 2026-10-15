@@ -102,11 +102,17 @@ def seed_client(
     pan: str | None = "AAAPL1234C",
     tan: str | None = None,
     gstin: str | None = None,
+    owner_user_id: int = 1,
 ) -> int:
-    """Create one F2 client and return its ``client_id`` (1 on a fresh DB)."""
+    """Create one F2 client and return its ``client_id`` (1 on a fresh DB).
+
+    ``owner_user_id`` defaults to the seeded first Admin (user_id 1), who owns
+    everything on a freshly booted database. Creating a client REQUIRES an
+    owner — that column is the data-silo key.
+    """
     from src.clients import service as clients
 
     return clients.create_client(
         legal_name=legal_name, pan=pan, tan=tan, gstin=gstin,
-        actor="test", db_path=db_path,
+        actor="test", owner_user_id=owner_user_id, db_path=db_path,
     )

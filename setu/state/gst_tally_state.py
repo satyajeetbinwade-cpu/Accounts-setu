@@ -62,15 +62,20 @@ class GstTallyState(AuthState):
     active_tab: str = "fetch_gst"
 
     def load_clients(self):
-        self.clients = client_svc.list_clients(include_inactive=False)
+        self.clients = client_svc.list_clients(
+            viewer=self._viewer(), include_inactive=False
+        )
 
     def select_client(self, client_id: int):
+        """The id arrives from the event: somebody else's client resolves to
+        ``None`` through the viewer, and nothing is selected."""
+        client = client_svc.find_client(int(client_id or 0), viewer=self._viewer())
+        if client is None:
+            return
         self.selected_client_id = client_id
-        client = client_svc.get_client(client_id)
-        if client:
-            self.selected_client_name = client["legal_name"]
-            # The EndClient model is flat: one GST registration per client.
-            self.selected_gstin = client.get("gstin") or ""
+        self.selected_client_name = client["legal_name"]
+        # The EndClient model is flat: one GST registration per client.
+        self.selected_gstin = client.get("gstin") or ""
 
         # Load credentials and connections
         self._refresh_creds_and_connections()

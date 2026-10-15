@@ -14,9 +14,11 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from src.auth import access
 from src.auth import security
 
 SESSION_LIFETIME_HOURS = 8  # F1: hardcoded DEFAULT \u2014 the LIVE value now comes from C3 (see _session_lifetime_hours below)
+SESSION_IDLE_MINUTES = 60  # inactivity window; see src.auth.service._idle_limit()
 
 
 def _session_lifetime_hours() -> float:
@@ -318,6 +320,17 @@ def get_user_by_id(conn: sqlite3.Connection, user_id: int) -> Optional[dict[str,
     return dict(zip(cols, row))
 
 
+def access_role_for_role_id(conn: sqlite3.Connection, role_id: int) -> str:
+    """Map an F1 screen role onto the data-visibility role.
+
+    Admin/Partner carry firm-wide visibility; every other role — including
+    the shared End-Client login — is a standard user.
+    """
+    row = conn.execute("SELECT name FROM roles WHERE role_id = ?", (role_id,)).fetchone()
+    name = row[0] if row else ""
+    return access.ADMIN_ROLE if name in access.ADMIN_ROLE_NAMES else access.USER_ROLE
+
+
 def create_user(
     conn: sqlite3.Connection,
     *,
@@ -328,18 +341,22 @@ def create_user(
     role_id: int,
     is_end_client: bool = False,
     end_client_id: Optional[int] = None,
+    must_change_password: bool = False,
 ) -> int:
     salt, pw_hash = security.hash_password(password)
     cur = conn.execute(
         """
         INSERT INTO users
             (username, display_name, email, password_salt, password_hash,
-             role_id, is_active, is_end_client, end_client_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+             role_id, role, is_active, is_end_client, end_client_id,
+             must_change_password, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
         """,
         (
             username, display_name, email, salt, pw_hash,
-            role_id, int(is_end_client), end_client_id, _now(),
+            role_id, access_role_for_role_id(conn, role_id),
+            int(is_end_client), end_client_id,
+            int(bool(must_change_password)), _now(),
         ),
     )
     conn.commit()
@@ -349,8 +366,23 @@ def create_user(
 def update_user_role(conn: sqlite3.Connection, user_id: int, role_id: int) -> None:
     """Forward-only: this changes the CURRENT role. Past audit entries
     that recorded the role held at the time are untouched (see F1's
-    business rule)."""
-    conn.execute("UPDATE users SET role_id = ? WHERE user_id = ?", (role_id, user_id))
+    business rule).
+
+    The access ``role`` column is re-derived here, so promoting someone to
+    Admin (or dropping them out of it) takes effect on their very next
+    request rather than only at their next sign-in.
+    """
+    conn.execute(
+        "UPDATE users SET role_id = ?, role = ? WHERE user_id = ?",
+        (role_id, access_role_for_role_id(conn, role_id), user_id),
+    )
+    conn.commit()
+
+
+def set_must_change_password(conn: sqlite3.Connection, user_id: int, required: bool) -> None:
+    conn.execute(
+        "UPDATE users SET must_change_password = ? WHERE user_id = ?", (int(bool(required)), user_id)
+    )
     conn.commit()
 
 
@@ -363,17 +395,87 @@ def set_user_active(conn: sqlite3.Connection, user_id: int, is_active: bool) -> 
     conn.commit()
 
 
-def set_user_password(conn: sqlite3.Connection, user_id: int, password: str) -> None:
+def set_user_password(
+    conn: sqlite3.Connection,
+    user_id: int,
+    password: str,
+    *,
+    must_change_password: bool = False,
+    revoke_sessions: bool = True,
+) -> None:
+    """Replace a user's password hash.
+
+    Revokes the user's existing sessions by default: a password change is
+    also how an Admin ends someone else's access, and leaving the old
+    sessions live would defeat that.
+    """
     salt, pw_hash = security.hash_password(password)
     conn.execute(
-        "UPDATE users SET password_salt = ?, password_hash = ? WHERE user_id = ?",
-        (salt, pw_hash, user_id),
+        """
+        UPDATE users
+           SET password_salt = ?, password_hash = ?, must_change_password = ?,
+               failed_login_count = 0, locked_until = NULL
+         WHERE user_id = ?
+        """,
+        (salt, pw_hash, int(bool(must_change_password)), user_id),
+    )
+    if revoke_sessions:
+        conn.execute("UPDATE sessions SET is_revoked = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+def revoke_sessions_for_user(conn: sqlite3.Connection, user_id: int) -> None:
+    conn.execute("UPDATE sessions SET is_revoked = 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Brute-force state
+# ---------------------------------------------------------------------------
+
+
+def failed_login_count(conn: sqlite3.Connection, user_id: int) -> int:
+    row = conn.execute(
+        "SELECT failed_login_count FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def register_failed_login(conn: sqlite3.Connection, user_id: int, *, lock_until: Optional[str]) -> int:
+    """Increment the user's failure counter and (optionally) lock the account
+    until ``lock_until``. Returns the new count."""
+    conn.execute(
+        """
+        UPDATE users
+           SET failed_login_count = failed_login_count + 1,
+               locked_until = COALESCE(?, locked_until)
+         WHERE user_id = ?
+        """,
+        (lock_until, user_id),
+    )
+    conn.commit()
+    return failed_login_count(conn, user_id)
+
+
+def locked_until(conn: sqlite3.Connection, user_id: int) -> Optional[str]:
+    row = conn.execute("SELECT locked_until FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def clear_login_failures(conn: sqlite3.Connection, user_id: int) -> None:
+    conn.execute(
+        "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE user_id = ?",
+        (user_id,),
     )
     conn.commit()
 
 
 def touch_last_login(conn: sqlite3.Connection, user_id: int) -> None:
-    conn.execute("UPDATE users SET last_login_at = ? WHERE user_id = ?", (_now(), user_id))
+    conn.execute(
+        "UPDATE users SET last_login_at = ?, failed_login_count = 0, locked_until = NULL "
+        "WHERE user_id = ?",
+        (_now(), user_id),
+    )
     conn.commit()
 
 

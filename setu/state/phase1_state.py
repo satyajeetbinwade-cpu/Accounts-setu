@@ -62,7 +62,9 @@ class ClientOption:
 
 def _client_name(client_id) -> str:
     """The current display name for a client_id (identity is always the id)."""
-    opt = discovery.client_option(client_id)
+    from src.auth import access
+
+    opt = discovery.client_option(client_id, viewer=access.SYSTEM_VIEWER)
     return opt["display_name"] if opt else f"#{client_id}"
 
 
@@ -203,7 +205,7 @@ class Phase1State(PeriodPickerMixin, AuthState):
     def load(self):
         self.clients = [
             ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
-            for c in discovery.list_clients()
+            for c in discovery.list_clients(viewer=self._viewer())
         ]
         self.recon_types = list(discovery.RECON_TYPES)
         # No default client/period/recon type: the pickers stay on their
@@ -236,10 +238,15 @@ class Phase1State(PeriodPickerMixin, AuthState):
 
     @rx.event
     def set_ctx_client(self, v: str):
+        """Only a client this user may see — the id comes from the event, and
+        periods/runs are looked up by it."""
         try:
-            self.ctx_client_id = int(v or 0)
+            client_id = int(v or 0)
         except (TypeError, ValueError):
-            self.ctx_client_id = 0
+            client_id = 0
+        if client_id not in {c.client_id for c in self.clients}:
+            return
+        self.ctx_client_id = client_id
         self.selected_run_id = 0
         # A different client invalidates the period and the run selection.
         self.reset_period()
@@ -281,7 +288,17 @@ class Phase1State(PeriodPickerMixin, AuthState):
 
     @rx.event
     def set_selected_run(self, run_id: str):
-        self.selected_run_id = _to_int(run_id)
+        """Only a run belonging to a client this user may see — the id arrives
+        from the event, and run ids are sequential."""
+        rid = _to_int(run_id)
+        run = queries.get_run(rid) if rid else None
+        if run is None or int(run.get("client_id") or 0) not in {
+            c.client_id for c in self.clients
+        }:
+            self.selected_run_id = 0
+            self.flash = "That run isn't in this client's context."
+            return
+        self.selected_run_id = rid
         self._load_review()
         self._load_config()
         self._reset_export()

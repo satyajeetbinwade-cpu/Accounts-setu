@@ -292,10 +292,11 @@ class ActionCenterContext:
             return "—"
         if self._client_name_cache is None:
             try:
+                from src.auth import access
                 from src.clients import service as clients
 
                 self._client_name_cache = {
-                    c["client_id"]: c["legal_name"] for c in clients.list_clients(include_inactive=True)
+                    c["client_id"]: c["legal_name"] for c in clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True)
                 }
             except Exception:  # noqa: BLE001
                 self._client_name_cache = {}

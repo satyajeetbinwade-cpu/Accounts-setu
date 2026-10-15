@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.clients import service as client_svc
 from src.gst_tally_integration import db as gtdb
 from src.gst_tally_integration.schema import init_gst_tally_schema
@@ -345,7 +346,9 @@ def push_reconciliation_to_tally(
         if not tally_config:
             raise GstTallyError("Tally connection not found.")
 
-        client_info = client_svc.get_client(client_id, db_path=db_path)
+        client_info = client_svc.get_client(
+            client_id, viewer=access.SYSTEM_VIEWER, db_path=db_path
+        )
         client_name = client_info["legal_name"] if client_info else f"Client #{client_id}"
 
         op_id = gtdb.create_sync_op(

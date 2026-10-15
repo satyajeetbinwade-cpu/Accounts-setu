@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS documents (
     is_deleted             INTEGER NOT NULL DEFAULT 0,        -- soft-delete only, always recoverable
     deleted_at             TEXT,
     deleted_by             TEXT,
+    -- Owner of the client this document belongs to; mirrors
+    -- end_clients.owner_user_id so every document query can be scoped without
+    -- a join. Set on upload from the client's owner, never from the request.
+    owner_user_id          INTEGER,
     created_at             TEXT    NOT NULL,
     created_by             TEXT    NOT NULL
 );
@@ -138,6 +142,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
     pattern src/db.py and src/ingestion_ai/schema.py use).
     """
     _add_column(conn, "documents", "notes", "TEXT")
+    _add_column(conn, "documents", "owner_user_id", "INTEGER")
+
+    # Backfill from the owning client, then index. The index comes after the
+    # ALTER because `CREATE INDEX IF NOT EXISTS` on a legacy table would fail
+    # on the missing column.
+    #
+    # Guarded on the parent table existing: a database holding documents
+    # without the client master (a module-scoped fixture, or an unusual init
+    # order) has no owner to copy. Owners stay NULL, which reads as admin-only.
+    has_clients = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'end_clients'"
+    ).fetchone()
+    if has_clients:
+        conn.execute(
+            """
+            UPDATE documents
+               SET owner_user_id = (
+                     SELECT c.owner_user_id FROM end_clients c
+                      WHERE c.client_id = documents.client_id
+                   )
+             WHERE owner_user_id IS NULL
+            """
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents(owner_user_id)"
+    )
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:

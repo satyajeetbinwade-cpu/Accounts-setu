@@ -22,6 +22,7 @@ import sqlite3
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.auth import service as auth
 from src.clients import db as cdb
 from src.clients.schema import init_clients_schema
@@ -29,6 +30,57 @@ from src.clients.schema import init_clients_schema
 
 class ClientError(Exception):
     """Raised for expected client-module failures (validation, blocked action)."""
+
+
+class ClientAccessDenied(ClientError):
+    """The record exists but does not belong to this viewer.
+
+    A subclass of ClientError so every existing UI handler already reports it
+    neutrally, while a caller that cares can answer 403/404 explicitly. The
+    message never distinguishes "someone else's" from "does not exist".
+    """
+
+
+# Child tables addressed by their own primary key. A lookup by child id (a
+# contact, a COA row, a snapshot row) is checked against the row's owner, so a
+# standard user cannot reach another user's detail row by guessing its id.
+_CHILD_SCOPES: tuple[tuple[str, str], ...] = (
+    ("contact_directory", "contact_id"),
+    ("chart_of_accounts", "coa_id"),
+    ("historical_snapshots", "snapshot_id"),
+)
+
+
+def _child_scope_for(table: str) -> str:
+    for name, id_col in _CHILD_SCOPES:
+        if name == table:
+            return id_col
+    raise ValueError(f"Unknown client child table: {table}")
+
+
+def _require_client_access(conn: sqlite3.Connection, client_id: int, viewer) -> dict[str, Any]:
+    """Fetch a client row for this viewer or refuse it.
+
+    The single gate every client-scoped read and write goes through.
+    """
+    row = cdb.get_client(conn, client_id)
+    if row is None or not access.can_access_client_row(viewer, row):
+        raise ClientAccessDenied("No such client.")
+    return row
+
+
+def _require_child_access(conn: sqlite3.Connection, table: str, row_id: int, viewer) -> None:
+    """Refuse a child row (contact / COA / snapshot) that isn't the viewer's."""
+    id_col = _child_scope_for(table)
+    owner = conn.execute(
+        f"SELECT owner_user_id FROM {table} WHERE {id_col} = ?", (row_id,)
+    ).fetchone()
+    if owner is None:
+        raise ClientAccessDenied("No such record.")
+    if access.is_admin(viewer):
+        return
+    if owner[0] is None or int(owner[0]) != access.viewer_user_id(viewer):
+        raise ClientAccessDenied("No such record.")
 
 
 def init_clients(db_path=None) -> None:
@@ -50,23 +102,75 @@ def _connect(db_path=None) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 
-def list_clients(*, include_inactive: bool = True, db_path=None) -> list[dict[str, Any]]:
-    """Every EndClient row, straight from the flat table.
+def list_clients(
+    *,
+    viewer,
+    include_inactive: bool = True,
+    filter_owner_id: Optional[int] = None,
+    db_path=None,
+) -> list[dict[str, Any]]:
+    """The EndClient rows this viewer may see.
+
+    A standard user is filtered server-side to the clients they own — the UI
+    cannot widen this by asking differently. An admin sees everything, and may
+    narrow the roster to a single owner (the "created by" filter).
 
     There is no branch dimension to join any more \u2014 `gstin` is a column on
     the client itself.
     """
+    scope_owner = access.owner_filter(viewer)
+    if scope_owner is None and filter_owner_id:
+        scope_owner = int(filter_owner_id)
     conn = _connect(db_path)
     try:
-        return cdb.list_clients(conn, include_inactive=include_inactive)
+        return cdb.list_clients(
+            conn, include_inactive=include_inactive, owner_user_id=scope_owner
+        )
     finally:
         conn.close()
 
 
-def get_client(client_id: int, *, db_path=None) -> Optional[dict[str, Any]]:
+def list_client_owners(*, db_path=None) -> list[dict[str, Any]]:
+    """``[{user_id, username, display_name}]`` for the users who own clients —
+    the Admin roster's "filter by user" options."""
     conn = _connect(db_path)
     try:
-        return cdb.get_client(conn, client_id)
+        rows = conn.execute(
+            """
+            SELECT DISTINCT u.user_id, u.username, u.display_name
+              FROM users u
+              JOIN end_clients c ON c.owner_user_id = u.user_id
+             ORDER BY u.username
+            """
+        ).fetchall()
+        return [{"user_id": r[0], "username": r[1], "display_name": r[2]} for r in rows]
+    finally:
+        conn.close()
+
+
+def get_client(client_id: int, *, viewer, db_path=None) -> dict[str, Any]:
+    """The client, or raise :class:`ClientAccessDenied`.
+
+    Strict lookup for an id that arrived from the user (a URL parameter): an id
+    belonging to another user is refused exactly like one that does not exist.
+    """
+    conn = _connect(db_path)
+    try:
+        return _require_client_access(conn, client_id, viewer)
+    finally:
+        conn.close()
+
+
+def find_client(client_id: int, *, viewer, db_path=None) -> Optional[dict[str, Any]]:
+    """``get_client`` without the exception: ``None`` when missing or refused.
+
+    For render paths, where "not yours" and "not found" both mean "show the
+    roster" and an exception would only be caught to produce that anyway.
+    """
+    conn = _connect(db_path)
+    try:
+        row = cdb.get_client(conn, client_id)
+        return row if access.can_access_client_row(viewer, row) else None
     finally:
         conn.close()
 
@@ -152,11 +256,17 @@ def create_client(
     *, legal_name: str, pan: Optional[str] = None, tan: Optional[str] = None,
     gstin: Optional[str] = None, assigned_team: Optional[str] = None,
     primary_contact_email: Optional[str] = None, primary_contact_phone: Optional[str] = None,
-    primary_contact_address: Optional[str] = None, actor: str, db_path=None,
+    primary_contact_address: Optional[str] = None, actor: str, owner_user_id: int, db_path=None,
 ) -> int:
-    """Create a client. Each GST registration is its OWN client record \u2014
-    there is no branch to attach, and no re-onboarding flow for a sibling
-    registration (it is simply another client)."""
+    """Create a client, owned by ``owner_user_id``.
+
+    Both ``actor`` and ``owner_user_id`` come from the SIGNED-IN SESSION (the
+    state layer resolves them from the session cookie), never from the request
+    body — so a standard user cannot create a client on someone else's behalf,
+    and an admin creating one records themselves as the owner. Each GST
+    registration is its OWN client record \u2014 there is no branch to attach,
+    and no re-onboarding flow for a sibling registration (it is simply another
+    client)."""
     record = {
         "legal_name": legal_name,
         "pan": pan,
@@ -182,6 +292,7 @@ def create_client(
                 primary_contact_phone=_clean(primary_contact_phone),
                 primary_contact_address=_clean(primary_contact_address),
                 created_by=actor,
+                owner_user_id=owner_user_id,
             )
         except sqlite3.IntegrityError as exc:
             # The partial UNIQUE index (one GSTIN = one active registration)
@@ -199,7 +310,8 @@ def create_client(
 
 
 def update_client_field(
-    client_id: int, field: str, value: Any, *, actor: str, reason: Optional[str] = None, db_path=None,
+    client_id: int, field: str, value: Any, *, actor: str, viewer, reason: Optional[str] = None,
+    db_path=None,
 ) -> None:
     """Save ONE field on the client record.
 
@@ -209,15 +321,15 @@ def update_client_field(
       reason \u2014 enforced here, not just in the UI.
     - gstin additionally cannot be cleared or changed while open
       reconciliation work references the client.
+
+    A client that isn't the viewer's is refused before any of the above runs.
     """
     if field not in cdb.EDITABLE_CLIENT_FIELDS:
         raise ClientError(f"'{field}' is not an editable client field.")
     new_value = _clean(value)
     conn = _connect(db_path)
     try:
-        before = cdb.get_client(conn, client_id)
-        if before is None:
-            raise ClientError(f"No such client_id {client_id}.")
+        before = _require_client_access(conn, client_id, viewer)
         old_value = before.get(field)
 
         _validate_single_field_save(field, new_value)
@@ -246,7 +358,7 @@ def update_client_field(
 
 
 def update_client_details(
-    client_id: int, *, actor: str, db_path=None, **fields: Any,
+    client_id: int, *, actor: str, viewer, db_path=None, **fields: Any,
 ) -> None:
     """Save the Details form's unrestricted fields in ONE action.
 
@@ -260,9 +372,7 @@ def update_client_details(
     proposed: dict[str, Any] = {}
     conn = _connect(db_path)
     try:
-        before = cdb.get_client(conn, client_id)
-        if before is None:
-            raise ClientError(f"No such client_id {client_id}.")
+        before = _require_client_access(conn, client_id, viewer)
         proposed = dict(before)
         for name in DETAIL_FIELDS:
             if name in fields:
@@ -275,11 +385,12 @@ def update_client_details(
         conn.close()
 
 
-def set_client_active(client_id: int, is_active: bool, *, actor: str, db_path=None) -> None:
+def set_client_active(client_id: int, is_active: bool, *, actor: str, viewer, db_path=None) -> None:
     """Soft-delete only \u2014 deactivating preserves full history. There is
     no hard-delete path for an EndClient in this build."""
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         cdb.set_client_active(conn, client_id, is_active)
     finally:
         conn.close()
@@ -342,9 +453,10 @@ def can_change_gstin(client_id: int, *, db_path=None) -> tuple[bool, Optional[st
 # ---------------------------------------------------------------------------
 
 
-def list_contacts(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def list_contacts(client_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.list_contacts(conn, client_id)
     finally:
         conn.close()
@@ -352,12 +464,13 @@ def list_contacts(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
 
 def add_contact(
     client_id: int, *, name: str, role_title: Optional[str], email: Optional[str],
-    phone: Optional[str], notes: Optional[str], actor: str, db_path=None,
+    phone: Optional[str], notes: Optional[str], actor: str, viewer, db_path=None,
 ) -> int:
     if not name:
         raise ClientError("Contact name is required.")
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.create_contact(
             conn, client_id=client_id, name=name, role_title=role_title,
             email=email, phone=phone, notes=notes,
@@ -366,17 +479,19 @@ def add_contact(
         conn.close()
 
 
-def remove_contact(contact_id: int, *, actor: str, db_path=None) -> None:
+def remove_contact(contact_id: int, *, actor: str, viewer, db_path=None) -> None:
     conn = _connect(db_path)
     try:
+        _require_child_access(conn, "contact_directory", contact_id, viewer)
         cdb.delete_contact(conn, contact_id)
     finally:
         conn.close()
 
 
-def update_contact_field(contact_id: int, field: str, value: Any, *, actor: str, db_path=None) -> None:
+def update_contact_field(contact_id: int, field: str, value: Any, *, actor: str, viewer, db_path=None) -> None:
     conn = _connect(db_path)
     try:
+        _require_child_access(conn, "contact_directory", contact_id, viewer)
         cdb.update_contact_field(conn, contact_id, field, value)
     finally:
         conn.close()
@@ -410,38 +525,42 @@ def _parse_bulk_text(text: str) -> list[tuple[str, str, str]]:
     return rows
 
 
-def list_coa(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def list_coa(client_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.list_coa(conn, client_id)
     finally:
         conn.close()
 
 
-def bulk_import_coa(client_id: int, raw_text: str, *, actor: str, db_path=None) -> int:
+def bulk_import_coa(client_id: int, raw_text: str, *, actor: str, viewer, db_path=None) -> int:
     rows = _parse_bulk_text(raw_text)
     if not rows:
         raise ClientError("No valid rows found. Expected 'code, name, type' per line (tab or comma separated).")
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.bulk_insert_coa(conn, client_id, rows)
     finally:
         conn.close()
 
 
-def add_coa_row(client_id: int, code: str, name: str, account_type: str, *, actor: str, db_path=None) -> int:
+def add_coa_row(client_id: int, code: str, name: str, account_type: str, *, actor: str, viewer, db_path=None) -> int:
     if not code or not name:
         raise ClientError("Code and name are required.")
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.add_coa_row(conn, client_id, code, name, account_type)
     finally:
         conn.close()
 
 
-def delete_coa_row(coa_id: int, *, actor: str, db_path=None) -> None:
+def delete_coa_row(coa_id: int, *, actor: str, viewer, db_path=None) -> None:
     conn = _connect(db_path)
     try:
+        _require_child_access(conn, "chart_of_accounts", coa_id, viewer)
         cdb.delete_coa_row(conn, coa_id)
     finally:
         conn.close()
@@ -484,23 +603,25 @@ def _parse_snapshot_text(text: str) -> list[tuple[str, str, str]]:
     return rows
 
 
-def list_snapshot_years(client_id: int, *, db_path=None) -> list[str]:
+def list_snapshot_years(client_id: int, *, viewer, db_path=None) -> list[str]:
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.list_snapshot_years(conn, client_id)
     finally:
         conn.close()
 
 
-def list_snapshots(client_id: int, fiscal_year: Optional[str] = None, *, db_path=None) -> list[dict[str, Any]]:
+def list_snapshots(client_id: int, fiscal_year: Optional[str] = None, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.list_snapshots(conn, client_id, fiscal_year)
     finally:
         conn.close()
 
 
-def bulk_import_snapshot(client_id: int, fiscal_year: str, raw_text: str, *, actor: str, db_path=None) -> int:
+def bulk_import_snapshot(client_id: int, fiscal_year: str, raw_text: str, *, actor: str, viewer, db_path=None) -> int:
     if not fiscal_year:
         raise ClientError("Fiscal year is required.")
     rows = _parse_snapshot_text(raw_text)
@@ -508,26 +629,30 @@ def bulk_import_snapshot(client_id: int, fiscal_year: str, raw_text: str, *, act
         raise ClientError("No valid rows found. Expected 'line item, amount, notes' per line (tab or comma separated).")
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.bulk_insert_snapshot(conn, client_id, fiscal_year, rows)
     finally:
         conn.close()
 
 
 def add_snapshot_row(
-    client_id: int, fiscal_year: str, line_item: str, amount: str, notes: str, *, actor: str, db_path=None,
+    client_id: int, fiscal_year: str, line_item: str, amount: str, notes: str, *, actor: str,
+    viewer, db_path=None,
 ) -> int:
     if not fiscal_year or not line_item:
         raise ClientError("Fiscal year and line item are required.")
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.add_snapshot_row(conn, client_id, fiscal_year, line_item, amount, notes)
     finally:
         conn.close()
 
 
-def delete_snapshot_row(snapshot_id: int, *, actor: str, db_path=None) -> None:
+def delete_snapshot_row(snapshot_id: int, *, actor: str, viewer, db_path=None) -> None:
     conn = _connect(db_path)
     try:
+        _require_child_access(conn, "historical_snapshots", snapshot_id, viewer)
         cdb.delete_snapshot_row(conn, snapshot_id)
     finally:
         conn.close()
@@ -538,9 +663,10 @@ def delete_snapshot_row(snapshot_id: int, *, actor: str, db_path=None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def list_edit_log(client_id: int, *, db_path=None) -> list[dict[str, Any]]:
+def list_edit_log(client_id: int, *, viewer, db_path=None) -> list[dict[str, Any]]:
     conn = _connect(db_path)
     try:
+        _require_client_access(conn, client_id, viewer)
         return cdb.list_edit_log(conn, client_id, db_path=db_path)
     finally:
         conn.close()
@@ -562,7 +688,10 @@ def provision_end_client_login(
     "wire F1's shared End-Client login provisioning to actually read this
     module's contact records and GSTIN data at client-creation time."
     """
-    client = get_client(client_id, db_path=db_path)
+    # Trusted provisioning path (no request involved): the caller has already
+    # decided this client may be provisioned, so the read is unscoped by an
+    # explicit SYSTEM_VIEWER rather than by omitting the argument.
+    client = find_client(client_id, viewer=access.SYSTEM_VIEWER, db_path=db_path)
     if client is None:
         raise ClientError(f"No such client_id {client_id}.")
 

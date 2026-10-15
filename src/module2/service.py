@@ -52,6 +52,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from src import db as recon_db
+from src.auth import access
 from src.module2 import db as mdb
 from src.module2.schema import init_module2_schema
 
@@ -1018,6 +1019,7 @@ def link_evidence_to_exception(
     from src.documents import service as documents
 
     return documents.link_evidence(
+        viewer=access.SYSTEM_VIEWER,
         document_id=document_id, target_type="reconciliation_exception",
         target_id=exception_id, target_label=f"Reconciliation Exception #{exception_id}",
         actor=actor, db_path=db_path,

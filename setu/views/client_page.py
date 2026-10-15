@@ -58,6 +58,13 @@ def _roster_header() -> rx.Component:
         rx.text("PAN / TAN", style=t.TEXT["label"], flex="2"),
         rx.text("GSTIN", style=t.TEXT["label"], flex="2"),
         rx.text("Assigned team", style=t.TEXT["label"], flex="2"),
+        # Admin-only: who created the client. Hidden for a standard user, who
+        # only ever sees their own clients.
+        rx.cond(
+            ClientState.show_owner_column,
+            rx.text("Created by", style=t.TEXT["label"], flex="2"),
+            rx.fragment(),
+        ),
         rx.text("Status", style=t.TEXT["label"], flex="1"),
         width="100%",
         padding="0 4px 6px 4px",
@@ -100,6 +107,11 @@ def _roster_row(row) -> rx.Component:
             flex="2",
         ),
         rx.text(row.assigned_team, style=t.TEXT["body"], flex="2"),
+        rx.cond(
+            ClientState.show_owner_column,
+            rx.text(row.owner_username, style=t.TEXT["body"], flex="2"),
+            rx.fragment(),
+        ),
         rx.box(
             rx.cond(
                 row.is_active,
@@ -146,7 +158,22 @@ def _roster() -> rx.Component:
                 color_scheme="indigo",
             ),
             rx.text("Show deactivated clients", style=t.TEXT["label"]),
-            spacing="2",
+            rx.cond(
+                ClientState.show_owner_column,
+                rx.hstack(
+                    rx.text("Created by", style=t.TEXT["label"]),
+                    rx.select(
+                        ClientState.owner_options,
+                        value=ClientState.owner_filter,
+                        on_change=ClientState.set_owner_filter,
+                        width="180px",
+                    ),
+                    spacing="2",
+                    align="center",
+                ),
+                rx.fragment(),
+            ),
+            spacing="4",
             align="center",
         ),
         rx.cond(

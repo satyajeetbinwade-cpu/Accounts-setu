@@ -134,11 +134,11 @@ class F5State(AuthState):
             return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self.client_label_map = {
             str(c["client_id"]): c["legal_name"]
-            for c in clients.list_clients(include_inactive=True)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=True)
         }
         # No default client for either picker: both stay on their placeholder.
         self._load_all()

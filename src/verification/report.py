@@ -193,7 +193,7 @@ def _write_summary_sheet(
 
     meta = [
         ("Run ID", run["run_id"]),
-        ("Client", run["client"]),
+        ("Client", run.get("client_name_at_run") or f"#{run.get('client_id')}"),
         ("Period", run["period"]),
         ("Recon Type", run["recon_type"]),
         ("Run Timestamp", run["run_timestamp"]),

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -39,14 +40,49 @@ DEMO_CLIENTS: tuple[tuple[str, str, str, str], ...] = (
 SEED_ROOT = Path(os.environ.get("SETU_SEED_DATA", "/app/seed_data"))
 
 
+def _owner_user_id() -> int:
+    """The account the demo clients belong to: the seeded first Admin.
+
+    ``end_clients.owner_user_id`` is the data-silo key, so a client must have an
+    owner — an ownerless row is admin-only and would be invisible to the very
+    person who ran the first boot. The Dockerfile runs this AFTER ``main.py``,
+    so the F1 auth seed has already created that account.
+
+    Returns 0 (unowned) when there is no account to ask — a database whose auth
+    tables have not been created yet must still be seedable.
+    """
+    from src import db as recon_db
+
+    conn = recon_db.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE role = 'admin' AND is_active = 1 "
+            "ORDER BY user_id LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        print(f"[demo_seed] no auth table to read an owner from ({exc})")
+        return 0
+    finally:
+        conn.close()
+    if row is None:
+        print(
+            "[demo_seed] no Admin account exists yet; the demo clients will be "
+            "created unowned (visible to an Admin only)"
+        )
+        return 0
+    return int(row[0])
+
+
 def main() -> int:
     if not SEED_ROOT.exists():
         print(f"[demo_seed] no seed data at {SEED_ROOT}; nothing to do")
         return 0
 
+    from src.auth import access
+
     by_name = {
         c["legal_name"]: int(c["client_id"])
-        for c in clients.list_clients(include_inactive=True)
+        for c in clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True)
     }
 
     # A volume that already has clients is NOT a fresh deployment, so this is
@@ -76,7 +112,7 @@ def main() -> int:
         else:
             cid = int(clients.create_client(
                 legal_name=legal_name, pan=pan, gstin=gstin, assigned_team=team,
-                actor="seed",
+                actor="seed", owner_user_id=_owner_user_id(),
             ))
             by_name[legal_name] = cid
 

@@ -255,9 +255,18 @@ def _ensure_demo_client(conn, *, actor: str, db_path: str) -> int:
         return int(row[0])
     from src.clients.service import create_client
 
+    # A client must have an owner (`end_clients.owner_user_id` is the data-silo
+    # key; an ownerless row is visible to an Admin only). The demo client
+    # belongs to the seeded first Admin, which is the account that runs the
+    # demo — falling back to an unowned row keeps the seed working on a
+    # database whose auth tables have not been seeded yet.
+    owner = conn.execute(
+        "SELECT user_id FROM users WHERE role = 'admin' AND is_active = 1 "
+        "ORDER BY user_id LIMIT 1"
+    ).fetchone()
     return create_client(
         legal_name=DEMO_CLIENT_NAME, pan=DEMO_CLIENT_PAN, gstin=DEMO_CLIENT_GSTIN,
-        actor=actor, db_path=db_path,
+        actor=actor, owner_user_id=int(owner[0]) if owner else 0, db_path=db_path,
     )
 
 

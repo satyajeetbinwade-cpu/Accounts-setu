@@ -27,6 +27,7 @@ import pytest
 
 from src import data_paths as dp
 from src import db as core_db
+from src.auth import access
 from src.clients import service as clients
 from src import demo_seed
 
@@ -56,7 +57,7 @@ def sandbox(tmp_path, monkeypatch):
 
 
 def _clients() -> list[dict]:
-    return clients.list_clients(include_inactive=True)
+    return clients.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True)
 
 
 def test_it_seeds_a_genuinely_fresh_volume(sandbox):
@@ -76,7 +77,7 @@ def test_it_seeds_a_genuinely_fresh_volume(sandbox):
 def test_it_does_nothing_once_any_client_exists(sandbox):
     """THE deploy guard. A volume with clients on it is not a fresh deployment,
     whatever the names are."""
-    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test")
+    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test", owner_user_id=1)
 
     assert demo_seed.main() == 0
 
@@ -88,7 +89,7 @@ def test_it_refuses_even_when_the_demo_client_exists_under_another_name(sandbox)
     """The exact live shape: the roster holds `Test`, the bundled folder is
     `Test Client`, and that row has NO GSTIN for the unique index to catch.
     Without the guard this created a second client."""
-    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test")
+    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test", owner_user_id=1)
     before = {c["client_id"] for c in _clients()}
 
     demo_seed.main()
@@ -101,7 +102,7 @@ def test_it_refuses_even_when_the_demo_client_exists_under_another_name(sandbox)
 
 
 def test_it_says_why_it_skipped(sandbox, capsys):
-    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test")
+    clients.create_client(legal_name="Test", pan="AAAPL1234C", actor="test", owner_user_id=1)
 
     demo_seed.main()
 

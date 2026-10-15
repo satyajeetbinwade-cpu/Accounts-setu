@@ -55,6 +55,13 @@ def require_real_db_allowed(db_path=None, *, allow_real_db: bool = False) -> Non
 #: real db/poc.db. The DEFAULT is unchanged: with the variable unset.
 DB_PATH = Path(os.environ.get("SETU_DB_PATH") or REPO_DB_PATH)
 
+# Set to "delete" to opt out of WAL (e.g. on a filesystem without shared memory).
+JOURNAL_MODE_ENV = "SETU_SQLITE_JOURNAL"
+DEFAULT_JOURNAL_MODE = "WAL"
+# Only modes SQLite defines as valid for a database file; anything else in the
+# env var is ignored rather than interpolated into the pragma.
+JOURNAL_MODES = frozenset({"wal", "delete", "truncate", "persist", "memory", "off"})
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     run_id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,12 +244,37 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _configure_concurrency(conn: sqlite3.Connection) -> None:
+    """Put the file in WAL journal mode. Readers then never wait on the single
+    writer, and a reader can no longer make a writer fail once its busy timeout
+    runs out — which is the behaviour we want now that several users can be
+    signed in at once.
+
+    WAL is recorded in the database header, so this is a one-off per file, and
+    the pragma is a no-op read once it is set. Falls back silently to the
+    default rollback journal where WAL is unavailable (read-only filesystem,
+    no shared memory, network mounts)."""
+    requested = os.environ.get(JOURNAL_MODE_ENV, DEFAULT_JOURNAL_MODE).strip().lower()
+    if requested not in JOURNAL_MODES:
+        return
+    try:
+        current = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        if str(current).lower() == requested:
+            return
+        conn.execute(f"PRAGMA journal_mode = {requested}").fetchone()
+    except sqlite3.Error:
+        # Another process may hold the write lock while we switch, or the
+        # filesystem may not support WAL. Either way the default mode is safe.
+        pass
+
+
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Return a connection, creating the db file and tables if missing."""
     path = Path(db_path) if db_path else DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
+    _configure_concurrency(conn)
     conn.executescript(SCHEMA)
     _migrate(conn)
     conn.commit()

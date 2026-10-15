@@ -128,7 +128,7 @@ class C5State(AuthState):
         ]
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         self._load_all()
 

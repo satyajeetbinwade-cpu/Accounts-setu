@@ -309,17 +309,23 @@ PY
 echo "== admin user =="
 "${PY}" - <<'PY'
 from src import db as recon_db
-from src.auth import seed as auth_seed
 
 conn = recon_db.get_connection()
 try:
-    row = conn.execute("SELECT username FROM users ORDER BY user_id LIMIT 1").fetchone()
+    row = conn.execute(
+        "SELECT username, must_change_password FROM users ORDER BY user_id LIMIT 1"
+    ).fetchone()
 finally:
     conn.close()
 if row is None:
     raise SystemExit("no admin user was seeded — the boot path did not run the auth seed")
-print(f"login: {row[0]} / {auth_seed.DEFAULT_ADMIN_PASSWORD}")
-print("(change this password after the first sign-in — the login page no longer advertises it)")
+print(f"login: {row[0]}")
+# No default password exists to print: the seed takes it from
+# SETU_ADMIN_PASSWORD, or generates one and prints it ONCE to this console.
+print("password: the value of SETU_ADMIN_PASSWORD for this run, or the one-time")
+print("          generated password printed above by the boot/seed step.")
+if row[1]:
+    print("          (flagged must_change_password — you will be asked to replace it)")
 PY
 
 # --------------------------------------------------------------------- app

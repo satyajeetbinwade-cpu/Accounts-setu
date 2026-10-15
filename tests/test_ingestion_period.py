@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from src import db as recon_db
+from src.auth import access
 from src.documents import db as ddb
 from src.documents import service as documents
 from src.ingestion_ai import db as idb
@@ -199,7 +200,8 @@ def test_set_upload_period_moves_rekeys_and_audits(scratch):
     assert (old_dir / "082026_export.xlsx").exists(), "the file starts unfiled on disk"
 
     out = ingestion_ai.set_upload_period(
-        upload_id, PERIOD, actor="tester", db_path=db_path,
+        upload_id, PERIOD, actor="tester",
+        viewer=access.SYSTEM_VIEWER, db_path=db_path,
     )
     assert out["period"] == PERIOD
     assert out["moved"] is True
@@ -236,11 +238,13 @@ def test_set_upload_period_rejects_an_invalid_period(scratch):
     upload_id = _seed_upload(scratch, period=None)
     with pytest.raises(ingestion_ai.IngestionAIError):
         ingestion_ai.set_upload_period(
-            upload_id, "-", actor="tester", db_path=scratch["db_path"],
+            upload_id, "-", actor="tester",
+            viewer=access.SYSTEM_VIEWER, db_path=scratch["db_path"],
         )
     with pytest.raises(ingestion_ai.IngestionAIError):
         ingestion_ai.set_upload_period(
-            upload_id, "Aug 2026", actor="tester", db_path=scratch["db_path"],
+            upload_id, "Aug 2026", actor="tester",
+            viewer=access.SYSTEM_VIEWER, db_path=scratch["db_path"],
         )
 
 

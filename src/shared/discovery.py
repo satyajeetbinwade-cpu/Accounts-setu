@@ -137,18 +137,25 @@ def _display_name(row: dict, all_rows: list[dict]) -> str:
     return f"{name} · #{row.get('client_id')}"
 
 
-def list_clients(include_inactive: bool = False, *, db_path=None) -> list[dict]:
-    """F2 clients as option rows, alphabetical by display name.
+def list_clients(*, viewer, include_inactive: bool = False, db_path=None) -> list[dict]:
+    """F2 clients the VIEWER may work on, as option rows, alphabetical.
 
     Each row: ``{client_id, legal_name, display_name, is_active, pan, gstin}``.
     Options come from the F2 client table (the single source of truth) — NOT
     from data/ folders. ``include_inactive=True`` (history / "existing data"
     screens) keeps deactivated clients and marks their display name
     "(inactive)"; context pickers use the default (active only).
+
+    ``viewer`` is REQUIRED and is applied in ``src.clients.service``, so no
+    page, export or count can be handed a client the user may not see. A
+    client with no owning row is admin-only, so a folder created before
+    ownership existed can never leak.
     """
     from src.clients import service as clients_service
 
-    rows = clients_service.list_clients(include_inactive=include_inactive, db_path=db_path)
+    rows = clients_service.list_clients(
+        viewer=viewer, include_inactive=include_inactive, db_path=db_path
+    )
     out = []
     for r in rows:
         display = _display_name(r, rows)
@@ -168,11 +175,12 @@ def list_clients(include_inactive: bool = False, *, db_path=None) -> list[dict]:
     return out
 
 
-def client_option(client_id) -> Optional[dict]:
-    """A single client option row by id, or None."""
+def client_option(client_id, *, viewer, db_path=None) -> Optional[dict]:
+    """A single client option row by id, or None (also None when the id is
+    not one this viewer owns)."""
     if not client_id:
         return None
-    for c in list_clients(include_inactive=True):
+    for c in list_clients(viewer=viewer, include_inactive=True, db_path=db_path):
         if c["client_id"] == int(client_id):
             return c
     return None

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import os
+
 import reflex as rx
 
 from src.auth import service as auth
@@ -20,6 +22,21 @@ from setu.routes import AREAS, Screen
 # user signed in (Reflex reconnects the client by cookie rather than replaying
 # server-side session state).
 SESSION_COOKIE = "setu_session"
+
+
+def _cookie_secure() -> bool:
+    """Send the session cookie over HTTPS only.
+
+    On by default, and explicitly off-able for a plain-http local dev server —
+    a Secure cookie is simply dropped by the browser over http, which would
+    look like "sign-in does nothing" rather than like a security setting.
+    """
+    return (os.environ.get("SETU_COOKIE_SECURE") or "").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
 
 
 @dataclass
@@ -43,7 +60,16 @@ class AuthState(rx.State):
     """Authentication, session lifecycle and permission projection."""
 
     # --- session ---------------------------------------------------------
-    session_token: str = rx.Cookie(name=SESSION_COOKIE, max_age=60 * 60 * 8)
+    # same_site="lax" so the token is not attached to cross-site requests;
+    # Secure by default (set SETU_COOKIE_SECURE=0 for a plain-http dev server).
+    # The token itself is a 256-bit random value held server-side in the
+    # sessions table, where it can be revoked — the cookie is only a pointer.
+    session_token: str = rx.Cookie(
+        name=SESSION_COOKIE,
+        max_age=60 * 60 * 8,
+        same_site="lax",
+        secure=_cookie_secure(),
+    )
 
     # --- current user (projected from the DB on load / after login) ------
     user_id: int = 0
@@ -60,10 +86,26 @@ class AuthState(rx.State):
     failed_attempts: int = 0
     signed_out_inactivity: bool = False
 
+    # --- forced password change (seeded / Admin-reset credentials) --------
+    must_change_password: bool = False
+    # Only the OUTCOME is held in state — never a password. The submitted
+    # values arrive in the form payload, are used, and are dropped.
+    cp_error: str = ""
+    cp_done: bool = False
+
     # --- derived ---------------------------------------------------------
     @rx.var
     def is_authenticated(self) -> bool:
         return self.user_id != 0
+
+    @rx.var
+    def is_firm_admin(self) -> bool:
+        """Access role 'admin' — firm-wide data visibility (Admin/Partner).
+
+        Distinct from ``is_admin`` below, which gates the Admin *console*."""
+        return auth.is_admin_user(
+            {"user_id": self.user_id, "role_name": self.role_name}
+        )
 
     @rx.var
     def is_admin(self) -> bool:
@@ -99,6 +141,7 @@ class AuthState(rx.State):
             self.role_name = ""
             self.is_end_client = False
             self.last_login_at = ""
+            self.must_change_password = False
             return
         self.user_id = user["user_id"]
         self.username = user["username"]
@@ -106,12 +149,25 @@ class AuthState(rx.State):
         self.role_name = user["role_name"]
         self.is_end_client = bool(user.get("is_end_client"))
         self.last_login_at = user.get("last_login_at") or ""
+        self.must_change_password = bool(user.get("must_change_password"))
 
     def _permission_codes(self) -> set[str]:
         user = auth.current_user(self.session_token or None)
         if user is None:
             return set()
         return auth.effective_permissions(user)
+
+    def _viewer(self) -> dict | None:
+        """The signed-in user, for access-scoped reads.
+
+        Every page state subclasses ``AuthState``, so this one method is what
+        lets a client-scoped query be filtered by owner everywhere without
+        each state re-resolving the session.
+
+        ``None`` is NOT "no restrictions": ``src.auth.access`` treats a missing
+        viewer as the least privileged role, so a scoped read fails closed.
+        """
+        return auth.current_user(self.session_token or None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,6 +205,22 @@ class AuthState(rx.State):
             if not self.session_token:
                 self.signed_out_inactivity = False
             return rx.redirect("/login")
+
+        # A password somebody else issued (seeded, or Admin-reset) must be
+        # replaced before the account can be used at all — enforced on every
+        # protected route, not just on the sign-in screen.
+        if self.must_change_password and not self._on_password_change_route():
+            return rx.redirect("/change-password")
+
+    def _current_route(self) -> str:
+        """The route path being loaded ("" when it can't be read)."""
+        try:
+            return str(self.router.page.path or "")
+        except Exception:  # noqa: BLE001 — a missing router must not break the gate
+            return ""
+
+    def _on_password_change_route(self) -> bool:
+        return self._current_route().rstrip("/").lower() == "/change-password"
 
     def _gate(self, permission: str | None = None) -> str | None:
         """The route to redirect to when access must be refused, else ``None``.
@@ -232,6 +304,44 @@ class AuthState(rx.State):
         self.signed_out_inactivity = False
         self.login_password = ""
         self._project_user()
+        # A credential issued by somebody else can sign in but not enter the
+        # app: it goes straight to the change-password screen.
+        if self.must_change_password:
+            return rx.redirect("/change-password")
+        return rx.redirect("/")
+
+    # ------------------------------------------------------------------
+    # Forced password change
+    # ------------------------------------------------------------------
+    @rx.event
+    def submit_password_change(self, form_data: dict):
+        """Replace the current password. The service re-checks the old
+        password and the strength policy server-side; this handler reports the
+        outcome and keeps no password in state."""
+        current = str(form_data.get("current_password", ""))
+        new = str(form_data.get("new_password", ""))
+        confirm = str(form_data.get("confirm_password", ""))
+
+        if not current or not new:
+            self.cp_error = "Enter your current password and a new one."
+            return
+        if new != confirm:
+            self.cp_error = "The two new passwords do not match."
+            return
+
+        user = auth.current_user(self.session_token or None)
+        if user is None:
+            return rx.redirect("/login")
+
+        try:
+            auth.change_own_password(user, current, new)
+        except auth.AuthError as exc:
+            self.cp_error = str(exc)
+            return
+
+        self.cp_error = ""
+        self.cp_done = True
+        self.must_change_password = False
         return rx.redirect("/")
 
     @rx.event

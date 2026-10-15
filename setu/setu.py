@@ -44,6 +44,7 @@ from setu.state import (
     VaultState,
 )
 from setu.views import pages
+from setu.views.change_password_page import change_password_page
 from setu.views.client_new_page import client_new_page
 from setu.views.login import login_page
 
@@ -94,6 +95,17 @@ app.add_page(
     route="/login",
     title="Sign in · Setu",
     on_load=AuthState.check_session,
+)
+
+# The forced password change is its own full-page route, registered before the
+# generic loop so it can never be mistaken for a shell screen. require_auth
+# lets this one route through while the account is still flagged, and sends
+# every other route here.
+app.add_page(
+    change_password_page,
+    route="/change-password",
+    title="Change password · Setu",
+    on_load=[AuthState.check_session, AuthState.require_auth],
 )
 
 app.add_page(

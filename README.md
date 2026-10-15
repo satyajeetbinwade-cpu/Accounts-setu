@@ -15,6 +15,7 @@ The codebase is organized around a **framework-agnostic service layer** (`src/`)
 - [Running the app](#running-the-app)
 - [Deploying to a remote server](#deploying-to-a-remote-server)
 - [Login & security](#login--security)
+  - [Multi-user access and data silos](#multi-user-access-and-data-silos)
 - [Configuration files](#configuration-files)
 - [Directory layout](#directory-layout)
 - [Verification harness (CLI)](#verification-harness-cli)
@@ -85,7 +86,7 @@ pip install -r requirements.txt
 export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-The SQLite database (`db/poc.db`) and auth/session tables are created and seeded automatically on first launch — the very first admin is `admin / ChangeMe123` (change it immediately).
+The SQLite database (`db/poc.db`) and auth/session tables are created and seeded automatically on first launch. The first Admin's password is **never hardcoded**: set `SETU_ADMIN_PASSWORD` before the first boot, or the app generates one and prints it once to the server console (see [First-run credentials](#first-run-credentials)). Either way the account must replace it at first sign-in.
 
 ---
 
@@ -239,10 +240,59 @@ A reverse proxy should forward:
 ## Login & security
 
 - The auth layer (`src/auth/`) provides roles (Admin, Partner, Manager, Senior Accountant, Article-Trainee, End-Client), an expandable permission set (`<module>.<action>`), per-user permission overrides, and a security-event log.
-- **Session life**: browser cookie `setu_session`, default timeout **8 hours** (configurable live in Settings). On expiry the user is returned to `/login` with an explicit **"signed out due to inactivity"** message — never a silent redirect.
-- **Failed logins**: never silently lock out. Every failure is logged as a security event; repeated failures (5 in 15 min) log an *escalation* event.
-- **First-run admin**: `admin / ChangeMe123` — change this password immediately after first sign-in.
+- **Session life**: browser cookie `setu_session`, default timeout **8 hours** (configurable live in Settings) **plus a 60-minute inactivity window** (`SETU_SESSION_IDLE_MINUTES`), both enforced server-side on every request. On expiry the user is returned to `/login` with an explicit **"signed out due to inactivity"** message — never a silent redirect.
+- **Failed logins**: every failure is logged as a security event and counted on the user row; the account **locks for 15 minutes after 5 consecutive failures**. The message is always the generic *"Invalid ID or password."*, so it never reveals whether the ID or the password was wrong, or whether the account exists.
+- **First-run admin**: no credential is baked into the source. Set `SETU_ADMIN_PASSWORD` (and optionally `SETU_ADMIN_USERNAME`) before the first boot; otherwise a random password is generated and printed **once, on the server console**. The account is flagged `must_change_password`, so the bootstrap credential cannot stay in use.
+- **Ownership**: every client carries `owner_user_id`; a standard user's queries are filtered to their own clients, and a direct lookup of someone else's id is refused.
 - Every protected route is gated server-side; an unauthenticated visitor (or user without the required permission) is redirected rather than shown a partial UI.
+
+### Multi-user access and data silos
+
+Two orthogonal things decide what a user sees:
+
+| | F1 role (`roles` table) | Access role (`users.role`) |
+|---|---|---|
+| **Decides** | which *screens* and *actions* are permitted | which *clients* are visible |
+| **Values** | Admin, Partner, Manager, Senior Accountant, Article-Trainee, End-Client | `admin` (firm-wide) or `user` (own clients only) |
+
+`users.role` is derived from the F1 role — Admin/Partner → `admin`, everything else → `user` — and re-derived on every boot and on every role change, so a promotion or demotion takes effect on the user's next request.
+
+A standard user (`role = 'user'`):
+
+- sees, searches and counts **only the clients they own** (`end_clients.owner_user_id`);
+- is refused a direct lookup of anyone else's record — by id, by name, or through a child record (contact, COA row, snapshot, document) — answering exactly like a nonexistent id so nothing is revealed by the difference;
+- gets their dashboards, review queues, filing calendar and exports scoped too, because a count is data;
+- cannot widen any of it from the UI: the viewer is a **required argument** on every scoped read, so a call site that forgets to scope raises `TypeError` rather than returning everything.
+
+An `admin` sees every client, and the Client Roster gains a **Created by** column plus a filter by owner.
+
+#### Setting up the accounts
+
+```bash
+# 1. Assign every existing client to the Admin (idempotent; safe to re-run)
+venv/bin/python scripts/migrate_ownership.py --dry-run   # see the plan first
+venv/bin/python scripts/migrate_ownership.py
+
+# 2. Create the standard users — credentials come from the environment,
+#    are never hardcoded and are never printed
+export SETU_USER1_PASSWORD='...'
+export SETU_USER2_PASSWORD='...'
+export SETU_USER3_PASSWORD='...'
+venv/bin/python scripts/seed_users.py
+```
+
+`seed_users.py` accepts `--role NAME`, `--reset-passwords`, `--db PATH`, and a single
+`SETU_SEED_USERS="User1:pw1,User2:pw2"` variable instead of the numbered pairs. Each new
+account is created with `must_change_password` set, so the issued password is good for
+exactly one sign-in: the user is routed to `/change-password` and cannot open any other
+screen until they replace it. It also grants those users `clients.profile.manage` as a
+**per-user override**, so they can create the clients they own without widening a shared role.
+
+**Known limits** (deliberate, for this PoC):
+
+- The `setu_session` cookie is set and read by the browser (Reflex manages cookies client-side), so it cannot be `HttpOnly`. The token is 256-bit, stored server-side in `sessions` where it can be revoked, and expires on both an absolute and an idle timer.
+- Clients reachable only as a folder (`data/<name>/`) or purely inside `runs` are matched to ownership by **name**, so two users owning identically-named clients would share those runs. Run `migrate_ownership.py` to register folder clients as owned rows.
+- Module queues are scoped through the client (`filter_rows_by_owner`), not by an owner column on every module's own tables.
 
 ---
 
@@ -273,6 +323,9 @@ The matching engine snapshots `matching_rules.yaml` on every run, so later confi
 ├── config/                # YAML configuration (matching rules, AI, mappings)
 ├── data/                  # uploaded source files: data/{client}/{period}/{source_type}/
 ├── db/                    # SQLite database (gitignored)
+├── scripts/               # operational scripts (migrate ownership, seed users)
+│   ├── migrate_ownership.py  #   assign existing clients to Admin + register folder-only clients
+│   └── seed_users.py         #   create the standard users from env-var credentials
 ├── src/                   # shared service layer (framework-agnostic)
 │   ├── runner.py          #   execution / matching orchestration
 │   ├── queries.py         #   read API (runs, results, review state)
@@ -340,4 +393,4 @@ python verify.py --export-disagreements \
 
 ---
 
-*Built for firm-internal reconciliation workflows. The default `admin / ChangeMe123` credential exists only for first-run onboarding and must be rotated before any shared or production use.*
+*Built for firm-internal reconciliation workflows. No credential ships with the source: the first Admin is created from `SETU_ADMIN_PASSWORD` (or a one-time generated password printed to the server console) and is required to replace it before the app will let it in.*

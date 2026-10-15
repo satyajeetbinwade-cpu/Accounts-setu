@@ -182,7 +182,7 @@ class Module2State(AuthState):
             return rx.redirect(deny)
         self.client_options = [
             ClientOption(client_id=c["client_id"], legal_name=c["legal_name"])
-            for c in clients.list_clients(include_inactive=False)
+            for c in clients.list_clients(viewer=self._viewer(), include_inactive=False)
         ]
         # No default client: the picker stays on its placeholder until chosen.
         self.can_resolve = "module2.exceptions.resolve" in self._codes()
@@ -260,9 +260,23 @@ class Module2State(AuthState):
             for c in m2.list_matching_key_configs()
         ]
 
+    def _owns_client(self, client_id) -> bool:
+        """Whether this user may see that client.
+
+        Module 2's own queries take a client_id and are not owner-filtered, so
+        every id that reaches them is checked against this user's client list
+        here rather than trusted from an event argument.
+        """
+        options = {o.client_id for o in self.client_options}
+        try:
+            return int(client_id or 0) in options
+        except (TypeError, ValueError):
+            return False
+
     def _load_detail(self) -> None:
         exc = m2.get_exception(self.selected_exception_id)
-        if exc is None:
+        if exc is None or not self._owns_client(exc.get("client_id")):
+            # Missing OR not this user's — the same answer either way.
             self.selected_exception_id = 0
             return
         self.detail_classification = exc["classification"]
@@ -358,10 +372,18 @@ class Module2State(AuthState):
         self.error = ""
 
     @rx.event
+    @rx.event
     def set_client(self, value: str):
         """The picker hands the client_id as a STRING (``rx.select.root`` is
-        string-typed); store the integer."""
-        self.client_id = int(value or 0)
+        string-typed); store the integer.
+
+        Only a client this user may see: Module 2's own queries take a
+        client_id and are not owner-filtered, so the id is validated here
+        rather than trusted from the event."""
+        client_id = int(value or 0)
+        if client_id not in {o.client_id for o in self.client_options}:
+            return
+        self.client_id = client_id
         self.selected_exception_id = 0
         self._load_all()
 
@@ -386,6 +408,12 @@ class Module2State(AuthState):
     # ------------------------------------------------------------------
     @rx.event
     def open_exception(self, exception_id: int):
+        """Only an exception of a client this user may see; the id comes from
+        the event, and exceptions are numbered sequentially."""
+        exc = m2.get_exception(exception_id)
+        if exc is None or not self._owns_client(exc.get("client_id")):
+            self.error = "That exception isn't in a client you can open."
+            return
         self.selected_exception_id = exception_id
         self.resolve_note = ""
         self._load_detail()
@@ -400,6 +428,14 @@ class Module2State(AuthState):
 
     @rx.event
     def resolve(self, resolution: str):
+        # Re-checked here as well as on open: this is a WRITE, and the id could
+        # have been set by any handler in between.
+        current = m2.get_exception(self.selected_exception_id)
+        if current is None or not self._owns_client(current.get("client_id")):
+            self.error = "That exception isn't in a client you can resolve."
+            self.selected_exception_id = 0
+            self._load_all()
+            return
         try:
             m2.resolve_exception(
                 self.selected_exception_id,

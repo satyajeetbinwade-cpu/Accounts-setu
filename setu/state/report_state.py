@@ -15,6 +15,7 @@ from typing import Any
 import reflex as rx
 
 from src.action_center import report as report_svc
+from src.auth import access
 from src.auth import service as auth
 from setu.foundation import tokens as t
 from setu.state.auth_state import AuthState
@@ -174,7 +175,7 @@ class ReportState(AuthState):
                 has_gst="GST" in p["recon_types"],
                 has_tds="TDS" in p["recon_types"],
             )
-            for p in report_svc.list_report_periods()
+            for p in report_svc.list_report_periods(self._viewer())
         ]
         if not self.selected_label and self.period_options:
             # Prefer a period that has both GST and TDS so the full report shows.
@@ -196,8 +197,13 @@ class ReportState(AuthState):
         if opt is None:
             return
         try:
-            rep = report_svc.build_period_report(opt.client_id, opt.period)
-        except report_svc.ReportError as exc:
+            rep = report_svc.build_period_report(
+                opt.client_id, opt.period, viewer=self._viewer()
+            )
+        except (report_svc.ReportError, access.AccessDenied) as exc:
+            # AccessDenied cannot happen while the picker is scoped, but the
+            # refusal is reported like any other "can't build this one" case
+            # rather than crashing the handler.
             self.error = str(exc)
             return
         self._report = rep

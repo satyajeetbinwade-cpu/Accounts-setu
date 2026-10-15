@@ -107,13 +107,55 @@ def _context_stage() -> rx.Component:
                             on_add_new=ReconcileState.add_new_client,
                             show_add_new=ReconcileState.can_manage_clients,
                         ),
-                        c.period_picker(
-                            year=ReconcileState.ctx_year,
-                            month=ReconcileState.ctx_month,
-                            years=ReconcileState.year_options,
-                            months=ReconcileState.month_options,
-                            on_year_change=ReconcileState.set_ctx_year,
-                            on_month_change=ReconcileState.set_ctx_month,
+                        rx.vstack(
+                            c.period_picker(
+                                year=ReconcileState.ctx_year,
+                                month=ReconcileState.ctx_month,
+                                years=ReconcileState.year_options,
+                                months=ReconcileState.month_options,
+                                on_year_change=ReconcileState.set_ctx_year,
+                                on_month_change=ReconcileState.set_ctx_month,
+                            ),
+                            # A client created a moment ago has no periods yet, and
+                            # the engine reads its sources from data/<client>/<period>/
+                            # — so offer to open the first period here instead of
+                            # leaving the flow with nowhere to put an upload.
+                            rx.cond(
+                                ReconcileState.ctx_period == "",
+                                rx.form(
+                                    rx.hstack(
+                                        rx.input(
+                                            name="new_period",
+                                            placeholder="YYYY-MM",
+                                            width="110px",
+                                            size="2",
+                                        ),
+                                        rx.button(
+                                            "Open period",
+                                            type="submit",
+                                            size="2",
+                                            variant="soft",
+                                            disabled=ReconcileState.ctx_client_id == 0,
+                                        ),
+                                        spacing="2",
+                                        align="center",
+                                    ),
+                                    on_submit=ReconcileState.add_period,
+                                    reset_on_submit=True,
+                                ),
+                                rx.fragment(),
+                            ),
+                            rx.cond(
+                                ReconcileState.period_error != "",
+                                rx.text(
+                                    ReconcileState.period_error,
+                                    font_size="11px",
+                                    color=t.Color.DANGER.value,
+                                ),
+                                rx.fragment(),
+                            ),
+                            spacing="1",
+                            align="start",
                         ),
                         c.recon_type_picker(
                             ReconcileState.recon_types,
@@ -125,20 +167,40 @@ def _context_stage() -> rx.Component:
                         wrap="wrap",
                     ),
                     rx.vstack(
-                        c.warning_banner(
-                            "No clients exist on this server yet, so there is nothing to "
-                            "reconcile. Add a client, upload source files in Smart Ingestion, "
-                            "or seed the demo data (Meridian Fabrics / Test Client)."
+                        rx.cond(
+                            ReconcileState.can_manage_clients,
+                            rx.vstack(
+                                c.empty_state(
+                                    "You don't have any clients yet. Create your first "
+                                    "one to start reconciling.",
+                                    icon="building-2",
+                                ),
+                                rx.button(
+                                    "+ Create a client",
+                                    on_click=ReconcileState.add_new_client,
+                                    size="3",
+                                    background=t.Color.ACCENT.value,
+                                    color="#FFFFFF",
+                                    border_radius="10px",
+                                ),
+                                spacing="3",
+                                align="center",
+                                width="100%",
+                            ),
+                            c.empty_state(
+                                "No clients are assigned to you yet. Ask an Admin to "
+                                "set one up before you reconcile.",
+                                icon="building-2",
+                            ),
                         ),
-                        rx.box(height="6px"),
-                        c.empty_state(
-                            "Reconcile needs a client to work with. Add one from "
-                            "/clients/new, then pick it above.",
-                            icon="folder-open",
+                        rx.text(
+                            "Once a client exists, pick it here, open a period, and "
+                            "upload its source files in Stage 2.",
+                            style=t.TEXT["micro"],
                         ),
-                        spacing="2",
+                        spacing="3",
                         width="100%",
-                        align="start",
+                        align="center",
                     ),
                 ),
                 rx.cond(

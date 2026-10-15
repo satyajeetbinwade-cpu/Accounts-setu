@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.auth import access  # noqa: E402
 from src.migrations import migrate  # noqa: E402
 from src.migrations.identity import resolve_mapping  # noqa: E402
 
@@ -223,7 +224,7 @@ def test_rename_legal_name_does_not_break_lookups(tmp_path):
     assert con.execute("SELECT legal_name FROM end_clients WHERE client_id=1").fetchone()[0] == "Test Client Renamed"
     con.close()
     from src.shared import discovery
-    opts = discovery.list_clients(include_inactive=True, db_path=db)
+    opts = discovery.list_clients(viewer=access.SYSTEM_VIEWER, include_inactive=True, db_path=db)
     assert any(o["display_name"] == "Test Client Renamed" for o in opts)
 
 
@@ -238,7 +239,12 @@ def test_two_clients_same_display_name_are_disambiguated(tmp_path):
     con.commit()
     con.close()
     from src.shared import discovery
-    opts = [o for o in discovery.list_clients(include_inactive=True, db_path=db) if o["legal_name"] == "Test Client"]
+    opts = [
+        o for o in discovery.list_clients(
+            viewer=access.SYSTEM_VIEWER, include_inactive=True, db_path=db
+        )
+        if o["legal_name"] == "Test Client"
+    ]
     assert len(opts) == 2
     assert len({o["display_name"] for o in opts}) == 2, "same name must be disambiguated"
 
@@ -322,11 +328,13 @@ def test_duplicate_active_gstin_is_rejected(tmp_path):
     recon_db.init_db(db)
     clients.init_clients(db)
     clients.create_client(
-        legal_name="A Co", pan="AAAPL1234C", gstin="07AAACP9472A1ZJ", actor="t", db_path=db,
+        legal_name="A Co", pan="AAAPL1234C", gstin="07AAACP9472A1ZJ", actor="t",
+        owner_user_id=1, db_path=db,
     )
     with pytest.raises(clients.ClientError) as exc:
         clients.create_client(
-            legal_name="B Co", pan="AABCM1234K", gstin="07AAACP9472A1ZJ", actor="t", db_path=db,
+            legal_name="B Co", pan="AABCM1234K", gstin="07AAACP9472A1ZJ", actor="t",
+            owner_user_id=1, db_path=db,
         )
     assert "GSTIN 07AAACP9472A1ZJ" in str(exc.value)
 
@@ -342,14 +350,22 @@ def test_inactive_clients_excluded_from_picker_and_labelled(tmp_path):
     db = tmp_path / "clients.db"
     recon_db.init_db(db)
     clients.init_clients(db)
-    clients.create_client(legal_name="Active Co", pan="AAAPL1234C", actor="t", db_path=db)
-    gone = clients.create_client(legal_name="Gone Co", pan="AABCM1234K", actor="t", db_path=db)
-    clients.set_client_active(gone, False, actor="t", db_path=db)
+    clients.create_client(
+        legal_name="Active Co", pan="AAAPL1234C", actor="t", owner_user_id=1, db_path=db
+    )
+    gone = clients.create_client(
+        legal_name="Gone Co", pan="AABCM1234K", actor="t", owner_user_id=1, db_path=db
+    )
+    clients.set_client_active(
+        gone, False, actor="t", viewer=access.SYSTEM_VIEWER, db_path=db
+    )
 
-    active = discovery.list_clients(db_path=db)
+    active = discovery.list_clients(viewer=access.SYSTEM_VIEWER, db_path=db)
     assert [o["legal_name"] for o in active] == ["Active Co"], "inactive must be hidden by default"
 
-    all_rows = discovery.list_clients(include_inactive=True, db_path=db)
+    all_rows = discovery.list_clients(
+        viewer=access.SYSTEM_VIEWER, include_inactive=True, db_path=db
+    )
     labels = {o["legal_name"]: o["display_name"] for o in all_rows}
     assert labels["Active Co"] == "Active Co"
     assert labels["Gone Co"] == "Gone Co (inactive)"

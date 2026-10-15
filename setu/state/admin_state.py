@@ -263,7 +263,7 @@ class AdminState(AuthState):
         try:
             self.team_clients = [
                 ClientOption(client_id=c["client_id"], legal_name=c["display_name"])
-                for c in discovery.list_clients()
+                for c in discovery.list_clients(viewer=self._viewer())
             ]
         except Exception:  # noqa: BLE001
             self.team_clients = []

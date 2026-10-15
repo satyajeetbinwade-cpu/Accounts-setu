@@ -19,6 +19,7 @@ import pytest
 
 from src import db as recon_db
 from src.invoice_extract import db as idb
+from src.auth import access
 from src.invoice_extract import service as ie
 from src.invoice_extract import triage
 from src.invoice_extract.triage_schema import ensure_triage_schema
@@ -359,7 +360,9 @@ def test_normal_upload_is_unaffected_and_records_coverage(monkeypatch, tmp_path)
     assert "coverage" in res
     assert res["coverage"]["pages_total"] == 3
     # A normal upload never runs triage.
-    assert ie.get_upload(res["upload_id"], db_path=db_path)["pages_total"] == 3
+    assert ie.get_upload(
+        res["upload_id"], viewer=access.SYSTEM_VIEWER, db_path=db_path
+    )["pages_total"] == 3
     conn = recon_db.get_connection(db_path)
     try:
         assert conn.execute("SELECT COUNT(*) FROM invoice_triage_runs").fetchone()[0] == 0
@@ -570,7 +573,9 @@ def test_partial_read_warns_and_requires_acknowledgement(tmp_path):
     assert "tick the acknowledgement" in str(exc.value)
 
     ie.confirm_upload(upload_id, actor="t", acknowledge_coverage=True, db_path=db_path)
-    assert ie.get_upload(upload_id, db_path=db_path)["status"] == "confirmed"
+    assert ie.get_upload(
+        upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path
+    )["status"] == "confirmed"
 
 
 def test_full_read_needs_no_acknowledgement(tmp_path):
@@ -588,7 +593,9 @@ def test_full_read_needs_no_acknowledgement(tmp_path):
     assert ie.upload_coverage(upload_id, db_path=db_path)["incomplete"] is False
     assert ie.coverage_warning(upload_id, db_path=db_path) == ""
     ie.confirm_upload(upload_id, actor="t", db_path=db_path)
-    assert ie.get_upload(upload_id, db_path=db_path)["status"] == "confirmed"
+    assert ie.get_upload(
+        upload_id, viewer=access.SYSTEM_VIEWER, db_path=db_path
+    )["status"] == "confirmed"
 
 
 # ===========================================================================

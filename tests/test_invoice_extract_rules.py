@@ -525,7 +525,7 @@ def scratch(tmp_path_factory):
 
     client_id = clients.create_client(
         legal_name="KMAP Capital Limited", pan="AAACK9054D", gstin=CLIENT_GSTIN,
-        actor="test", db_path=db,
+        actor="test", owner_user_id=1, db_path=db,
     )
     return db, client_id
 
