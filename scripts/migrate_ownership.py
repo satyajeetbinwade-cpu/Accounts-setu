@@ -52,9 +52,22 @@ def _admin_id(conn) -> int | None:
 
 
 def _filesystem_client_names() -> set[str]:
+    """Client names that exist ONLY as a ``data/<name>/`` folder.
+
+    Numeric folders are skipped on purpose: those are the ALREADY-MIGRATED
+    ``data/<client_id>/`` layout, not client names. Treating "7" as a name
+    registered a junk client for every real one — measured on the live volume,
+    whose data/ holds ``1, 10, 11, 2, 6, 7, 8, 9``. Underscore/dot-prefixed
+    folders are skipped for the same reason (``data/_page_cache/`` is a cache,
+    not a client). This mirrors ``src.migrations.identity.collect_names``.
+    """
     if not DATA_ROOT.exists():
         return set()
-    return {p.name for p in DATA_ROOT.iterdir() if p.is_dir()}
+    return {
+        p.name
+        for p in DATA_ROOT.iterdir()
+        if p.is_dir() and not p.name.isdigit() and not p.name.startswith((".", "_"))
+    }
 
 
 def _run_client_names(conn) -> set[str]:
