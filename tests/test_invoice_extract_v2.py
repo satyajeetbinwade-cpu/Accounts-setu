@@ -145,6 +145,64 @@ def _stub_reads(monkeypatch, read_a: dict, read_b: dict, *, provider_a="openrout
     monkeypatch.setattr(ex, "_call_extract_model", fake)
 
 
+def _truncated_error() -> Exception:
+    """The LLM layer's own error for a reply cut off at the output ceiling."""
+    from src.ingestion_ai import llm as llm_mod
+
+    return llm_mod.LLMError(
+        f"parse_error|{llm_mod.TRUNCATED_REPLY_MARKER} in response — the model's reply "
+        "was cut off before it finished (it hit the output-token limit)"
+    )
+
+
+def _empty_body_error() -> Exception:
+    """The LLM layer's own error for a provider that billed tokens and sent nothing."""
+    from src.ingestion_ai import llm as llm_mod
+
+    return llm_mod.LLMError("parse_error|empty response")
+
+
+def _malformed_reply_error() -> Exception:
+    """A parse failure that is NOT a truncation: nothing was cut off."""
+    from src.ingestion_ai import llm as llm_mod
+
+    return llm_mod.LLMError("parse_error|no JSON object found in response")
+
+
+def _read_stub(monkeypatch, *, read_a=None, read_b=None, errors_a=(), errors_b=(),
+               calls=None, provider_a="openrouter", provider_b="deepseek"):
+    """Stub the seam so each ATTEMPT of a read can fail with a chosen error.
+
+    ``errors_b=[]`` → read B always answers. ``errors_b=[e1]`` → read B's first
+    attempt raises ``e1`` and its second (the retry) answers, so a test can make
+    every attempt fail by listing one error per attempt. Every call is recorded
+    in ``calls`` with the budget it asked for — which is what proves the retry
+    used the bigger one.
+    """
+    monkeypatch.setattr(
+        ex, "configured_providers", lambda db_path=None: sorted({provider_a, provider_b})
+    )
+    attempts: dict[str, int] = {}
+
+    def fake(*, touchpoint, crops, max_tokens=None, **kwargs):
+        attempts[touchpoint] = attempts.get(touchpoint, 0) + 1
+        if calls is not None:
+            calls.append({"touchpoint": touchpoint, "max_tokens": max_tokens,
+                          "attempt": attempts[touchpoint]})
+        is_a = touchpoint == ex.TOUCHPOINT_READ_A
+        errors = list(errors_a if is_a else errors_b)
+        if attempts[touchpoint] <= len(errors):
+            raise errors[attempts[touchpoint] - 1]
+        provider = provider_a if is_a else provider_b
+        return (read_a if is_a else read_b), {
+            "provider": provider, "model": f"{provider}/model", "leg": "primary",
+            "fallback_used": False,
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+        }
+
+    monkeypatch.setattr(ex, "_call_extract_model", fake)
+
+
 @pytest.fixture()
 def v2_on(monkeypatch):
     """Turn Phase 2 on without touching any real setting store."""
@@ -715,6 +773,248 @@ def test_no_second_provider_available_fails_before_read_b(tmp_path, monkeypatch,
     assert "different provider" in (outcome.error or "")
     # Read B was never even attempted.
     assert [c["touchpoint"] for c in calls] == [ex.TOUCHPOINT_READ_A]
+
+
+# ===========================================================================
+# A read the OUTPUT BUDGET cut short, and read A's survival when read B dies
+# ===========================================================================
+
+
+def test_truncated_read_b_is_retried_once_with_a_bigger_budget(tmp_path, monkeypatch, v2_on):
+    """A reply cut off mid-JSON is re-asked ONCE, with room to finish."""
+    pdf = _mk_pdf(tmp_path / "trunc.pdf", 1)
+    calls: list[dict] = []
+    _read_stub(monkeypatch, read_a=_reply({"invoice_number": "KMAP/1"}),
+               read_b=_reply({"invoice_number": "KMAP/1"}),
+               errors_b=[_truncated_error()], calls=calls)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    # Exactly one retry — never a loop — and the document completes.
+    assert [c["touchpoint"] for c in calls] == [
+        ex.TOUCHPOINT_READ_A, ex.TOUCHPOINT_READ_B, ex.TOUCHPOINT_READ_B,
+    ]
+    # The retry asked for the bigger budget; the first attempt asked for the
+    # normal one.
+    assert [c["max_tokens"] for c in calls] == [
+        ex.READ_MAX_TOKENS, ex.READ_MAX_TOKENS, ex.READ_RETRY_MAX_TOKENS,
+    ]
+    assert ex.READ_RETRY_MAX_TOKENS > ex.READ_MAX_TOKENS
+    assert ex.READ_RETRY_ATTEMPTS == 1
+    assert outcome.status == "complete"
+    assert outcome.error is None
+    rows = {r["field_key"]: r for r in outcome.fields}
+    assert rows["invoice_number"]["reads_agree"] == nz.AGREE_EXACT
+    # The retry is CHARGED: the successful attempt's usage is summed in.
+    assert outcome.input_tokens == 200 and outcome.output_tokens == 100
+    assert outcome.attempts == 3
+
+
+def test_empty_read_b_is_retried_once_and_the_document_completes(tmp_path, monkeypatch, v2_on):
+    """An empty body is the same budget symptom and gets the same one retry."""
+    pdf = _mk_pdf(tmp_path / "empty.pdf", 1)
+    calls: list[dict] = []
+    _read_stub(monkeypatch, read_a=_reply({"invoice_number": "KMAP/1"}),
+               read_b=_reply({"invoice_number": "KMAP/1"}),
+               errors_b=[_empty_body_error()], calls=calls)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    assert [c["touchpoint"] for c in calls] == [
+        ex.TOUCHPOINT_READ_A, ex.TOUCHPOINT_READ_B, ex.TOUCHPOINT_READ_B,
+    ]
+    assert calls[-1]["max_tokens"] == ex.READ_RETRY_MAX_TOKENS
+    assert outcome.status == "complete"
+    assert outcome.error is None
+
+
+def test_read_b_truncated_twice_keeps_read_a_as_partial(tmp_path, monkeypatch, v2_on):
+    """The retry is bounded: when it ALSO runs out of budget, the document is
+    stored as 'partial' with everything read A saw."""
+    pdf = _mk_pdf(tmp_path / "twice.pdf", 1)
+    calls: list[dict] = []
+    read_a = _reply(
+        {"invoice_number": "KMAP/1", "invoice_total": "1,180.00"},
+        annotations=[{"text": "Less TDS 10% Rs. 683.00", "kind_guess": "tds",
+                      "region": 1, "box": {"x": 0.1, "y": 0.9, "w": 0.4, "h": 0.05}}],
+    )
+    _read_stub(monkeypatch, read_a=read_a, read_b=_reply({}),
+               errors_b=[_truncated_error(), _truncated_error()], calls=calls)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    # One retry, then stop — not a second retry.
+    assert [c["touchpoint"] for c in calls].count(ex.TOUCHPOINT_READ_B) == 2
+    assert outcome.attempts == 3
+    # 'partial': the document WAS read, once.
+    assert outcome.status == ex.STATUS_PARTIAL == "partial"
+    assert "read B failed" in (outcome.error or "")
+    assert "unbalanced JSON object" in (outcome.error or "")
+    rows = {r["field_key"]: r for r in outcome.fields}
+    # Read A's value is stored and read B's side is empty — the missing_b shape
+    # the pipeline already uses when read B is silent on a field.
+    assert rows["invoice_number"]["value_a"] == "KMAP/1"
+    assert rows["invoice_number"]["value_b"] is None
+    assert rows["invoice_number"]["reads_agree"] == nz.AGREE_MISSING_B
+    assert rows["invoice_number"]["status"] == fv2.STATUS_READ
+    # A field NEITHER read saw is still null, not "missing from read B".
+    assert rows["sgst_amount"]["reads_agree"] == nz.AGREE_NULL
+    # Read A's handwritten annotation survives with the document.
+    assert [a["text"] for a in outcome.annotations] == ["Less TDS 10% Rs. 683.00"]
+    # Read A's own cost is what the run is charged for this document.
+    assert outcome.input_tokens == 100 and outcome.output_tokens == 50
+
+
+def test_a_non_truncation_read_b_error_is_not_retried(tmp_path, monkeypatch, v2_on):
+    """A bigger budget cannot fix a real failure, so it is not paid for."""
+    pdf = _mk_pdf(tmp_path / "plain.pdf", 1)
+    for error, expected in (
+        (RuntimeError("vendor said no"), "read B failed: RuntimeError: vendor said no"),
+        (_malformed_reply_error(), "read B failed: LLMError: parse_error|no JSON object"),
+    ):
+        calls: list[dict] = []
+        _read_stub(monkeypatch, read_a=_reply({"invoice_number": "KMAP/1"}),
+                   read_b=_reply({"invoice_number": "KMAP/1"}),
+                   errors_b=[error, error], calls=calls)
+        outcome = ex.extract_document(
+            _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+            cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+        )
+        # Read B was attempted ONCE — the second error was never reached.
+        assert [c["touchpoint"] for c in calls].count(ex.TOUCHPOINT_READ_B) == 1
+        assert expected in (outcome.error or "")
+        # Read A is still kept: this is a read-B failure like any other.
+        assert outcome.status == "partial"
+        assert {r["field_key"]: r for r in outcome.fields}["invoice_number"]["value_a"] == "KMAP/1"
+
+
+def test_read_a_failure_still_fails_the_document(tmp_path, monkeypatch, v2_on):
+    """Nothing is stored when the FIRST read fails: there is no read to keep."""
+    pdf = _mk_pdf(tmp_path / "nodata.pdf", 1)
+    calls: list[dict] = []
+    _read_stub(monkeypatch, read_a=_reply({"invoice_number": "KMAP/1"}),
+               read_b=_reply({"invoice_number": "KMAP/1"}),
+               errors_a=[RuntimeError("vendor down")], calls=calls)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    assert outcome.status == "failed"
+    assert outcome.fields == [] and outcome.annotations == []
+    assert "read A failed: RuntimeError: vendor down" in (outcome.error or "")
+    # Read A is not retried either (this is not a budget failure), and read B is
+    # never attempted.
+    assert [c["touchpoint"] for c in calls] == [ex.TOUCHPOINT_READ_A]
+
+
+def test_call_read_reports_what_it_took_and_never_raises(monkeypatch, v2_on):
+    """The retry seam itself: `_call_read` returns a FAILED READ as a value.
+
+    A failed read is an outcome here, exactly as a failed document is at the
+    level above, so the caller always learns both WHAT failed and HOW MANY
+    attempts it took — the number the document row records.
+    """
+    # A reply cut off on the first attempt: one retry, then success.
+    calls: list[dict] = []
+    _read_stub(monkeypatch, read_a=_reply({"invoice_number": "KMAP/1"}),
+               errors_a=[_truncated_error()], calls=calls)
+    call = ex._call_read(
+        touchpoint=ex.TOUCHPOINT_READ_A, crops=[], upload_id=None, document_id=1,
+        extraction_id=None, actor="t", timeout=5, db_path=None,
+    )
+    assert call.error is None and call.retried is True and call.attempts == 2
+    assert [c["max_tokens"] for c in calls] == [ex.READ_MAX_TOKENS, ex.READ_RETRY_MAX_TOKENS]
+    assert call.reply["fields"][0]["key"] == "invoice_number"
+    assert call.input_tokens == 100 and call.output_tokens == 50
+
+    # Cut off on BOTH attempts: the failure comes back, with the count, and
+    # nothing is raised.
+    calls = []
+    _read_stub(monkeypatch, read_a=_reply({}),
+               errors_a=[_truncated_error(), _truncated_error()], calls=calls)
+    call = ex._call_read(
+        touchpoint=ex.TOUCHPOINT_READ_A, crops=[], upload_id=None, document_id=1,
+        extraction_id=None, actor="t", timeout=5, db_path=None,
+    )
+    assert call.error is not None and call.attempts == 2 and call.retried is True
+    assert call.reply == {} and call.meta == {}
+    assert call.input_tokens is None and call.output_tokens is None
+
+    # Not a budget failure: returned at once, NOT retried.
+    calls = []
+    _read_stub(monkeypatch, read_a=_reply({}), errors_a=[RuntimeError("nope")], calls=calls)
+    call = ex._call_read(
+        touchpoint=ex.TOUCHPOINT_READ_A, crops=[], upload_id=None, document_id=1,
+        extraction_id=None, actor="t", timeout=5, db_path=None,
+    )
+    assert isinstance(call.error, RuntimeError) and call.retried is False
+    assert call.attempts == 1 and len(calls) == 1
+
+
+def test_partial_read_b_failure_is_stored_with_read_a_and_rules_still_run(
+        tmp_path, monkeypatch, scratch_db):
+    """End to end: a read-B failure stores read A as 'partial', and Phase 3/4
+    (checks, direction, the review model) still run on that stored result."""
+    pdf = _mk_pdf(tmp_path / "partial.pdf", 1)
+    upload_id, _doc_ids = _seed_upload(scratch_db, documents=1, pages=1)
+    _set_upload_bytes(scratch_db, upload_id, pdf.read_bytes())
+    _read_stub(
+        monkeypatch,
+        read_a=_reply(
+            {"invoice_number": "KMAP/1", "invoice_total": "1,180.00"},
+            annotations=[{"text": "Paid by ch. No. 002887 dt. 16/04/26",
+                          "kind_guess": "payment", "region": 1,
+                          "box": {"x": 0.1, "y": 0.9, "w": 0.4, "h": 0.05}}],
+        ),
+        read_b=_reply({}),
+        errors_b=[_truncated_error(), _truncated_error()],
+    )
+    ex.start_extraction(upload_id, actor="test", db_path=scratch_db, force=True)
+    ex.wait_for_extraction(upload_id, db_path=scratch_db, timeout=60)
+    # ``wait_for_extraction`` returns as soon as every DOCUMENT row is terminal
+    # — which is BEFORE Phase 3/4 run. The checks and the direction asserted on
+    # below are written by that later step, so wait for the JOB itself: its
+    # event is set when the whole worker body, rules included, is done.
+    state = ex.job_state(upload_id)
+    assert state is not None and state["event"].wait(timeout=60), "the job did not finish"
+
+    stored = ex.get_extraction(upload_id, db_path=scratch_db)["extractions"][0]
+    assert stored["status"] == "partial"
+    assert "read B failed" in (stored["error"] or "")
+    fields = {f["field_key"]: f for f in stored["fields"]}
+    assert fields["invoice_number"]["value_a"] == "KMAP/1"
+    assert fields["invoice_number"]["value_b"] is None
+    assert fields["invoice_number"]["reads_agree"] == nz.AGREE_MISSING_B
+    assert fields["invoice_total"]["value_a"] == "1,180.00"
+    assert stored["annotations"][0]["text_verbatim"] == "Paid by ch. No. 002887 dt. 16/04/26"
+    assert stored["annotations"][0]["used_as_value"] == 0
+
+    document_id = int(stored["document_id"])
+    conn = sqlite3.connect(scratch_db)
+    try:
+        checks = conn.execute(
+            "SELECT COUNT(*) FROM invoice_doc_checks WHERE document_id = ?", (document_id,)
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT direction, basis FROM invoice_doc_direction WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    # Phase 3 ran: checks were computed and a direction was decided WITH a basis.
+    assert checks > 0
+    assert row is not None
+    assert row[0] in ("sales", "purchase", "likely_purchase", "undetermined")
+    assert row[1]
+    # ...so the review screen can build its model from the partial result.
+    from src.invoice_extract import rules as rules_mod
+
+    model = rules_mod.get_review_model(document_id, db_path=scratch_db)
+    assert isinstance(model["needs_you"], list)
+
 
 
 def test_text_layer_match_is_set_for_a_native_pdf(tmp_path, monkeypatch, v2_on):

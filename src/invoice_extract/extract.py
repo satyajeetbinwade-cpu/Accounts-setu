@@ -89,6 +89,25 @@ EXTRACT_RETRY_POLICY: dict[str, Any] = {
     "attempts": 3, "base_delay": 1.0, "max_delay": 10.0, "jitter": 0.5,
 }
 
+# --- the read budget, and the ONE retry a budget failure earns --------------
+#: Output budget for ONE read. A reasoning model spends this same budget on its
+#: thinking tokens, so a wide document can reach the ceiling with its JSON still
+#: open ('truncated') or with nothing left to return at all ('empty response').
+#: Neither is a wrong answer — both are answers the budget cut short.
+READ_MAX_TOKENS = 8000
+#: The budget the retry of such a read is given: room for the thinking tokens
+#: AND the answer they were crowding out.
+READ_RETRY_MAX_TOKENS = 16000
+#: How many EXTRA attempts one read gets. Exactly ONE: a model that cannot
+#: finish inside the larger budget will not finish on a third try either, and
+#: an unbounded loop would bill the client for a broken model.
+READ_RETRY_ATTEMPTS = 1
+#: The LLM layer's own wording for "the model was reached and billed, and
+#: returned nothing to parse". The truncation half of the same decision is
+#: string-matched on ``ingestion_ai.llm.TRUNCATED_REPLY_MARKER`` (imported
+#: from there at the point of use, so the two layers cannot drift apart).
+EMPTY_REPLY_MARKER = "empty response"
+
 #: Only these categories are extracted. Everything else is skipped WITH A
 #: REASON — an excluded document is not the same as a document that vanished.
 TARGET_CATEGORIES: tuple[str, ...] = ("tax_invoice", "no_gst_expense")
@@ -279,6 +298,7 @@ def _call_extract_model(
     extraction_id: Optional[int],
     actor: str,
     timeout: int,
+    max_tokens: int = READ_MAX_TOKENS,
     db_path=None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """One read (A or B) through the gateway, with all crops in ONE call.
@@ -287,6 +307,11 @@ def _call_extract_model(
     two pages costs one call and the model can follow a value across the page
     break. The gateway applies the vision capability guard, the vision
     concurrency limit and the retry/backoff policy.
+
+    ``max_tokens`` is the output budget for this attempt; it defaults to
+    ``READ_MAX_TOKENS`` and only ``_call_read`` ever passes the larger
+    ``READ_RETRY_MAX_TOKENS`` budget, for the single retry of a reply the
+    budget cut short.
 
     This is the ONE place Phase 2 touches a model: stub this to test the whole
     pipeline without a network.
@@ -299,12 +324,14 @@ def _call_extract_model(
         system_prompt,
         user_prompt,
         images=images,
-        # 8000, not 4000: a reasoning-style model (deepseek-flash) spends
-        # output tokens thinking before the JSON, and 4000 cut its replies
-        # off mid-object ("unbalanced JSON … hit the output-token limit" on
-        # 7/8 real read-B calls; its one success used 3079). 8000 fits it
-        # with headroom and costs fractions of a cent at these prices.
-        max_tokens=8000,
+        # READ_MAX_TOKENS (8000), not 4000: a reasoning-style model
+        # (deepseek-flash) spends output tokens thinking before the JSON, and
+        # 4000 cut its replies off mid-object ("unbalanced JSON … hit the
+        # output-token limit" on 7/8 real read-B calls; its one success used
+        # 3079). 8000 fits most documents with headroom and costs fractions of
+        # a cent at these prices — and when it does not fit, ``_call_read``
+        # re-asks once at READ_RETRY_MAX_TOKENS.
+        max_tokens=max_tokens,
         temperature=0.0,
         actor=actor,
         timeout=timeout,
@@ -669,6 +696,117 @@ def _sum_tokens(a: Optional[int], b: Optional[int]) -> Optional[int]:
     return int(a or 0) + int(b or 0)
 
 
+# ---------------------------------------------------------------------------
+# ONE read, and the single retry a budget failure earns
+# ---------------------------------------------------------------------------
+
+
+def _read_failure_earns_a_retry(exc: BaseException) -> bool:
+    """Was this read stopped by its OUTPUT BUDGET rather than by a bad answer?
+
+    Two shapes, both budget symptoms: the reply stopped mid-object (the LLM
+    layer's ``TRUNCATED_REPLY_MARKER`` — a reasoning model's thinking tokens are
+    spent from the same budget as the visible JSON) or the provider returned an
+    empty body after billing tokens for that thinking (``EMPTY_REPLY_MARKER``).
+
+    Anything else — auth, rate limit, timeout, a malformed reply — is a real
+    failure that a bigger budget cannot fix, and retrying it would only bill the
+    client twice for the same mistake.
+    """
+    from src.ingestion_ai import llm as llm_mod
+
+    text = str(exc)
+    return (
+        llm_mod.TRUNCATED_REPLY_MARKER in text or EMPTY_REPLY_MARKER in text
+    )
+
+
+@dataclass
+class ReadCall:
+    """One read, INCLUDING every attempt it took and what they all cost.
+
+    ``reply`` / ``meta`` describe the attempt that returned. The token and cost
+    fields cover EVERY attempt that came back with usage, so a read that needed
+    the bigger-budget retry is charged for the retry too — the per-run cost and
+    the ``invoice_extract.v2.max_cost_usd`` cap must see that money. ``error``
+    is the failure when the read could not be completed at all (never raised:
+    a failed read is an OUTCOME here, exactly as it is for a document).
+    """
+    reply: dict[str, Any]
+    meta: dict[str, Any]
+    attempts: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    cost_usd: Optional[float] = None
+    retried: bool = False
+    error: Optional[BaseException] = None
+
+
+def _call_read(
+    *,
+    touchpoint: str,
+    crops: list[crops_mod.Crop],
+    upload_id: Optional[int],
+    document_id: Optional[int],
+    extraction_id: Optional[int],
+    actor: str,
+    timeout: int,
+    db_path=None,
+) -> ReadCall:
+    """Read a document once — re-asking ONCE when the BUDGET, not the model, failed.
+
+    A reply that ran out of output budget is not a wrong answer: it is an answer
+    that never finished. The only correct recovery is to ask again with more
+    room (``READ_RETRY_MAX_TOKENS``), for exactly ``READ_RETRY_ATTEMPTS`` extra
+    attempt(s).
+
+    Both attempts go through ``_call_extract_model``, so the gateway logs,
+    prices and (for a vision leg) paces each one, and both are summed into this
+    record's usage so the run's tokens, cost and cost cap see them. Every other
+    failure returns at once with ``error`` set — the caller decides what to do
+    with a read that did not happen, and never has to guess whether a bigger
+    budget would have helped.
+
+    This is deliberately NOT in the gateway: the gateway serves every AI caller
+    in the platform, and a bigger output budget is a decision about THIS
+    pipeline's wide read prompt, not a platform-wide policy.
+    """
+    call = ReadCall(reply={}, meta={})
+    budget = READ_MAX_TOKENS
+    while True:
+        call.attempts += 1
+        try:
+            reply, meta = _call_extract_model(
+                touchpoint=touchpoint,
+                system_prompt=_SYSTEM_PROMPT,
+                user_prompt=_user_prompt(crops),
+                crops=crops,
+                max_tokens=budget,
+                upload_id=upload_id,
+                document_id=document_id,
+                extraction_id=extraction_id,
+                actor=actor,
+                timeout=timeout,
+                db_path=db_path,
+            )
+        except Exception as exc:  # noqa: BLE001 — classified here, reported by the caller
+            call.error = exc
+            if call.attempts <= READ_RETRY_ATTEMPTS and _read_failure_earns_a_retry(exc):
+                call.retried = True
+                budget = READ_RETRY_MAX_TOKENS
+                continue
+            return call
+
+        call.error = None
+        call.reply = reply if isinstance(reply, dict) else {}
+        call.meta = meta or {}
+        in_tok, out_tok = _usage_of(call.meta)
+        call.input_tokens = _sum_tokens(call.input_tokens, in_tok)
+        call.output_tokens = _sum_tokens(call.output_tokens, out_tok)
+        call.cost_usd = _sum_cost(call.cost_usd, _cost_of(call.meta, db_path=db_path))
+        return call
+
+
 def extract_document(
     document: dict[str, Any],
     file_bytes: bytes,
@@ -709,30 +847,22 @@ def extract_document(
     outcome.crops = len(crop_list)
 
     # ---- 2. read A
-    try:
-        reply_a, meta_a = _call_extract_model(
-            touchpoint=TOUCHPOINT_READ_A,
-            system_prompt=_SYSTEM_PROMPT,
-            user_prompt=_user_prompt(crop_list),
-            crops=crop_list,
-            upload_id=upload_id,
-            document_id=int(document["document_id"]),
-            extraction_id=extraction_id,
-            actor=actor,
-            timeout=cfg.timeout_seconds,
-            db_path=db_path,
-        )
-        outcome.attempts += 1
-    except Exception as exc:  # noqa: BLE001 — a failed read is an outcome, not a crash
-        outcome.error = f"read A failed: {type(exc).__name__}: {exc}"
+    call_a = _call_read(
+        touchpoint=TOUCHPOINT_READ_A, crops=crop_list, upload_id=upload_id,
+        document_id=int(document["document_id"]), extraction_id=extraction_id,
+        actor=actor, timeout=cfg.timeout_seconds, db_path=db_path,
+    )
+    outcome.attempts += call_a.attempts
+    if call_a.error is not None:  # a failed read is an outcome, not a crash
+        outcome.error = f"read A failed: {type(call_a.error).__name__}: {call_a.error}"
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
 
-    read_a = _parse_read(reply_a if isinstance(reply_a, dict) else {})
-    outcome.provider_a = meta_a.get("provider")
-    outcome.model_a = meta_a.get("model")
-    in_a, out_a = _usage_of(meta_a)
-    cost_a = _cost_of(meta_a, db_path=db_path)
+    read_a = _parse_read(call_a.reply)
+    outcome.provider_a = call_a.meta.get("provider")
+    outcome.model_a = call_a.meta.get("model")
+    in_a, out_a = call_a.input_tokens, call_a.output_tokens
+    cost_a = call_a.cost_usd
 
     # ---- 3. read B must be independent
     try:
@@ -744,49 +874,41 @@ def extract_document(
         outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
         return outcome
 
-    try:
-        reply_b, meta_b = _call_extract_model(
-            touchpoint=TOUCHPOINT_READ_B,
-            system_prompt=_SYSTEM_PROMPT,
-            user_prompt=_user_prompt(crop_list),
-            crops=crop_list,
-            upload_id=upload_id,
-            document_id=int(document["document_id"]),
-            extraction_id=extraction_id,
-            actor=actor,
-            timeout=cfg.timeout_seconds,
-            db_path=db_path,
-        )
-        outcome.attempts += 1
-    except Exception as exc:  # noqa: BLE001
-        outcome.error = f"read B failed: {type(exc).__name__}: {exc}"
+    # ---- read B (read A survives if it fails)
+    read_b: ReadResult
+    call_b = _call_read(
+        touchpoint=TOUCHPOINT_READ_B, crops=crop_list, upload_id=upload_id,
+        document_id=int(document["document_id"]), extraction_id=extraction_id,
+        actor=actor, timeout=cfg.timeout_seconds, db_path=db_path,
+    )
+    outcome.attempts += call_b.attempts
+    if call_b.error is not None:
+        # Read B failed — but read A DID read this document. Discarding it would
+        # cost the reviewer everything read A saw: its values, its boxes and its
+        # handwritten annotations. So the document is kept with read A's side of
+        # every field and read B empty — exactly the shape a field already has
+        # when read B is silent on it (reads_agree='missing_b') — and the status
+        # becomes 'partial'. The reason stays on the row, so a document read only
+        # once is never mistaken for one that was read twice.
+        outcome.error = f"read B failed: {type(call_b.error).__name__}: {call_b.error}"
         outcome.input_tokens, outcome.output_tokens = in_a, out_a
         outcome.cost_usd = cost_a
-        outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
-        return outcome
-
-    read_b = _parse_read(reply_b if isinstance(reply_b, dict) else {})
-    outcome.provider_b = meta_b.get("provider")
-    outcome.model_b = meta_b.get("model")
-    if outcome.provider_b and outcome.provider_a and outcome.provider_b == outcome.provider_a:
-        outcome.error = (
-            f"read B was served by '{outcome.provider_b}', the same provider as read A — "
-            "the touchpoint "
-            f"'{TOUCHPOINT_READ_B}' must be assigned a model from a different provider."
-        )
-        in_b, out_b = _usage_of(meta_b)
-        cost_b = _cost_of(meta_b, db_path=db_path)
-        outcome.input_tokens = _sum_tokens(in_a, in_b)
-        outcome.output_tokens = _sum_tokens(out_a, out_b)
-        outcome.cost_usd = _sum_cost(cost_a, cost_b)
-        outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
-        return outcome
-
-    in_b, out_b = _usage_of(meta_b)
-    cost_b = _cost_of(meta_b, db_path=db_path)
-    outcome.input_tokens = _sum_tokens(in_a, in_b)
-    outcome.output_tokens = _sum_tokens(out_a, out_b)
-    outcome.cost_usd = _sum_cost(cost_a, cost_b)
+        read_b = ReadResult(fields={}, annotations=[])
+    else:
+        read_b = _parse_read(call_b.reply)
+        outcome.provider_b = call_b.meta.get("provider")
+        outcome.model_b = call_b.meta.get("model")
+        outcome.input_tokens = _sum_tokens(in_a, call_b.input_tokens)
+        outcome.output_tokens = _sum_tokens(out_a, call_b.output_tokens)
+        outcome.cost_usd = _sum_cost(cost_a, call_b.cost_usd)
+        if outcome.provider_b and outcome.provider_a and outcome.provider_b == outcome.provider_a:
+            outcome.error = (
+                f"read B was served by '{outcome.provider_b}', the same provider as read A — "
+                "the touchpoint "
+                f"'{TOUCHPOINT_READ_B}' must be assigned a model from a different provider."
+            )
+            outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
+            return outcome
 
     # ---- 4. annotations (page coords + placement) BEFORE the guard needs them
     annotations: list[dict[str, Any]] = []
