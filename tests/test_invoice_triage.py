@@ -224,21 +224,43 @@ def test_stitch_duplicate_copy_with_hash_support_is_excluded_not_attached():
     assert unassigned == []
 
 
-def test_stitch_duplicate_copy_with_a_matching_label_is_excluded():
-    """The same label on an earlier page is the other accepted support."""
+def test_stitch_flagged_copy_without_hash_support_is_not_excluded():
+    """The model's flag is NOT enough on its own, and a shared LABEL is not support:
+    the label comes from the same model, and continuation pages of one document
+    legitimately repeat it (pages 7 and 9 of the real bundle)."""
     pages = [
         _page_outcome(1, [_doc(label="HF27071000796346", cn=True)]),
+        # Same label, flagged — but the hash detector did NOT flag this page.
         _page_outcome(2, [_doc(label="HF27071000796346", cp=True,
                                flags=[triage.DUPLICATE_PAGE_FLAG])]),
+        # Same label, flagged, and NOT marked as a continuation.
+        _page_outcome(3, [_doc(label="HF27071000796346",
+                               flags=[triage.DUPLICATE_PAGE_FLAG])]),
     ]
-    # No hash support at all — the label match carries the decision.
     docs, unassigned = triage._stitch(pages)
+    # Page 2 stays a CONTINUATION of page 1's document...
+    assert sorted({r["page"] for r in docs[0].regions}) == [1, 2]
+    # ...and page 3 becomes its own ordinary document, not an excluded copy.
     assert len(docs) == 2
-    assert docs[1].excluded_reason.startswith("duplicate of page 1")
-    assert "label" in docs[1].excluded_reason
-    # The category is NOT rewritten — the document is excluded, which is what
-    # keeps it out of extraction and out of the counts.
-    assert docs[1].category == "tax_invoice"
+    assert [d.ordinal for d in docs] == [1, 2]
+    assert docs[1].first_page == 3 and docs[1].excluded_reason is None
+    assert unassigned == []
+
+
+def test_stitch_statement_pages_with_one_label_stay_one_document():
+    """Pages 7-9 of the real bundle: ONE statement whose last page repeats the
+    label, continues the table and carries an advertisement. No hash support, so
+    the flagged-or-not page stays attached and nothing is excluded."""
+    pages = [
+        _page_outcome(7, [_doc(category="supporting", label="Airtel Wi-Fi Monthly Statement", cn=True)]),
+        _page_outcome(8, [_doc(category="supporting", label="Airtel Wi-Fi Monthly Statement", cp=True)]),
+        _page_outcome(9, [_doc(category="supporting", label="Airtel Wi-Fi Monthly Statement", cp=True)]),
+    ]
+    docs, unassigned = triage._stitch(pages)
+    assert len(docs) == 1
+    assert sorted({r["page"] for r in docs[0].regions}) == [7, 8, 9]
+    assert docs[0].last_page == 9
+    assert docs[0].excluded_reason is None
     assert unassigned == []
 
 
@@ -265,23 +287,26 @@ def test_stitch_model_flag_alone_is_not_a_duplicate():
         _page_outcome(2, [_doc(label="a completely different label", cp=True,
                                flags=[triage.DUPLICATE_PAGE_FLAG])]),
     ]
-    # No hash flag, no matching label.
+    # No hash flag — and a shared LABEL would not help, since it is not
+    # independent evidence.
     docs, _ = triage._stitch(pages)
     assert len(docs) == 1
     assert sorted({r["page"] for r in docs[0].regions}) == [1, 2]
 
 
 def test_stitch_duplicate_copy_is_recorded_once_and_covers_its_page(tmp_path):
-    """An unlabelled copy claim still goes through the coverage invariant."""
+    """A confirmed copy is recorded once and still covers its own page."""
     pages = [
         _page_outcome(1, [_doc(label="INV-1", cn=True)]),
         _page_outcome(2, [_doc(label="INV-1", cp=True,
                                flags=[triage.DUPLICATE_PAGE_FLAG])]),
         _page_outcome(3, [_doc(label="INV-2")]),
     ]
+    pages[1].duplicate_of_page = 1                 # the hash detector's own flag
     docs, unassigned = triage._stitch(pages)       # asserts coverage internally
     assert [d.ordinal for d in docs] == [1, 2, 3]
     assert sorted({r["page"] for r in docs[1].regions}) == [2]   # the copy owns page 2
+    assert docs[1].excluded_reason.startswith("duplicate of page 1")
     assert docs[2].label == "INV-2" and docs[2].excluded_reason is None
     assert unassigned == []
 
@@ -299,20 +324,28 @@ def test_normalizer_keeps_the_duplicate_page_flag():
 
 
 def test_prompt_states_the_statement_rule_and_the_duplicate_copy_rule():
-    """Contract for the two rules added for the page 23 / 30-31 / 7-9 findings."""
+    """Contract for the rules added for the page 23 / 30-31 / 7-11 findings."""
     prompt = triage._SYSTEM_PROMPT
-    # (i) statements are never invoices, whatever they list.
-    assert "Statements, ledgers and passbooks" in prompt
+    # (a) statements and summaries are never invoices, whatever they list, and
+    #     a page that disclaims itself is never a tax invoice.
+    assert "telecom and utility monthly or summary" in prompt
+    assert "are supporting, or not_a_voucher if only " in prompt
     assert "NEVER tax_invoice/no_gst_expense" in prompt
     assert "even with charges or GST" in prompt
-    assert "are supporting" in prompt
-    # (ii) a copy of an earlier page is a flagged document, never a continuation.
+    assert "input tax credit is " in prompt
+    # (b) the same bill twice: only the real Tax Invoice is tax_invoice.
+    assert "One bill seen twice" in prompt
+    assert "is tax_invoice only " in prompt
+    assert "history tables, payment " in prompt
+    # (c) a COPY is a page that repeats an earlier page EXACTLY.
+    assert "EXACTLY and adding nothing new" in prompt
+    assert "are NOT copies" in prompt
     assert triage.DUPLICATE_PAGE_FLAG in prompt
-    assert "COPY" in prompt
     assert "continues_previous=false" in prompt
-    # The prompt must stay inside its length budget: it was 2012 characters
-    # before these two rules, and the ceiling is +15%.
-    assert len(prompt) <= 2314, f"system prompt grew to {len(prompt)} chars"
+    # The prompt must stay inside its length budget: 2012 characters when the
+    # one-document-per-issuer rules landed, 2308 for the statement/copy rules,
+    # and this rewrite of those two rules brings it to 2863.
+    assert len(prompt) <= 2863, f"system prompt grew to {len(prompt)} chars"
 
 
 # ===========================================================================
@@ -411,6 +444,9 @@ def test_duplicate_copy_is_stored_excluded_with_a_decision_log_line(monkeypatch,
     """End to end: a flagged copy of an earlier page is persisted EXCLUDED, with
     its reason on the row and one decision line in the existing audit table."""
     db_path, uid = _fresh_upload(tmp_path, pages=2)
+    # The hash detector must INDEPENDENTLY agree with the model's flag — the
+    # label alone is not evidence — so pin it the way the hash test does.
+    monkeypatch.setattr(triage, "_average_hash", lambda grey: "00000000000000ff")
     _stub(monkeypatch, {
         1: {"rotation_deg": 0, "page_is_blank": False,
             "documents": [_doc(label="INV-1", cn=True)]},

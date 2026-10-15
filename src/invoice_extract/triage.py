@@ -221,9 +221,16 @@ _SYSTEM_PROMPT = (
     "than three is rare — double-check. If two items could differ in issuer or "
     "number, return TWO and add the flag \"unsure_split\".\n"
     "5. Categorise each as exactly one of: tax_invoice, no_gst_expense, "
-    "supporting, ticket, not_a_voucher. Statements, ledgers and passbooks (bank, "
-    "card, loan, credit-limit, payable) are supporting, or not_a_voucher if only "
-    "a notice — NEVER tax_invoice/no_gst_expense, even with charges or GST.\n"
+    "supporting, ticket, not_a_voucher. Statements and summaries — bank, card, "
+    "loan, credit-limit, payable, telecom and utility monthly or summary "
+    "statements, ledgers, passbooks — are supporting, or not_a_voucher if only "
+    "a notice, NEVER tax_invoice/no_gst_expense even with charges or GST; a page "
+    "saying it is a summary, is not a tax invoice, or that input tax credit is "
+    "not available on it is never tax_invoice. One bill seen twice — as a "
+    "statement and as the real Tax Invoice (titled Tax Invoice, with the "
+    "issuer's GST registration number and a tax breakup) — is tax_invoice only "
+    "for the real one: the statement is supporting, its history tables, payment "
+    "details and advertisements included.\n"
     "6. Give each a SHORT label read from the document (e.g. an invoice number, "
     "or \"Ajay General Store slip\").\n"
     "7. continues_next=true when the totals, signature or closing section are NOT "
@@ -236,9 +243,10 @@ _SYSTEM_PROMPT = (
     "10. Include a SHORT quoted evidence snippet for the category.\n"
     "11. A blank page: set page_is_blank and return no documents (rule-2 material "
     "is not blank).\n"
-    f"12. A page repeating an earlier page (same issuer, number, totals) is a "
-    f"COPY: return it with continues_previous=false, flagged "
-    f"\"{DUPLICATE_PAGE_FLAG}\" — never as a continuation.\n"
+    f"12. A page repeating an earlier page EXACTLY and adding nothing new (same "
+    f"issuer, number and figures) is a COPY: return it with "
+    f"continues_previous=false, flagged \"{DUPLICATE_PAGE_FLAG}\". Continuation "
+    f"pages, history tables, payment details and adverts are NOT copies.\n"
 )
 
 _USER_PROMPT_TEMPLATE = (
@@ -829,35 +837,26 @@ def _region(page: int, box: tuple[float, float, float, float], order: int, sourc
 
 
 def _duplicate_copy_of(
-    outcome: PageOutcome, *, flagged: bool, label: str, docs: list[_Doc],
+    outcome: PageOutcome, *, flagged: bool,
 ) -> tuple[Optional[int], Optional[str]]:
     """(the earlier page this page copies, why) — or ``(None, None)``.
 
     A page is only treated as a copy when the MODEL says so (``DUPLICATE_PAGE_FLAG``)
-    AND something independent supports it:
+    AND the hash detector independently flagged this page against an earlier page.
 
-    * its label repeats the label of a document already placed on an EARLIER page
-      — the same issuer and document number, which is what a copy is; or
-    * the hash detector independently flagged this page against an earlier page.
-
-    Nothing acts on the hash alone: the 64-bit average hash is not reliable
-    (on the real bundle it calls pages 2 and 3 near-identical, and they are two
-    different invoices), so a bare hash match keeps today's behaviour — a flag
-    on the page row and nothing more. Nothing acts on the model flag alone
-    either: an unsupported "duplicate_page" is left as a normal document.
+    NOTHING else counts as support. In particular the document's LABEL is not
+    evidence: it comes from the same model that set the flag, and continuation
+    pages legitimately repeat the label of the document they continue (pages 7
+    and 9 of the real bundle are one statement and share its label). Nothing
+    acts on the hash alone either — the 64-bit average hash is not reliable (it
+    calls pages 2 and 3 near-identical, and they are different invoices), so a
+    bare hash match keeps the old behaviour: a flag on the page row, nothing
+    more. And nothing acts on the model flag alone.
     """
     if not flagged:
         return None, None
-    wanted = label.strip().lower()
-    if wanted:
-        for d in docs:
-            if d.label and d.label.strip().lower() == wanted and d.first_page < outcome.page:
-                return (
-                    d.first_page,
-                    f"its label {label!r} repeats that of the document on page {d.first_page}",
-                )
     if outcome.duplicate_of_page is not None and outcome.duplicate_of_page < outcome.page:
-        return outcome.duplicate_of_page, "the page hash matches that page"
+        return outcome.duplicate_of_page, "the page hash matches that earlier page"
     return None, None
 
 
@@ -912,12 +911,12 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
             cont_prev = bool(entry.get("continues_previous"))
 
             duplicate_of, duplicate_why = _duplicate_copy_of(
-                outcome, flagged=DUPLICATE_PAGE_FLAG in flags, label=label, docs=docs,
+                outcome, flagged=DUPLICATE_PAGE_FLAG in flags,
             )
             if duplicate_of is not None:
-                # A COPY of paper this bundle already carries. It is NOT a
-                # continuation (attaching it would put the same page inside a
-                # document twice — page 9 of the real bundle did exactly that)
+                # A COPY of paper this bundle already carries: the model said so
+                # AND the hash detector agrees. It is NOT a continuation
+                # (attaching it would put the same page inside a document twice)
                 # and NOT an extractable document (it would be read and counted
                 # twice), so it becomes its own EXCLUDED document whose reason
                 # names the page it copies. Checked BEFORE the continuation
