@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 import reflex as rx
 
 from src.clients import service as clients
+from src.invoice_extract import checks as checks_mod
 from src.invoice_extract import confidence as confidence_mod
 from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import doc_actions
@@ -44,6 +45,12 @@ from src.invoice_extract import rules as rules_mod
 from src.invoice_extract import service as ie
 from src.invoice_extract import triage as triage_mod
 from setu.foundation import tokens as t
+from setu.state.review_glossary import (
+    hint_for,
+    label_for,
+    meaning_for,
+    reason_text,
+)
 from setu.state.shared_upload import SharedUploadState, drop_completed
 from setu.state.upload_stage import (
     STAGE_ATTENTION,
@@ -68,11 +75,14 @@ ACTION_NOT_PRINTED = "marked_not_printed"
 ACTION_NOT_APPLICABLE = "marked_not_applicable"
 
 #: The reason chips a settled edit offers first; free text rides alongside.
+#: The labels are plain words: the code is what the record stores, the label is
+#: what the reviewer reads (see ``review_glossary.REASON_TEXT`` for the long
+#: version of each).
 EDIT_REASONS = (
-    ("correct", "Correct as read"),
-    ("ocr_error", "OCR slipped"),
-    ("wrong_reader", "Wrong reader used"),
-    ("other", "Other"),
+    ("correct", "It is right as read"),
+    ("ocr_error", "Setu misread it"),
+    ("wrong_reader", "The wrong reader was used"),
+    ("other", "Another reason"),
 )
 
 CATEGORY_LABELS = {
@@ -89,6 +99,11 @@ NEEDS_YOU_TITLES = {
     "below_threshold": "This value scored below the threshold",
     "direction_unsettled": "Which way does this invoice go?",
 }
+
+#: Friendly names for the checks, used when a check card has no single field to
+#: name (checks_mod.CHECK_LABELS stays the source for the checks strip).
+#: One source: the same dict the engine uses for a FAILED check's headline.
+CHECK_TITLES: dict[str, str] = dict(checks_mod.REVIEW_FAIL_TITLES)
 
 #: Plain words for a document that was skipped by design (no value extraction).
 PLAIN_NOTES = {
@@ -149,6 +164,35 @@ def _dmy(iso: str) -> str:
     if len(parts) != 3 or not all(parts):
         return ""
     return f"{parts[2]}-{parts[1]}-{parts[0]}"
+
+
+def _box_tuple(row: dict):
+    """A {page,x,y,w,h} row as the (x, y, w, h) tuple the geometry helpers want.
+
+    None when the row carries no usable box, so a caller never compares a
+    degenerate rectangle against a real one.
+    """
+    try:
+        box = (
+            float(row.get("x") or 0.0), float(row.get("y") or 0.0),
+            float(row.get("w") or 0.0), float(row.get("h") or 0.0),
+        )
+    except (TypeError, ValueError):
+        return None
+    return box if box[2] > 0 and box[3] > 0 else None
+
+
+def _looks_like_a_field_key(value: str) -> bool:
+    """Is this string one of the extraction's field keys?
+
+    Used to keep stored check inputs from printing raw keys at a reviewer: a
+    key list is shown as "3 field(s)", because the card names the fields in
+    plain words beside it.
+    """
+    key = str(value or "")
+    if not key:
+        return False
+    return key in fv2.INVOICE_KEYS or key.startswith("line.") or key.startswith("invoice_")
 
 
 def _is_date_field(field_key: str) -> bool:
@@ -324,6 +368,22 @@ class DocRow:
 
 
 @dataclass
+class HandwritingSuggestion:
+    """A handwritten reading Setu can offer for one empty field.
+
+    It is a SUGGESTION and nothing more: the reviewer presses "Use this
+    reading" to put it in the box, and the value still only becomes a decision
+    when Confirm is pressed. Handwriting is never a value on its own.
+    """
+
+    field_key: str = ""
+    label: str = ""
+    input_key: str = ""
+    reading: str = ""
+    is_date: bool = False
+
+
+@dataclass
 class CardRow:
     """One needs-you decision card."""
 
@@ -342,6 +402,12 @@ class CardRow:
     page: int = 0
     handwriting_text: str = ""
     has_handwriting: bool = False
+    #: Plain words: the friendly meaning of the field, under the title.
+    hint: str = ""
+    #: The kind of problem, in plain words ("A required value is not there").
+    kind_label: str = ""
+    #: Handwritten readings offered for the empty fields this card is about.
+    suggestions: list[HandwritingSuggestion] = dc_field(default_factory=list)
 
     #: The input box this card owns, keyed by DOCUMENT + field (never the
     #: field key alone — two documents can both ask about `invoice_total`).
@@ -377,6 +443,8 @@ class ValueRow:
     handwriting_text: str = ""
     why: str = ""
     edited_was: str = ""
+    #: The field's plain meaning, for the info icon beside the value.
+    hint: str = ""
 
 
 @dataclass
@@ -594,6 +662,9 @@ class InvoiceReviewState(SharedUploadState):
     can_mark_reviewed: bool = False
     refusal: str = ""
     flash: str = ""
+    #: A short line about what just happened ("Marked reviewed — now on document
+    #: 3 of 22"), shown above the document and cleared on the next move.
+    notice: str = ""
     error: str = ""
     #: Which card on the right the viewer's heavy box belongs to.
     focused_field_key: str = ""
@@ -608,6 +679,9 @@ class InvoiceReviewState(SharedUploadState):
     regions_cache: dict = {}
     #: field_key -> {page, x, y, w, h} for EVERY field of the open document.
     field_boxes: dict = {}
+    #: The open document's handwriting annotations (page, box, text). Private:
+    #: the screen reads it, the frontend never needs it.
+    _annotations: list[dict] = []
     #: The open document's raw check rows (detail + inputs), for the cards.
     check_rows_raw: list[dict] = []
     batch_name: str = ""
@@ -1039,12 +1113,14 @@ class InvoiceReviewState(SharedUploadState):
         self.settled = []
         self.check_rows_raw = []
         self.field_boxes = {}
+        self._annotations = []
         self.field_inputs = {}
         self.edited_was = {}
         self.open_reason_for = ""
         self.drawer_open = False
         self.refusal = ""
         self.flash = ""
+        self.notice = ""
         self._load_upload()
         self._load_review(first=True)
 
@@ -1074,6 +1150,7 @@ class InvoiceReviewState(SharedUploadState):
         self.checks = []
         self.check_rows_raw = []
         self.field_boxes = {}
+        self._annotations = []
         self.field_inputs = {}
         self.input_warnings = {}
         self.date_inputs = {}
@@ -1083,11 +1160,16 @@ class InvoiceReviewState(SharedUploadState):
         self.drawer_open = False
         self.refusal = ""
         self.flash = ""
+        # The short line about the last action belongs to the review screen: a
+        # move-on line set AFTER this call (mark reviewed) still shows.
+        self.notice = ""
+        self.notice = ""
         self.view_regions = []
         self.view_page_chips = []
         self.page_srcs = {}
         self.page_info_rows = []
         self.regions_cache = {}
+        self._annotations = []
         self._load_jobs()
 
     def _load_upload(self) -> None:
@@ -1238,6 +1320,7 @@ class InvoiceReviewState(SharedUploadState):
                 break
         self.refusal = ""
         self.flash = ""
+        self.notice = ""
         self.open_reason_for = ""
         self.drawer_open = False
         # The typed text belongs to the document it was typed on: a new
@@ -1285,6 +1368,7 @@ class InvoiceReviewState(SharedUploadState):
         try:
             model = rules_mod.get_review_model(self.current_document_id, order=order)
         except Exception as exc:  # noqa: BLE001
+            self._annotations = []
             # A document with no extraction yet is a normal state mid-run — and
             # the header must NOT keep the previous document's words while the
             # viewer already shows this one's pages (seen in a screenshot pass).
@@ -1330,6 +1414,9 @@ class InvoiceReviewState(SharedUploadState):
         self.page_tag = self._page_tag(doc)
         self.refusal = "" if not doc.excluded else f"Excluded: {doc.excluded_reason or 'no reason recorded'}"
         self._load_page_line(doc)
+        # The document's handwriting annotations (text + box): the cards offer
+        # them as a SUGGESTION for an empty field, never as a value.
+        self._annotations = [dict(a) for a in (model.get("annotations") or [])]
         self.checks = [
             CheckLine(
                 check_key=str(chk["check_key"]),
@@ -1398,7 +1485,7 @@ class InvoiceReviewState(SharedUploadState):
             reason = str(item.get("reason") or "no reason recorded")
             self.not_applicable.append(ValueRow(
                 field_key=str(item["field_key"]),
-                label=_field_label(str(item["field_key"])),
+                label=label_for(str(item["field_key"])),
                 tag="not_applicable",
                 # The reason is the RULE's own words, quoted as stored (for
                 # example "inter-state supply (Delhi to Uttar Pradesh)").
@@ -1480,7 +1567,7 @@ class InvoiceReviewState(SharedUploadState):
         kind = str(item.get("kind") or "")
         field_key = str(item.get("field_key") or "")
         card = CardRow(kind=kind, title=NEEDS_YOU_TITLES.get(kind, kind), field_key=field_key)
-        card.label = _field_label(field_key) if field_key else ""
+        card.label = label_for(field_key) if field_key else ""
         card.field_id = int(item.get("field_id") or 0)
         card.value = str(item.get("value") or "")
         card.page = int(item.get("page") or doc.first_page or 1)
@@ -1488,7 +1575,17 @@ class InvoiceReviewState(SharedUploadState):
         card.detail = str(item.get("detail") or "")
         card.check_key = str(item.get("check_key") or "")
         card.implicated = [str(k) for k in (item.get("fields_implicated") or [])]
-        card.implicated_labels = [_field_label(k) for k in card.implicated]
+        # The chips, the title and the hint are the GLOSSARY's words now, not
+        # the raw keys: "Line 2 · hsn_sac" reads as "Line 2 — HSN/SAC code".
+        card.implicated_labels = [label_for(k) for k in card.implicated]
+        card.kind_label = NEEDS_YOU_TITLES.get(kind, kind)
+        friendly = ""
+        if field_key:
+            friendly = label_for(field_key)
+            card.title = friendly
+        elif card.check_key:
+            card.title = CHECK_TITLES.get(card.check_key, card.check_key.replace("_", " ").title())
+        card.hint = hint_for(field_key) if field_key else ""
         if card.kind == "check_failed":
             # A failed check's detail renders once, in its own branch; it must
             # NOT also stand in for `reason`, or the same long sentence showed
@@ -1496,7 +1593,15 @@ class InvoiceReviewState(SharedUploadState):
             card.reason = str(item.get("reason") or "")
             self._explain_check(card)
         else:
-            card.reason = str(item.get("reason") or item.get("detail") or "")
+            card.reason = reason_text(kind, field_label=card.title) or str(
+                item.get("reason") or item.get("detail") or ""
+            )
+        # A handwriting card (or a missing date/amount) can offer the reading of
+        # the figure that is written there — as a SUGGESTION the reviewer uses
+        # with one click and still has to confirm.
+        suggested = list(card.implicated) or ([field_key] if field_key else [])
+        if card.kind in ("check_failed", "missing_required", "below_threshold"):
+            card.suggestions = self._handwriting_suggestions(suggested)
         handwriting = item.get("handwriting") or None
         if handwriting:
             card.has_handwriting = True
@@ -1593,9 +1698,12 @@ class InvoiceReviewState(SharedUploadState):
         )
         if row is None:
             return
-        # The card is titled with the CAUSE (the check's own label), not with
-        # "a check did not pass".
-        card.title = str(row.get("label") or card.title or card.check_key)
+        # The card is titled with the FAILURE in plain words (the check's own
+        # positive name is what HOLDS, and would read as nonsense over a red
+        # cross); the check key is the fallback.
+        card.title = CHECK_TITLES.get(
+            card.check_key, str(row.get("label") or card.title or card.check_key)
+        )
         inputs = row.get("inputs") or {}
         if card.check_key == "provenance_in_region":
             # A plain sentence with readable field labels — NEVER the raw
@@ -1616,9 +1724,15 @@ class InvoiceReviewState(SharedUploadState):
                 label = str(key).replace("_", " ")
                 if isinstance(value, (list, tuple)):
                     items = [str(v) for v in value]
-                    shown = ", ".join(items[:5])
-                    more = len(items) - len(items[:5])
-                    parts.append(f"{label}: {shown}" + (f" (+{more} more)" if more else ""))
+                    if items and all(_looks_like_a_field_key(v) for v in items):
+                        # A list of FIELD KEYS is named on the card in plain
+                        # words instead (see implicated_labels) — repeating them
+                        # here as raw keys was what made the box unreadable.
+                        parts.append(f"{label}: {len(items)} field(s)")
+                    else:
+                        shown = ", ".join(items[:5])
+                        more = len(items) - len(items[:5])
+                        parts.append(f"{label}: {shown}" + (f" (+{more} more)" if more else ""))
                 else:
                     parts.append(f"{label}: {value}")
             card.figures = " · ".join(parts)
@@ -1635,7 +1749,7 @@ class InvoiceReviewState(SharedUploadState):
         row = ValueRow(
             field_key=field_key,
             field_id=int(item.get("field_id") or 0),
-            label=_field_label(field_key),
+            label=label_for(field_key),
             value=str(item.get("value") or ""),
             score_label="" if score is None else str(int(round(float(score)))),
             # A HUMAN decision carries its own words ("You confirmed" /
@@ -1643,6 +1757,8 @@ class InvoiceReviewState(SharedUploadState):
             tag=str(item.get("human_label") or ""),
             page=int(item.get("page") or 0),
             edited_was=self.edited_was.get(field_key, ""),
+            # The info icon beside the value shows this, in the glossary's words.
+            hint=hint_for(field_key) or meaning_for(field_key),
         )
         handwriting = item.get("handwriting") or None
         if handwriting:
@@ -2138,15 +2254,132 @@ class InvoiceReviewState(SharedUploadState):
 
     @rx.event
     def mark_reviewed(self):
+        """Mark this document reviewed and MOVE ON to the next one.
+
+        The move follows document order: the first not-yet-reviewed, not-excluded
+        document after this one; failing that the first earlier one; failing that
+        the whole file is done and the screen goes back to the Files list with a
+        line saying so. It never raises on a short, empty or stale list.
+        """
         if self.open_read_only:
             self.refusal = "This file has been exported — its history must not move."
             return
         try:
             doc_actions.mark_reviewed(self.current_document_id, actor=self._actor())
-            self.flash = "Marked reviewed."
         except Exception as exc:  # noqa: BLE001
             self.refusal = str(exc)
+            self._load_review()
+            return
         self._load_review()
+        target = self._next_unreviewed_index()
+        if target is None:
+            self.back_to_files()
+            self.notice = "All documents in this file are reviewed"
+            return
+        doc = self.documents[target]
+        self._select(doc.document_id)
+        self.notice = (
+            f"Marked reviewed — now on document {doc.ordinal} of {len(self.documents)}"
+        )
+
+    def _next_unreviewed_index(self):
+        """The next document to review after this one, wrapping once, else None.
+
+        Document order, not "next issue": the first not-yet-reviewed and not
+        excluded document after the current one, then the first earlier one.
+        Bounds-safe: an empty list or an index left over from another document
+        answers None rather than indexing.
+        """
+        count = len(self.documents)
+        if count == 0:
+            return None
+        if 0 <= self.current_index < count:
+            order = list(range(self.current_index + 1, count)) + list(range(0, self.current_index))
+        else:
+            order = list(range(count))
+        for index in order:
+            doc = self.documents[index]
+            if not doc.reviewed and not doc.excluded:
+                return index
+        return None
+
+    @rx.event
+    def use_handwriting_reading(self, input_key: str, reading: str, is_date: bool = False):
+        """Put a handwritten reading in the box — as a DRAFT, never as a value.
+
+        This is a suggestion the reviewer accepts with one click and then still
+        has to Confirm; Setu's rule that a handwritten figure is never a value
+        without a human decision is unchanged (nothing is logged as a decision
+        here, and Confirm is the only thing that writes one).
+        """
+        text = str(reading or "").strip()
+        if not text or not input_key:
+            return
+        if is_date:
+            iso = _iso_from_guess(text)
+            self.date_inputs = {**self.date_inputs, input_key: iso or ""}
+            self.date_labels = {**self.date_labels, input_key: _dmy(iso) if iso else text}
+            self.field_inputs = {**self.field_inputs, input_key: iso or text}
+        else:
+            self.field_inputs = {**self.field_inputs, input_key: text}
+        self.input_warnings = {
+            **self.input_warnings,
+            input_key: "From the handwriting — press Confirm if it is right.",
+        }
+
+    def _handwriting_suggestions(self, field_keys: list[str]) -> list[HandwritingSuggestion]:
+        """The handwritten reading offered for each EMPTY field, from storage.
+
+        An annotation stores the text it carries AND its box, so the reading is
+        found by geometry: the annotation whose box sits over the field's own
+        box on the same page. A value is never taken from it here.
+        """
+        out: list[HandwritingSuggestion] = []
+        if not self._annotations:
+            return out
+        for key in field_keys:
+            if not key or self._value_of(key):
+                continue  # a field that already has a value needs no suggestion
+            reading = self._annotation_text_over(key)
+            if not reading:
+                continue
+            out.append(HandwritingSuggestion(
+                field_key=key,
+                label=label_for(key),
+                input_key=f"{self.current_document_id}:{key}",
+                reading=reading,
+                is_date=_is_date_field(key),
+            ))
+        return out
+
+    def _value_of(self, field_key: str) -> str:
+        for card in self.cards:
+            if card.field_key == field_key and (card.read_a or card.read_b or card.best_guess):
+                return card.read_a or card.read_b or card.best_guess
+        return ""
+
+    def _annotation_text_over(self, field_key: str) -> str:
+        """The text of the annotation written over this field's box, if any."""
+        box = self.field_boxes.get(field_key)
+        if not box:
+            return ""
+        page = int(box.get("page") or 0)
+        target = _box_tuple(box)
+        if target is None:
+            return ""
+        best, best_ratio = "", 0.0
+        for ann in self._annotations:
+            if int(ann.get("page") or 0) != page:
+                continue
+            other = _box_tuple(ann)
+            if other is None:
+                continue
+            # Geometry, not guessing: the annotation whose box covers most of
+            # the field's own box is the one written on it.
+            ratio = crops_mod.overlap_ratio_of(target, other)
+            if ratio > best_ratio:
+                best, best_ratio = str(ann.get("text_verbatim") or ""), ratio
+        return best if best_ratio > 0 else ""
 
     @rx.event
     def unmark_reviewed(self):

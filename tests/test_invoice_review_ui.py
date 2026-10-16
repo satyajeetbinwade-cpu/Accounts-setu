@@ -255,11 +255,12 @@ def test_marking_one_reviewed_moves_both_numbers(scratch):
     clean = doc_of(state, 3)
     state._select(clean.document_id)
     state.mark_reviewed()
-    state._load_review()
-    assert not state.cards
     assert state.to_review_count == before - 1
     assert state.reviewed_count == 1
-    assert state.flash
+    # The screen MOVES ON, and says where it went.
+    assert state.current_document_id != clean.document_id
+    assert state.notice.startswith("Marked reviewed — now on document ")
+    assert f"of {len(state.documents)}" in state.notice
 
 
 # ===========================================================================
@@ -772,3 +773,213 @@ def test_the_focused_box_is_a_thin_outline_not_a_fill():
 
     # The change is scoped to the focus marker; the other boxes keep their fill.
     assert review_state_mod._box_style("active")["background"] != "transparent"
+
+
+# ===========================================================================
+# 12. Mark reviewed MOVES ON — document order, then wrap, then Files
+# ===========================================================================
+
+
+def _mark_reviewed_for_setup(document_id: int) -> None:
+    """SETUP ONLY: write the reviewed flag with the "no open questions" gate
+    lifted, so a navigation test can build a file where the documents left over
+    are exactly the ones under test. The gate itself is exercised elsewhere."""
+    from src.invoice_extract import rules as rules_mod
+
+    original = rules_mod.get_review_model
+    rules_mod.get_review_model = lambda *_a, **_kw: {"needs_you": []}
+    try:
+        doc_actions.mark_reviewed(document_id, actor="test:setup")
+    finally:
+        rules_mod.get_review_model = original
+
+
+def test_mark_reviewed_moves_to_the_next_unreviewed_in_document_order(scratch):
+    state = open_upload(new_state())
+    # Documents 3 and 4 are the demo's clean ones; 1, 2, 5, 6 are settled first.
+    for ordinal in (1, 2, 5, 6):
+        _mark_reviewed_for_setup(doc_of(state, ordinal).document_id)
+    state._load_review()
+    third, fourth = doc_of(state, 3), doc_of(state, 4)
+    state._select(third.document_id)
+    state.mark_reviewed()
+    assert state.current_document_id == fourth.document_id
+    assert state.notice == (
+        f"Marked reviewed — now on document {fourth.ordinal} of {len(state.documents)}"
+    )
+
+
+def test_mark_reviewed_wraps_to_the_first_earlier_unreviewed(scratch):
+    state = open_upload(new_state())
+    # Everything AFTER document 4 is settled; document 2 is the only earlier one
+    # still open — and document 8 is excluded, so it is not a target.
+    for ordinal in (1, 5, 6, 7):
+        _mark_reviewed_for_setup(doc_of(state, ordinal).document_id)
+    state._load_review()
+    second, fourth = doc_of(state, 2), doc_of(state, 4)
+    assert not second.reviewed and not second.excluded
+    state._select(fourth.document_id)
+    state.mark_reviewed()
+    assert state.current_document_id == second.document_id
+    assert state.notice == (
+        f"Marked reviewed — now on document {second.ordinal} of {len(state.documents)}"
+    )
+
+
+def test_mark_reviewed_on_the_last_one_returns_to_the_files_list(scratch):
+    state = open_upload(new_state())
+    for ordinal in (1, 2, 5, 6, 7):
+        _mark_reviewed_for_setup(doc_of(state, ordinal).document_id)
+    state._load_review()
+    state._select(doc_of(state, 3).document_id)
+    state.mark_reviewed()          # -> 4
+    state.mark_reviewed()          # nothing after 4, nothing earlier open
+    assert state.notice == "All documents in this file are reviewed"
+    assert state.current_document_id == 0
+    assert state.documents == []
+
+
+def test_the_next_document_rule_is_bounds_safe_on_short_empty_and_stale_lists(scratch):
+    state = open_upload(new_state())
+    state.documents = []
+    state.current_index = 4
+    assert state._next_unreviewed_index() is None
+
+    state = goto(open_upload(new_state()), 3)
+    state.current_index = 99                       # stale index, real list
+    assert state._next_unreviewed_index() == 0
+
+    # A list shorter than the stored index, with everything on it reviewed.
+    state.documents = state.documents[:1]
+    state.documents[0].reviewed = True
+    state.current_index = 99
+    assert state._next_unreviewed_index() is None
+
+
+def test_mark_reviewed_never_raises_when_the_lists_are_gone(scratch):
+    state = new_state()
+    state.documents = []
+    state.current_document_id = 0
+    state.current_index = 7
+    state.mark_reviewed()          # the refusal is the answer, not an exception
+    assert state.refusal or state.notice
+
+
+# ===========================================================================
+# 13. A handwritten reading is OFFERED, never accepted
+# ===========================================================================
+
+
+def _cover_the_card_with_handwriting(state, text: str = "7337"):
+    """Give the current card's field a box and one annotation sitting on it."""
+    card = state.cards[0]
+    box = dict(state.field_boxes.get(card.field_key)
+               or {"page": 1, "x": 0.40, "y": 0.40, "w": 0.10, "h": 0.03})
+    state.field_boxes = {**state.field_boxes, card.field_key: box}
+    state._annotations = [{
+        "page": int(box["page"]),
+        "x": float(box["x"]) + 0.01,
+        "y": float(box["y"]),
+        "w": float(box["w"]) - 0.02,
+        "h": float(box["h"]),
+        "text_verbatim": text,
+        "kind_guess": "handwriting",
+    }]
+    return card
+
+
+def test_a_handwritten_reading_is_offered_for_the_field_it_covers(scratch):
+    state = goto(open_upload(new_state()), 1)
+    card = _cover_the_card_with_handwriting(state)
+    offers = state._handwriting_suggestions([card.field_key])
+    assert [o.field_key for o in offers] == [card.field_key]
+    assert offers[0].reading == "7337"
+    assert offers[0].label == card.label, "the offer names the field in plain words"
+    assert offers[0].input_key == card.input_key
+    assert offers[0].is_date == card.is_date
+
+    # Geometry is the rule: on another page, the same annotation is not a
+    # reading for this field.
+    ann = dict(state._annotations[0], page=int(state._annotations[0]["page"]) + 5)
+    state._annotations = [ann]
+    assert state._handwriting_suggestions([card.field_key]) == []
+
+    # And a field that already has a read is not offered a reading.
+    state._annotations = [dict(ann, page=card.page or 1,
+                               x=0.40, y=0.40, w=0.10, h=0.03)]
+    state.field_boxes = {**state.field_boxes, "invoice_number": {
+        "page": card.page or 1, "x": 0.40, "y": 0.40, "w": 0.10, "h": 0.03}}
+    assert state._handwriting_suggestions(["invoice_number"]) != []
+    state.cards = [review_state_mod.CardRow(
+        field_key="invoice_number", input_key="1:invoice_number", read_a="KMAP/1",
+    )]
+    assert state._handwriting_suggestions(["invoice_number"]) == []
+
+
+def test_using_a_handwritten_reading_fills_the_box_and_settles_nothing(scratch, monkeypatch):
+    state = goto(open_upload(new_state()), 1)
+    card = _cover_the_card_with_handwriting(state)
+    seen = capture_corrections(monkeypatch)
+
+    offer = state._handwriting_suggestions([card.field_key])[0]
+    assert (state.field_inputs.get(card.input_key) or "") == ""
+    state.use_handwriting_reading(offer.input_key, offer.reading, offer.is_date)
+
+    assert state.field_inputs[card.input_key] == "7337"
+    assert "Confirm" in state.input_warnings[card.input_key]
+    # NOT a decision: nothing was logged, and the card still asks.
+    assert seen == []
+    assert any(c.field_key == card.field_key for c in state.cards)
+
+    # The reviewer's own Confirm is what writes the decision — the ordinary
+    # path, read back from the log table itself.
+    state.confirm_card(card.input_key)
+    conn = sqlite3.connect(scratch)
+    rows = conn.execute(
+        "SELECT value_after FROM invoice_field_corrections WHERE document_id = ?",
+        (state.current_document_id,),
+    ).fetchall()
+    conn.close()
+    assert rows and any("7337" in str(row[0]) for row in rows)
+
+
+def test_using_an_empty_or_unknown_reading_writes_nothing(scratch):
+    state = goto(open_upload(new_state()), 1)
+    card = _cover_the_card_with_handwriting(state)
+    state.use_handwriting_reading(card.input_key, "   ")
+    state.use_handwriting_reading("", "7337")
+    assert (state.field_inputs.get(card.input_key) or "") == ""
+    assert card.input_key not in state.input_warnings
+
+
+def test_a_handwritten_date_reading_cannot_put_a_bogus_date_in_the_picker(scratch):
+    state = goto(open_upload(new_state()), 1)
+    date_card = review_state_mod.CardRow(
+        kind="missing_required", field_key="invoice_date",
+        input_key=f"{state.current_document_id}:invoice_date", is_date=True,
+    )
+    state.cards = [date_card]
+
+    # A reading that is not a date must not become one: the picker stays empty
+    # and the words land in the text box, where Confirm still owns them.
+    state.use_handwriting_reading(date_card.input_key, "CASH MEMO", True)
+    assert state.date_inputs.get(date_card.input_key, "") == ""
+    assert state.field_inputs[date_card.input_key] == "CASH MEMO"
+
+    # A real date goes into the picker as ISO, shown as dd-mm-yyyy.
+    state.use_handwriting_reading(date_card.input_key, "03-04-2026", True)
+    assert state.date_inputs[date_card.input_key] == "2026-04-03"
+    assert state.date_labels[date_card.input_key] == "03-04-2026"
+    assert state.field_inputs[date_card.input_key] == "2026-04-03"
+
+
+def test_the_move_on_line_is_rendered_above_the_files_review_branch():
+    """The "all documents reviewed" line arrives WITH the return to the Files
+    list, so it has to be rendered above the branch, not inside the review
+    screen — otherwise the reviewer lands on Files and sees nothing."""
+    source = Path(review_state_mod.__file__).parent.parent / "views" / "invoice_review_page.py"
+    text = source.read_text()
+    flow = text.split("def invoice_review_flow")[1].split("def invoice_files_view")[0]
+    assert "S.notice" in flow
+    screen = text.split("def invoice_review_screen")[1]
+    assert "S.notice" not in screen, "the line is rendered once, in the flow"

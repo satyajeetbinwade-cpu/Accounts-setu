@@ -211,6 +211,42 @@ def test_handwriting_guard_fails_on_a_handwritten_total():
     assert result.inputs["annotations"] == 0
 
 
+def test_handwriting_fail_detail_is_plain_words_not_a_list_of_keys():
+    """The card shows this detail: no raw keys, no "(None)" inside it.
+
+    A flagged value can have NO value at all (handwriting only, nothing
+    printed), and the old wording spelled that out as "invoice_total = None"
+    in the middle of a sentence a reviewer had to read.
+    """
+    ctx = context(raw_fields={
+        "invoice_total": {"value_a": None, "value_b": None, "status": "needs_printed",
+                          "is_handwritten": 1},
+        "taxable_value": {"value_a": "6,825.00", "value_b": "6,825.00"},
+    })
+    result = by_key(ck.run_all(ctx))["handwriting_guard"]
+    assert result.status == "fail"
+    assert result.detail.startswith("Amounts on this document are handwritten")
+    for leak in ("None", "invoice_total", "value_a", "{"):
+        assert leak not in result.detail, f"{leak!r} leaks into the reviewer's words"
+    # The keys still travel in the machine-readable parts of the result.
+    assert result.inputs["flagged"] == ["invoice_total"]
+    assert result.fields_implicated == ("invoice_total",)
+
+
+def test_handwriting_check_name_is_positive_and_its_failure_has_its_own_words():
+    assert ck.CHECK_LABELS["handwriting_guard"] == "Amounts are printed, not handwritten"
+    assert ck.REVIEW_FAIL_TITLES["handwriting_guard"] == "Amounts on this document are handwritten"
+    ctx = context(raw_fields={
+        "invoice_total": {"value_a": "7,370", "status": "needs_printed", "is_handwritten": 1},
+    })
+    passed = by_key(ck.run_all(context(values={"invoice_total": "7,370",
+                                               "taxable_value": "6,825.00"})))["handwriting_guard"]
+    assert passed.status == "pass"
+    assert passed.detail.startswith("All 2 amount(s) on this document are printed")
+    assert "None" not in passed.detail
+    assert by_key(ck.run_all(ctx))["handwriting_guard"].status == "fail"
+
+
 def test_provenance_check_fails_and_lists_out_of_region_fields():
     ctx = context(raw_fields={
         "invoice_total": {"value_a": "1,180.00", "status": "out_of_region", "in_region": 0},

@@ -545,16 +545,16 @@ def handwriting_guard(ctx: DocContext) -> CheckResult:
     if flagged:
         return CheckResult(
             "handwriting_guard", CHECK_FAIL,
-            "a handwritten figure sits on or over these monetary value(s), so the PRINTED value must be "
-            "confirmed: " + ", ".join(
-                f"{key} ({ctx.value(key)})" for key in flagged
-            ),
+            f"Amounts on this document are handwritten: {len(flagged)} of the "
+            f"{len(monetary)} amount(s) Setu read. Setu never copies handwriting into your "
+            "records on its own, so a person must confirm each amount.",
             inputs, tuple(flagged),
         )
     return CheckResult(
         "handwriting_guard", CHECK_PASS,
-        f"none of the {len(monetary)} monetary value(s) is handwritten"
-        + (f" (and none overlaps one of the {len(ctx.annotations)} annotation(s))" if ctx.annotations else ""),
+        f"All {len(monetary)} amount(s) on this document are printed"
+        + (f", and none is covered by one of the {len(ctx.annotations)} handwritten note(s) "
+           "Setu found on the page" if ctx.annotations else ""),
         inputs,
     )
 
@@ -575,15 +575,33 @@ CHECKS: tuple[tuple[str, Any], ...] = (
 )
 
 #: Human labels for the review model / report.
+#: The check names a REVIEWER reads (the checks strip and the review cards).
+#: A positive name — what holding means — because the strip shows the state
+#: (green tick / red cross) beside it; the failure has its own words in
+#: ``REVIEW_FAIL_TITLES`` below.
 CHECK_LABELS: dict[str, str] = {
-    "totals_reconcile": "Taxable + tax ± round off equals the invoice total",
-    "tax_equals_rate_times_taxable": "Each printed tax head equals the printed rate × taxable",
-    "derived_rate_on_valid_slab": "The derived rate matches a slab legal on the invoice date",
-    "gstin_valid": "Every printed GSTIN is structurally valid",
-    "state_code_matches_gstin": "The place of supply and the GSTIN state codes are real",
-    "expected_tax_type": "The tax heads printed match the two states (IGST vs CGST+SGST/UTGST)",
-    "provenance_in_region": "Every read value was boxed inside the document",
-    "handwriting_guard": "No monetary value is handwritten",
+    "totals_reconcile": "Taxable value + tax ± round off equals the invoice total",
+    "tax_equals_rate_times_taxable": "Each printed tax amount equals the printed rate × the taxable value",
+    "derived_rate_on_valid_slab": "The tax rate is one the law allows for the invoice date",
+    "gstin_valid": "Every printed GST number is a well-formed GSTIN",
+    "state_code_matches_gstin": "The place of supply matches the GST number's state code",
+    "expected_tax_type": "The right kind of tax was charged (IGST, or CGST + SGST/UTGST)",
+    "provenance_in_region": "Every value came from inside the document",
+    "handwriting_guard": "Amounts are printed, not handwritten",
+}
+
+#: What the review card says when the check FAILS — the plain-words headline
+#: the reviewer acts on. Keyed by the same check keys; a new check must be
+#: added here too (``tests/test_review_plain_language.py`` enforces it).
+REVIEW_FAIL_TITLES: dict[str, str] = {
+    "totals_reconcile": "The totals do not add up",
+    "tax_equals_rate_times_taxable": "A tax amount does not match its rate and taxable value",
+    "derived_rate_on_valid_slab": "The tax rate is not one the law allows for this date",
+    "gstin_valid": "A GST number does not look right",
+    "state_code_matches_gstin": "The state codes do not match the GST number",
+    "expected_tax_type": "The wrong kind of tax was charged",
+    "provenance_in_region": "A value was read from outside the document",
+    "handwriting_guard": "Amounts on this document are handwritten",
 }
 
 

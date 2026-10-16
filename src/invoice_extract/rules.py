@@ -877,6 +877,11 @@ def get_review_model(
             ),
         },
         "aliases": [dict(a) for a in _aliases_public(document.get("client_id"), db_path=db_path)],
+        # The handwriting annotations: their box AND the text a person wrote.
+        # The review screen offers that text as a SUGGESTION for an empty
+        # field — a suggestion the reviewer still has to Confirm. Nothing here
+        # is ever read into a value (see the handwriting guard in checks.py).
+        "annotations": [dict(ann) for ann in annotations],
     }
 
 

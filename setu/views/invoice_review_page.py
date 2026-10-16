@@ -23,6 +23,12 @@ from reflex_components_core.el.elements.typography import Div
 from setu.foundation import components as c
 from setu.foundation import tokens as t
 from setu.state.invoice_review_state import InvoiceReviewState as S
+from setu.state.review_glossary import (
+    BUTTON_HELP,
+    BUTTON_LABEL_CONFIRM,
+    BUTTON_LABEL_NOT_APPLICABLE,
+    BUTTON_LABEL_NOT_PRINTED,
+)
 
 #: Focus target for the Enter / E / N shortcuts, focused on mount.
 HOTKEY_ID = "invoice-review-hotkeys"
@@ -108,6 +114,12 @@ def invoice_review_flow() -> rx.Component:
                 ),
                 rx.fragment(),
             ),
+            # A short line about what just happened on the review screen: "Marked
+            # reviewed — now on document 5 of 23", or, when the last one was
+            # marked, "All documents in this file are reviewed". It sits ABOVE
+            # the branch because that last message arrives together with the
+            # return to the Files list, and a line nobody can see is not a line.
+            rx.cond(S.notice != "", c.info_banner(S.notice), rx.fragment()),
             rx.cond(
                 S.open_upload_id != 0,
                 invoice_review_screen(),
@@ -418,37 +430,44 @@ def _direction_card() -> rx.Component:
                         rx.cond(S.doc_needs_a_human, "Needs you", "Inherited"),
                         tone="warn",
                     ),
-                    rx.text("Which way does this invoice go?", style=t.TEXT["body"], font_weight="700"),
+                    rx.text(
+                        "Is this a bill you PAID, or an invoice you ISSUED?",
+                        style=t.TEXT["body"],
+                        font_weight="700",
+                    ),
                     spacing="2",
                     align="center",
                 ),
                 rx.cond(
                     S.doc_direction_inherited,
                     rx.text(
-                        "This document follows YOUR answer for the rest of this file ("
+                        "You already answered “"
                         + S.doc_direction_label
-                        + "). Answer here to make it this document's own — the others keep theirs.",
+                        + "” for this file, and this document follows that answer. "
+                        "Answer here only if THIS document is different.",
                         style=t.TEXT["micro"],
                         color=t.Color.TEXT_SECONDARY.value,
                     ),
                     rx.cond(
                         S.doc_direction_basis != "",
                         rx.text(
-                            f"Rule says: {S.doc_direction_label} — {S.doc_direction_basis}",
+                            f"Read as {S.doc_direction_label} from the document itself: {S.doc_direction_basis}",
                             style=t.TEXT["micro"],
                             color=t.Color.TEXT_SECONDARY.value,
                         ),
-                        rx.text(f"Rule says: {S.doc_direction_label}", style=t.TEXT["micro"]),
+                        rx.text(f"Read as {S.doc_direction_label} from the document itself.", style=t.TEXT["micro"]),
                     ),
                 ),
                 rx.hstack(
                     c.btn_primary(
-                        "This is a purchase (inward)",
+                        "A bill we PAID (purchase — input tax credit)",
                         on_click=lambda: S.settle_direction("purchase"),
+                        title="Money left your business: a purchase, so input tax credit may apply",
                     ),
                     c.btn_primary(
-                        "This is a sale (outward)",
+                        "An invoice we ISSUED (sale)",
                         on_click=lambda: S.settle_direction("sales"),
+                        title="Money came in to your business: a sale, so output tax applies",
                     ),
                     spacing="2",
                     wrap="wrap",
@@ -490,14 +509,14 @@ def _handwriting_note(card) -> rx.Component:
         card.has_handwriting,
         rx.box(
             rx.text(
-                "A handwritten figure overlaps this value — confirm which is the printed amount.",
+                "A handwritten figure sits on this amount, so the printed amount must be checked.",
                 style=t.TEXT["micro"],
                 font_weight="600",
                 color="#8A5A00",
             ),
             rx.text(
-                "Written on the document: “" + card.handwriting_text + "”  ·  that figure is "
-                "never read as a value here.",
+                "Written on the document: “" + card.handwriting_text + "”  ·  Setu never copies "
+                "handwriting into your records as a value — a person decides.",
                 style=t.TEXT["micro"],
             ),
             background="#FDF4E3",
@@ -505,6 +524,43 @@ def _handwriting_note(card) -> rx.Component:
             border_radius="10px",
             padding="8px 10px",
             width="100%",
+        ),
+        rx.fragment(),
+    )
+
+
+def _suggestions(card) -> rx.Component:
+    """The handwritten reading(s) offered for this card's empty field(s).
+
+    One click puts the reading in the box — and that is ALL it does: Confirm is
+    still the reviewer's act (Setu never accepts handwriting on its own).
+    """
+    return rx.cond(
+        card.suggestions.length() > 0,
+        rx.vstack(
+            rx.text("Written on the document", style=t.TEXT["micro"], font_weight="700"),
+            rx.foreach(
+                card.suggestions,
+                lambda s: rx.hstack(
+                    rx.text(f"Handwritten reading: {s.reading}", style=t.TEXT["micro"]),
+                    rx.text("·", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
+                    rx.text(s.label, style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
+                    rx.spacer(),
+                    c.btn_secondary(
+                        "Use this reading",
+                        on_click=lambda: S.use_handwriting_reading(s.input_key, s.reading, s.is_date),
+                        size="1",
+                        title="Puts this reading in the box — press Confirm if it is right",
+                    ),
+                    width="100%",
+                    align="center",
+                    spacing="2",
+                    wrap="wrap",
+                ),
+            ),
+            spacing="1",
+            width="100%",
+            align="start",
         ),
         rx.fragment(),
     )
@@ -544,8 +600,21 @@ def _card_row(card) -> rx.Component:
                         wrap="wrap",
                     ),
                     rx.cond(
-                        card.label != "",
-                        rx.text(card.label, style=t.TEXT["body"], font_weight="700"),
+                        card.kind_label != "",
+                        rx.text(
+                            card.kind_label,
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_MUTED.value,
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.cond(
+                        card.hint != "",
+                        rx.text(
+                            "What this is: " + card.hint,
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                        ),
                         rx.fragment(),
                     ),
                     rx.cond(
@@ -563,6 +632,7 @@ def _card_row(card) -> rx.Component:
                 spacing="3",
             ),
             _handwriting_note(card),
+            _suggestions(card),
             rx.cond(
                 card.kind == "check_failed",
                 rx.vstack(
@@ -578,14 +648,10 @@ def _card_row(card) -> rx.Component:
                     ),
                     rx.cond(
                         card.figures != "",
-                        rx.box(
-                            rx.text("The figures it compared", style=t.TEXT["micro"], font_weight="700"),
+                        rx.text(
+                            rx.text("The numbers Setu compared: ", style=t.TEXT["micro"], color=t.Color.TEXT_MUTED.value),
                             rx.text(card.figures, style=t.TEXT["micro"]),
-                            padding="6px 8px",
-                            border=f"1px solid {t.Color.BORDER.value}",
-                            border_radius="8px",
-                            background=t.Color.SURFACE.value,
-                            width="100%",
+                            style=t.TEXT["micro"],
                         ),
                         rx.fragment(),
                     ),
@@ -616,15 +682,18 @@ def _card_row(card) -> rx.Component:
                     ),
                     rx.hstack(
                         c.btn_secondary(
-                            "Accept the figures as read",
-                            # Accepting is its OWN act: it records the actor and
-                            # the time on the check row and drops the card — it
-                            # is NOT a value confirmation.
+                            "I have seen the handwritten amounts",
+                            # Acknowledging is its OWN act: it records the actor and
+                            # the time on the check row and drops the card — it is
+                            # NOT a value confirmation, and no amount is filled in.
                             on_click=lambda: S.accept_check(card.check_key),
+                            title="Records that you looked at the handwritten amounts — it does NOT "
+                            "accept them as values",
                         ),
                         c.btn_tertiary(
-                            "Mark not applicable here",
+                            "These amounts are not applicable here",
                             on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
+                            title="This kind of document never needs these amounts",
                         ),
                         spacing="2",
                         wrap="wrap",
@@ -711,16 +780,19 @@ def _card_row(card) -> rx.Component:
                     ),
                     rx.hstack(
                         c.btn_primary(
-                            "Confirm value",
+                            BUTTON_LABEL_CONFIRM,
                             on_click=lambda: S.confirm_card(card.input_key),
+                            title=BUTTON_HELP["confirm"],
                         ),
                         c.btn_secondary(
-                            "Not printed on the document",
+                            BUTTON_LABEL_NOT_PRINTED,
                             on_click=lambda: S.reject_card(card.input_key, "not_on_document"),
+                            title=BUTTON_HELP["not_printed"],
                         ),
                         c.btn_tertiary(
-                            "Not applicable here",
+                            BUTTON_LABEL_NOT_APPLICABLE,
                             on_click=lambda: S.not_applicable_card(card.field_key, "not_applicable_here"),
+                            title=BUTTON_HELP["not_applicable"],
                         ),
                         spacing="2",
                         wrap="wrap",
@@ -882,6 +954,14 @@ def _settled_row(row) -> rx.Component:
                     content=row.why,
                 ),
                 rx.cond(
+                    row.hint != "",
+                    rx.tooltip(
+                        rx.icon("circle-help", size=12, color=t.Color.TEXT_MUTED.value),
+                        content=row.hint,
+                    ),
+                    rx.fragment(),
+                ),
+                rx.cond(
                     row.tag == "derived",
                     _status_chip("Derived", tone="neutral"),
                     rx.cond(
@@ -921,7 +1001,8 @@ def _settled_row(row) -> rx.Component:
             rx.cond(
                 row.handwriting_text != "",
                 rx.text(
-                    f"A handwritten “{row.handwriting_text}” overlaps this value.",
+                    f"A handwritten “{row.handwriting_text}” sits on this value — Setu never "
+                    "copies handwriting into your records as a value.",
                     style=t.TEXT["micro"],
                     color="#8A5A00",
                 ),
@@ -932,16 +1013,18 @@ def _settled_row(row) -> rx.Component:
                 rx.vstack(
                     rx.hstack(
                         rx.button(
-                            "Correct as read",
+                            "It is right as read",
                             on_click=lambda: S.confirm_settled(row.field_key, "correct"),
                             size="1",
                             variant="soft",
+                            title="You checked it against the document and it is right as read",
                         ),
                         rx.button(
-                            "OCR slipped",
+                            "Setu misread it",
                             on_click=lambda: S.confirm_settled(row.field_key, "ocr_error"),
                             size="1",
                             variant="ghost",
+                            title="The reader slipped: the document prints something else",
                         ),
                         spacing="2",
                         wrap="wrap",
