@@ -324,19 +324,23 @@ def test_normalizer_keeps_the_duplicate_page_flag():
 
 
 def test_prompt_states_the_statement_rule_and_the_duplicate_copy_rule():
-    """Contract for the rules added for the page 23 / 30-31 / 7-11 findings."""
+    """Contract for the rules added for the page 23 / 30-31 / 7-11 findings and
+    for the page 5 BSES bill (a BILL is a voucher, a STATEMENT is not)."""
     prompt = triage._SYSTEM_PROMPT
-    # (a) statements and summaries are never invoices, whatever they list, and
-    #     a page that disclaims itself is never a tax invoice.
-    assert "telecom and utility monthly or summary" in prompt
-    assert "are supporting, or not_a_voucher if only " in prompt
-    assert "NEVER tax_invoice/no_gst_expense" in prompt
-    assert "even with charges or GST" in prompt
-    assert "input tax credit is " in prompt
+    # (a) a BILL for the period that shows its charges and the amount due is a
+    #     voucher; a STATEMENT, a summary or a receipt is not.
+    assert "A BILL for one period" in prompt
+    assert "is a voucher" in prompt
+    assert "otherwise no_gst_expense" in prompt
+    assert "Statements and summaries" in prompt
+    assert "a running list of " in prompt and "account activity across periods" in prompt
+    assert "are supporting, as is a payment receipt or acknowledgement" in prompt
+    assert "NEVER tax_invoice/no_gst_expense, even with charges or GST" in prompt
+    assert "input tax credit is not available on it" in prompt
     # (b) the same bill twice: only the real Tax Invoice is tax_invoice.
     assert "One bill seen twice" in prompt
-    assert "is tax_invoice only " in prompt
-    assert "history tables, payment " in prompt
+    assert "is tax_invoice only for the real one" in prompt
+    assert "history tables, payment details and advertisements included" in prompt
     # (c) a COPY is a page that repeats an earlier page EXACTLY.
     assert "EXACTLY and adding nothing new" in prompt
     assert "are NOT copies" in prompt
@@ -344,8 +348,9 @@ def test_prompt_states_the_statement_rule_and_the_duplicate_copy_rule():
     assert "continues_previous=false" in prompt
     # The prompt must stay inside its length budget: 2012 characters when the
     # one-document-per-issuer rules landed, 2308 for the statement/copy rules,
-    # and this rewrite of those two rules brings it to 2863.
-    assert len(prompt) <= 2863, f"system prompt grew to {len(prompt)} chars"
+    # 2863 for the Airtel statement pages, and this bill-versus-statement-versus-
+    # receipt rewrite brings it to 3138.
+    assert len(prompt) <= 3138, f"system prompt grew to {len(prompt)} chars"
 
 
 # ===========================================================================
@@ -378,12 +383,83 @@ def test_normalize_page_rejects_empty_non_blank_reply():
         triage._normalize_page({"page_is_blank": False, "documents": []}, rendered)
 
 
-def test_normalize_page_rejects_unknown_category_and_bad_box():
+def test_normalize_page_rejects_unknown_category_and_a_bad_reply():
     rendered = triage.RenderedPage(page=1, png=b"", px_w=1000, px_h=1000, text_layer_chars=0, content_hash="0")
     with pytest.raises(triage._InvalidPageResponse):
         triage._normalize_page({"documents": [{"category": "banana", "boxes": [{"x": 0, "y": 0, "w": 1, "h": 1}]}]}, rendered)
     with pytest.raises(triage._InvalidPageResponse):
-        triage._normalize_page({"documents": [{"category": "tax_invoice", "boxes": [{"x": 0.1, "y": 0.1, "w": 0, "h": 0.5}]}]}, rendered)
+        triage._normalize_page({"documents": [{"category": "tax_invoice", "boxes": "not a list"}]}, rendered)
+    with pytest.raises(triage._InvalidPageResponse):
+        triage._normalize_page({"documents": "not a list"}, rendered)
+
+
+def _rendered(px_w: int = 1000, px_h: int = 1000) -> triage.RenderedPage:
+    return triage.RenderedPage(page=3, png=b"", px_w=px_w, px_h=px_h, text_layer_chars=0, content_hash="0")
+
+
+def test_box_in_pixels_is_rescaled_to_fractions():
+    """A box the model gave in PIXELS is rescaled, not thrown away."""
+    box, note = triage._repair_box({"x": 0, "y": 0, "w": 1000, "h": 1200}, 2000, 2400)
+    assert box == (0.0, 0.0, 0.5, 0.5)
+    assert note == triage.BOX_REPAIRED_FLAG
+
+
+def test_box_in_grid_0_1000_is_rescaled_to_fractions():
+    box, note = triage._repair_box({"x": 100, "y": 200, "w": 300, "h": 400}, 1000, 1400)
+    assert box == (0.1, 0.2, 0.3, 0.4)
+    assert note == triage.BOX_REPAIRED_FLAG
+    # A box that is ALREADY fractions is left alone — no flag, no noise.
+    assert triage._repair_box({"x": 0.1, "y": 0.2, "w": 0.3, "h": 0.4}, 1000, 1400) == (
+        (0.1, 0.2, 0.3, 0.4), "")
+
+
+def test_slightly_out_of_range_box_is_clamped():
+    box, note = triage._repair_box({"x": -0.05, "y": 0.1, "w": 0.5, "h": 1.2}, 1000, 1400)
+    assert box is not None and note == triage.BOX_REPAIRED_FLAG
+    x, y, w, h = box
+    assert 0.0 <= x and y >= 0.0 and x + w <= 1.0 + 1e-9 and y + h <= 1.0 + 1e-9
+    assert (x, y) == (0.0, 0.1)
+
+
+def test_zero_size_box_becomes_the_whole_page_and_is_flagged():
+    """The failure this fixes: page 3's box had no area after repair."""
+    box, note = triage._repair_box({"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.5}, 1000, 1400)
+    assert box is None and note == ""          # nothing usable to repair
+
+    _, _, docs = triage._normalize_page(
+        {"documents": [{"category": "tax_invoice", "label": "KMAP/2026-27/002",
+                         "boxes": [{"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.5}]}]},
+        _rendered(),
+    )
+    assert len(docs) == 1
+    assert docs[0].boxes == [(0.0, 0.0, 1.0, 1.0)]
+    assert triage.BOX_WHOLE_PAGE_FLAG in docs[0].flags
+    assert docs[0].box_notes == [triage.BOX_WHOLE_PAGE_FLAG]
+
+    # A reply with the boxes key missing altogether takes the same fallback.
+    _, _, docs2 = triage._normalize_page(
+        {"documents": [{"category": "no_gst_expense", "label": "a bill"}]}, _rendered())
+    assert docs2[0].boxes == [(0.0, 0.0, 1.0, 1.0)]
+    assert triage.BOX_WHOLE_PAGE_FLAG in docs2[0].flags
+
+
+def test_a_rescaled_box_is_flagged_on_the_document():
+    _, _, docs = triage._normalize_page(
+        {"documents": [{"category": "tax_invoice", "label": "KMAP/2026-27/002",
+                         "boxes": [{"x": 100, "y": 200, "w": 300, "h": 400}]}]},
+        _rendered(),
+    )
+    assert docs[0].boxes == [(0.1, 0.2, 0.3, 0.4)]
+    assert triage.BOX_REPAIRED_FLAG in docs[0].flags
+
+
+def test_page_failure_keeps_the_first_300_chars_of_the_raw_reply():
+    reply = {"documents": [{"category": "banana", "label": "x" * 500}]}
+    text = triage._invalid_reply_error(triage._InvalidPageResponse("unknown category 'banana'"), reply)
+    assert text.startswith("invalid response: unknown category")
+    assert "| raw: " in text
+    assert len(text.split("| raw: ", 1)[1]) <= triage.RAW_REPLY_IN_ERROR_CHARS == 300
+    assert text.endswith("xxx")               # the reply is truncated, not dropped
 
 
 def test_normalize_page_accepts_blank_and_synonym():
@@ -438,6 +514,73 @@ def test_hamming_helper():
     assert triage._hamming_hex("00", "00") == 0
     assert triage._hamming_hex("0f", "00") == 4
     assert triage._hamming_hex("", "00") == 999
+
+
+def test_a_repaired_box_is_stored_flagged_with_one_decision_line(monkeypatch, tmp_path):
+    """End to end: a 0-1000 box is rescaled, flagged on the document, and the
+    repair gets exactly one line in the existing audit table."""
+    db_path, uid = _fresh_upload(tmp_path, pages=1)
+    _stub(monkeypatch, {
+        1: {"rotation_deg": 0, "page_is_blank": False,
+            "documents": [_doc(label="KMAP/2026-27/002",
+                               boxes=[{"x": 100, "y": 200, "w": 300, "h": 400}])]},
+    })
+    _run_and_wait(uid, db_path)
+
+    conn = recon_db.get_connection(db_path)
+    try:
+        doc = conn.execute(
+            "SELECT document_id, flags_json FROM invoice_documents WHERE upload_id = ?",
+            (uid,)).fetchone()
+        region = conn.execute(
+            "SELECT page, x, y, w, h FROM document_regions WHERE document_id = ?",
+            (doc[0],)).fetchone()
+        log = conn.execute(
+            "SELECT action, after_json FROM document_region_log WHERE action = 'triage_box_repaired'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert triage.BOX_REPAIRED_FLAG in json.loads(doc[1])
+    assert (region[1], region[2], region[3], region[4]) == (0.1, 0.2, 0.3, 0.4)
+    assert len(log) == 1
+    payload = json.loads(log[0][1])
+    assert payload["pages"] == [1] and payload["note"] == triage.BOX_REPAIRED_FLAG
+
+
+def test_an_unusable_reply_still_fails_the_page_and_stays_visible(monkeypatch, tmp_path):
+    """A reply that is unusable for a reason other than geometry still fails —
+    the page is counted as failed and logged as unassigned, never dropped."""
+    db_path, uid = _fresh_upload(tmp_path, pages=2)
+    _stub(monkeypatch, {
+        1: {"rotation_deg": 0, "page_is_blank": False,
+            "documents": [{"category": "banana", "label": "x" * 100}]},
+        2: {"rotation_deg": 0, "page_is_blank": False, "documents": [_doc(label="INV-2")]},
+    })
+    run = _run_and_wait(uid, db_path)
+
+    conn = recon_db.get_connection(db_path)
+    try:
+        page = conn.execute(
+            "SELECT status, attempts, error, result_json FROM invoice_triage_pages "
+            "WHERE run_id = ? AND page = 1",
+            (run["run_id"],)).fetchone()
+        unassigned = conn.execute(
+            "SELECT after_json FROM document_region_log WHERE action = 'page_unassigned'"
+        ).fetchall()
+        docs = conn.execute(
+            "SELECT count(*) AS n FROM invoice_documents WHERE upload_id = ?", (uid,)).fetchone()
+    finally:
+        conn.close()
+
+    assert page[0] == "failed" and page[3] is None
+    assert run["pages_failed"] == 1 and run["status"] == "partial"
+    assert "invalid response: unknown category" in page[2]
+    assert "| raw: " in page[2]
+    assert len(page[2].split("| raw: ", 1)[1]) <= 300
+    assert docs[0] == 1                                       # only page 2's
+    assert [json.loads(r[0]) for r in unassigned] == [
+        {"page": 1, "reason": "page_failed"}]
 
 
 def test_duplicate_copy_is_stored_excluded_with_a_decision_log_line(monkeypatch, tmp_path):
@@ -503,7 +646,9 @@ def test_failed_page_makes_run_partial_then_retry_fixes_it(monkeypatch, tmp_path
 def test_invalid_and_empty_replies_count_as_failures(monkeypatch, tmp_path):
     db_path, uid = _fresh_upload(tmp_path, pages=2)
     _stub(monkeypatch, {
-        1: {"documents": [{"category": "tax_invoice", "boxes": [{"x": 0.1, "y": 0.1, "w": 0.0, "h": 0.5}]}]},
+        # Both unusable for a reason that is NOT geometry: a box with no size is
+        # repaired to the whole page now, so it is no longer a failure.
+        1: {"documents": [{"category": "banana", "boxes": [{"x": 0.1, "y": 0.1, "w": 0.3, "h": 0.5}]}]},
         2: {"page_is_blank": False, "documents": []},
     })
     result = _run_and_wait(uid, db_path)

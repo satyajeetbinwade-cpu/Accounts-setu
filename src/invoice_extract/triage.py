@@ -46,7 +46,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -74,6 +74,18 @@ DEFAULT_EXCLUDED_CATEGORY = "not_a_voucher"
 #: because the prompt asks for it by name AND ``_stitch`` reads it back, so the
 #: two must stay in step (the prompt interpolates this constant).
 DUPLICATE_PAGE_FLAG = "duplicate_page"
+
+#: Set on a document whose box the app had to REPAIR (rescaled from pixels or a
+#: 0-1000 grid, or clamped into range) and on one whose box it had to REPLACE
+#: with the whole page because nothing usable survived. A repaired box is never
+#: a failure: a bad box must not lose a whole page, but a reviewer must be able
+#: to see that the box is the app's, not the model's.
+BOX_REPAIRED_FLAG = "box_repaired"
+BOX_WHOLE_PAGE_FLAG = "box_whole_page"
+
+#: How much of an unusable model reply is kept in the stored error text, so the
+#: next failed page can be diagnosed from the database alone.
+RAW_REPLY_IN_ERROR_CHARS = 300
 
 CATEGORY_DEFINITIONS: dict[str, str] = {
     "tax_invoice": "a GST tax invoice — it shows a GSTIN and/or CGST/SGST/IGST tax.",
@@ -221,13 +233,17 @@ _SYSTEM_PROMPT = (
     "than three is rare — double-check. If two items could differ in issuer or "
     "number, return TWO and add the flag \"unsure_split\".\n"
     "5. Categorise each as exactly one of: tax_invoice, no_gst_expense, "
-    "supporting, ticket, not_a_voucher. Statements and summaries — bank, card, "
-    "loan, credit-limit, payable, telecom and utility monthly or summary "
-    "statements, ledgers, passbooks — are supporting, or not_a_voucher if only "
-    "a notice, NEVER tax_invoice/no_gst_expense even with charges or GST; a page "
-    "saying it is a summary, is not a tax invoice, or that input tax credit is "
-    "not available on it is never tax_invoice. One bill seen twice — as a "
-    "statement and as the real Tax Invoice (titled Tax Invoice, with the "
+    "supporting, ticket, not_a_voucher. A BILL for one period that shows its "
+    "charges and the amount due is a voucher: tax_invoice when it is a tax "
+    "invoice with the issuer's GST registration number and a tax breakup, "
+    "otherwise no_gst_expense. Statements and summaries — a running list of "
+    "transactions or account activity across periods (bank, card, loan, "
+    "credit-limit, payable, telecom and utility monthly statements, summaries "
+    "included), a ledger or a passbook — are supporting, as is a payment "
+    "receipt or acknowledgement, or a page saying it is a summary, is not a tax "
+    "invoice, or that input tax credit is not available on it: NEVER "
+    "tax_invoice/no_gst_expense, even with charges or GST. One bill seen twice "
+    "— as a statement and as the real Tax Invoice (titled Tax Invoice, with the "
     "issuer's GST registration number and a tax breakup) — is tax_invoice only "
     "for the real one: the statement is supporting, its history tables, payment "
     "details and advertisements included.\n"
@@ -402,6 +418,15 @@ def _canonical_box(raw: Any, px_w: int, px_h: int) -> Optional[tuple[float, floa
     Values may be 0-1 fractions, 0-1000 (Gemini-style), or pixels; the scale is
     inferred from the magnitude and, for pixels, the rendered page size.
     """
+    corners = _box_corners(raw)
+    if corners is None:
+        return None
+    scaled, _rescaled = _to_fractions(corners, px_w, px_h)
+    return _fractional(scaled)
+
+
+def _box_corners(raw: Any) -> Optional[tuple[float, float, float, float]]:
+    """The four corners a model box carries, or None when unreadable."""
     if raw is None:
         return None
 
@@ -436,24 +461,42 @@ def _canonical_box(raw: Any, px_w: int, px_h: int) -> Optional[tuple[float, floa
     for v in (x0, y0, x1, y1):
         if v != v or v in (float("inf"), float("-inf")):  # NaN / inf
             return None
+    return x0, y0, x1, y1
 
-    # Normalise the scale. corners may come as x0/x1 rather than x0/w.
+
+def _to_fractions(
+    corners: tuple[float, float, float, float], px_w: int, px_h: int,
+) -> tuple[tuple[float, float, float, float], bool]:
+    """Corners to page fractions, plus whether the scale had to be inferred.
+
+    A value just above 1 (up to 1.5) is a fraction that drifted and is clamped,
+    not a rescaled unit. Clearly larger values are a pixel box or a 0-1000 grid:
+    everything within 1000 is read as the grid (the conservative reading, which
+    is what the coordinate convention above never exceeds), and anything above
+    1000 is read as pixels when the rendered page size is known, as the grid
+    otherwise.
+    """
+    x0, y0, x1, y1 = corners
     if x1 < x0:
         x0, x1 = x1, x0
     if y1 < y0:
         y0, y1 = y1, y0
 
-    m = max(abs(x1), abs(y1))
-    if m > 1.5:
-        if m <= 1000.0 and px_w and px_h:
-            # Ambiguous between 0-1000 and pixels; prefer 0-1000 only when the
-            # page is much larger than the coords (typical of a 0-1000 grid).
-            if m <= 1000.0 and (px_w <= 1.5 * max(px_w, px_h)):
-                x0, y0, x1, y1 = x0 / 1000.0, y0 / 1000.0, x1 / 1000.0, y1 / 1000.0
-            else:
-                x0, y0, x1, y1 = x0 / px_w, y0 / px_h, x1 / px_w, y1 / px_h
-        else:
-            x0, y0, x1, y1 = x0 / 1000.0, y0 / 1000.0, x1 / 1000.0, y1 / 1000.0
+    m = max(abs(x0), abs(y0), abs(x1), abs(y1))
+    if m <= 1.5:
+        return (x0, y0, x1, y1), False
+    if m > 1000.0 and px_w and px_h:
+        return (x0 / px_w, y0 / px_h, x1 / px_w, y1 / px_h), True
+    return (x0 / 1000.0, y0 / 1000.0, x1 / 1000.0, y1 / 1000.0), True
+
+
+def _fractional(corners: tuple[float, float, float, float]) -> Optional[tuple[float, float, float, float]]:
+    """Corners to clamped ``(x, y, w, h)`` fractions — None when there is no area."""
+    x0, y0, x1, y1 = corners
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
 
     x0 = min(max(x0, 0.0), 1.0)
     y0 = min(max(y0, 0.0), 1.0)
@@ -463,6 +506,27 @@ def _canonical_box(raw: Any, px_w: int, px_h: int) -> Optional[tuple[float, floa
     if w < MIN_BOX_SIDE or h < MIN_BOX_SIDE:
         return None
     return (round(x0, 6), round(y0, 6), round(w, 6), round(h, 6))
+
+
+def _repair_box(
+    raw: Any, px_w: int, px_h: int,
+) -> tuple[Optional[tuple[float, float, float, float]], str]:
+    """``(box, note)`` for one model box — repaired, never rejected on scale.
+
+    Order: rescale a pixel or 0-1000 box to fractions, then clamp it into
+    ``[0,1]``, and report ``box_repaired`` when either step actually changed the
+    box. ``(None, "")`` means nothing usable survives; the caller then replaces
+    the box with the whole page rather than failing the page.
+    """
+    corners = _box_corners(raw)
+    if corners is None:
+        return None, ""
+    scaled, rescaled = _to_fractions(corners, px_w, px_h)
+    box = _fractional(scaled)
+    if box is None:
+        return None, ""
+    clamped = any(v < 0.0 or v > 1.0 for v in scaled)
+    return box, (BOX_REPAIRED_FLAG if (rescaled or clamped) else "")
 
 
 _CATEGORY_ALIASES: dict[str, str] = {
@@ -521,14 +585,21 @@ class NormalizedDoc:
     flags: list[str]
     evidence: str
     boxes: list[tuple[float, float, float, float]]
+    #: Which boxes were the app's own doing rather than the model's:
+    #: ``BOX_REPAIRED_FLAG`` and/or ``BOX_WHOLE_PAGE_FLAG``. Persisted as a
+    #: decision-log line so the repair is visible in the review.
+    box_notes: list[str] = field(default_factory=list)
 
 
 def _normalize_page(raw: Any, rendered: RenderedPage) -> tuple[int, bool, list[NormalizedDoc]]:
     """Validate + canonicalise one page reply.
 
-    Raises ``_InvalidPageResponse`` when the reply is not a JSON object, a
-    category is unknown, or a non-blank page yields no valid document. The
-    caller retries once, then marks the page failed — never silently empty.
+    Raises ``_InvalidPageResponse`` only when the reply is unusable for a reason
+    that is not the geometry: not a JSON object, a category that is unknown, or a
+    non-blank page that yields no document at all. A box whose scale is wrong or
+    which is out of range is REPAIRED (rescaled, clamped, or replaced by the
+    whole page, flagged) — a bad box never loses a page. The caller retries once,
+    then marks the page failed — never silently empty.
     """
     if not isinstance(raw, dict):
         raise _InvalidPageResponse("reply was not a JSON object")
@@ -553,15 +624,27 @@ def _normalize_page(raw: Any, rendered: RenderedPage) -> tuple[int, bool, list[N
             raw_boxes = [entry.get("box")] if entry.get("box") is not None else []
         if not isinstance(raw_boxes, list):
             raise _InvalidPageResponse("'boxes' was not a list")
+        # Repair rather than reject: a bad box must not lose a whole page.
         boxes: list[tuple[float, float, float, float]] = []
+        notes: list[str] = []
         for rb in raw_boxes:
-            box = _canonical_box(rb, rendered.px_w, rendered.px_h)
+            box, note = _repair_box(rb, rendered.px_w, rendered.px_h)
             if box is None:
-                raise _InvalidPageResponse("a box was outside [0,1] or had no size")
+                notes.append(BOX_REPAIRED_FLAG)
+                continue
             boxes.append(box)
+            if note:
+                notes.append(note)
         if not boxes:
-            raise _InvalidPageResponse("a document had no boxes")
+            # Nothing usable survived, but the category and label are otherwise
+            # valid: the document is the WHOLE page, flagged so that a reviewer
+            # can see the box is the app's and not the model's.
+            boxes = [(0.0, 0.0, 1.0, 1.0)]
+            notes = [BOX_WHOLE_PAGE_FLAG]
         flags = [str(f) for f in (entry.get("flags") or []) if str(f).strip()]
+        for note in notes:
+            if note not in flags:
+                flags.append(note)
         docs.append(
             NormalizedDoc(
                 category=category,
@@ -571,6 +654,7 @@ def _normalize_page(raw: Any, rendered: RenderedPage) -> tuple[int, bool, list[N
                 flags=flags,
                 evidence=str(entry.get("evidence") or "").strip()[:400],
                 boxes=boxes,
+                box_notes=sorted(set(notes)),
             )
         )
 
@@ -709,7 +793,7 @@ def _process_page(
         try:
             rotation, is_blank, docs = _normalize_page(parsed, rendered)
         except _InvalidPageResponse as exc:
-            last_error = f"invalid response: {exc}"
+            last_error = _invalid_reply_error(exc, parsed)
             continue
 
         # Rotation re-ask: boxes must be measured on the UPRIGHT page.
@@ -719,6 +803,7 @@ def _process_page(
             except Exception as exc:  # noqa: BLE001
                 last_error = f"could not rotate page: {exc}"
                 continue
+            parsed2: Any = None
             try:
                 parsed2, meta2 = _call_page_model(
                     rotated_png, page=page, total=total, cfg=cfg, db_path=db_path,
@@ -727,7 +812,10 @@ def _process_page(
                 _accumulate_usage(outcome, meta2)
                 _, is_blank, docs = _normalize_page(parsed2, rendered)
             except Exception as exc:  # noqa: BLE001
-                last_error = f"rotation re-ask failed: {type(exc).__name__}: {exc}"
+                if isinstance(exc, _InvalidPageResponse) and parsed2 is not None:
+                    last_error = _invalid_reply_error(exc, parsed2)
+                else:
+                    last_error = f"rotation re-ask failed: {type(exc).__name__}: {exc}"
                 continue
 
         outcome.status = "ok"
@@ -744,6 +832,7 @@ def _process_page(
                     "continues_previous": d.continues_previous,
                     "continues_next": d.continues_next,
                     "flags": list(d.flags),
+                    "box_notes": list(d.box_notes),
                     "evidence": d.evidence,
                     "boxes": [{"x": b[0], "y": b[1], "w": b[2], "h": b[3]} for b in d.boxes],
                 }
@@ -756,6 +845,22 @@ def _process_page(
     outcome.error = last_error or "page could not be read"
     outcome.result = None
     return outcome
+
+
+def _invalid_reply_error(exc: Exception, parsed: Any) -> str:
+    """``invalid response: …`` plus the first 300 characters of the raw reply.
+
+    A failed page keeps the model's own words in the stored error text so the
+    next failure can be diagnosed from the database alone. The reply is model
+    output about a page image — never anything else.
+    """
+    try:
+        raw = json.dumps(parsed, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        raw = str(parsed)
+    return "invalid response: %s | raw: %s" % (
+        exc, " ".join(raw.split())[:RAW_REPLY_IN_ERROR_CHARS],
+    )
 
 
 def _accumulate_usage(outcome: PageOutcome, meta: Optional[dict[str, Any]]) -> None:
@@ -813,6 +918,10 @@ class _Doc:
     regions: list[dict[str, Any]]
     first_page: int
     last_page: int
+    #: ``BOX_REPAIRED_FLAG`` / ``BOX_WHOLE_PAGE_FLAG`` raised on any of this
+    #: document's pages. Each one becomes its own decision-log line for the
+    #: reviewer (``triage_box_repaired`` / ``triage_box_whole_page``).
+    box_notes: set[str] = field(default_factory=set)
     #: Set when the document must NOT be counted or extracted even though its
     #: category is extractable — today only a duplicate COPY of an earlier page.
     #: ``_persist_documents`` turns this into excluded=1 + this reason.
@@ -904,6 +1013,7 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
             category = str(entry.get("category") or "").strip()
             label = str(entry.get("label") or "").strip()
             flags = {str(f) for f in (entry.get("flags") or [])}
+            box_notes = {str(n) for n in (entry.get("box_notes") or [])}
             boxes = [
                 (float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"]))
                 for b in (entry.get("boxes") or [])
@@ -930,6 +1040,7 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
                     regions=[],
                     first_page=outcome.page,
                     last_page=outcome.page,
+                    box_notes=set(box_notes),
                     excluded_reason=f"duplicate of page {duplicate_of} — {duplicate_why}",
                 )
                 for b in boxes:
@@ -944,6 +1055,7 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
                         target.flags.add("category_disagrees")
                     for b in boxes:
                         target.regions.append(_region(outcome.page, b, len(target.regions)))
+                    target.box_notes |= box_notes
                     target.last_page = outcome.page
                     continue
                 # An explicit continuation with nothing to attach to.
@@ -957,6 +1069,7 @@ def _stitch(pages: list[PageOutcome]) -> tuple[list[_Doc], list[dict[str, Any]]]
                 regions=[],
                 first_page=outcome.page,
                 last_page=outcome.page,
+                box_notes=set(box_notes),
             )
             for b in boxes:
                 doc.regions.append(_region(outcome.page, b, len(doc.regions)))
@@ -1157,6 +1270,27 @@ def _persist_documents(
                 VALUES (?, ?, 'triage_create', NULL, ?, ?, ?)
                 """,
                 (document_id, int(cur2.lastrowid), json.dumps(region), actor, _now()),
+            )
+        for note in sorted(doc.box_notes):
+            # One line per repair, in the same audit table the unassigned pages
+            # and the excluded copies already use — no new table, no migration.
+            # A reviewer reads this to see that the box is the app's, not the
+            # model's, and which pages it touches.
+            conn.execute(
+                """
+                INSERT INTO document_region_log
+                    (document_id, region_id, action, before_json, after_json, actor, at)
+                VALUES (?, NULL, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    document_id, "triage_" + note,
+                    json.dumps({
+                        "page": doc.first_page,
+                        "pages": sorted({r["page"] for r in doc.regions}),
+                        "note": note,
+                    }),
+                    actor, _now(),
+                ),
             )
     for item in unassigned:
         conn.execute(

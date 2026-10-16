@@ -1741,7 +1741,7 @@ def test_triage_prompt_keeps_one_document_per_issuer():
     # Keep the rewrite inside its size budget so the instruction weight on the
     # model does not balloon. History of the ceiling: the prompt was 1545 chars,
     # the one-document-per-issuer rules took it to 2012 (a ~+30% budget), the
-    # statement / duplicate-copy rules took it to 2308 (~+15%), and rewriting
-    # those two rules for the Airtel statement pages brought it to 2863 — the
-    # current approved ceiling.
-    assert len(prompt) <= 2863, f"system prompt grew to {len(prompt)} chars"
+    # statement / duplicate-copy rules took it to 2308 (~+15%), the Airtel
+    # statement rewrite took it to 2863, and the bill-versus-statement-versus-
+    # receipt rewrite brings it to 3138 — the current approved ceiling.
+    assert len(prompt) <= 3138, f"system prompt grew to {len(prompt)} chars"
