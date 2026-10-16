@@ -814,6 +814,17 @@ class InvoiceReviewState(SharedUploadState):
     @rx.event
     def open_review(self, upload_id: int):
         self.open_upload_id = int(upload_id)
+        # The index goes with the lists it points into (see ``back_to_files``):
+        # a stale index over a freshly-loaded list is what turned one earlier
+        # failure into an IndexError on every update that followed.
+        self.current_document_id = 0
+        self.current_index = 0
+        self.document_count = 0
+        self.documents = []
+        self.cards = []
+        self.settled = []
+        self.check_rows_raw = []
+        self.field_boxes = {}
         self.field_inputs = {}
         self.edited_was = {}
         self.open_reason_for = ""
@@ -825,12 +836,44 @@ class InvoiceReviewState(SharedUploadState):
 
     @rx.event
     def back_to_files(self):
+        """Close the review screen and go back to the Files view.
+
+        The order matters: the index and the counts are cleared BEFORE the lists
+        they describe, so there is never an update where ``documents`` is empty
+        while ``current_index`` still points into it. This handler used to assign
+        ``self._page_srcs`` — a field that does not exist (the real one is
+        ``page_srcs``), so Reflex raised SetUndefinedStateVarError here and
+        stopped half-way, leaving exactly that broken state behind.
+        """
         self.open_upload_id = 0
+        self.current_document_id = 0
+        self.current_index = 0
+        self.document_count = 0
+        self.to_review_count = 0
+        self.reviewed_count = 0
+        self.needs_you_count = 0
         self.documents = []
         self.cards = []
         self.settled = []
+        self.not_applicable = []
+        self.derived = []
+        self.checks = []
+        self.check_rows_raw = []
+        self.field_boxes = {}
+        self.field_inputs = {}
+        self.input_warnings = {}
+        self.date_inputs = {}
+        self.date_labels = {}
+        self.edited_was = {}
+        self.open_reason_for = ""
+        self.drawer_open = False
+        self.refusal = ""
+        self.flash = ""
         self.view_regions = []
-        self._page_srcs = {}
+        self.view_page_chips = []
+        self.page_srcs = {}
+        self.page_info_rows = []
+        self.regions_cache = {}
         self._load_jobs()
 
     def _load_upload(self) -> None:
@@ -896,11 +939,11 @@ class InvoiceReviewState(SharedUploadState):
 
     @rx.var
     def can_go_prev(self) -> bool:
-        return self.current_index > 0
+        return 0 < self.current_index < len(self.documents)
 
     @rx.var
     def can_go_next(self) -> bool:
-        return self.current_index < self.document_count - 1
+        return 0 <= self.current_index < len(self.documents) - 1
 
     @rx.var
     def review_counter(self) -> str:
@@ -936,9 +979,20 @@ class InvoiceReviewState(SharedUploadState):
 
     def _next_issue_index(self):
         """The next document AFTER this one that still asks something, else the
-        next unreviewed one, else the first that asks — wrapping once."""
-        order = list(range(self.current_index + 1, self.document_count))
-        order += list(range(0, self.current_index))
+        next unreviewed one, else the first that asks — wrapping once.
+
+        Bounds-safe by construction: the LIST is the authority, never a stored
+        count or index. An empty list, a shorter list, or an index left over
+        from an earlier document all answer "no next issue" instead of raising
+        IndexError (they used to raise on every update after a failed handler).
+        """
+        count = len(self.documents)
+        if count == 0:
+            return None
+        if 0 <= self.current_index < count:
+            order = list(range(self.current_index + 1, count)) + list(range(0, self.current_index))
+        else:
+            order = list(range(count))
         for index in order:
             doc = self.documents[index]
             if doc.needs_you and not doc.excluded and not doc.reviewed:

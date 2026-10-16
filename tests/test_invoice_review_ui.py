@@ -358,6 +358,22 @@ def test_the_flow_renders_with_an_empty_database(tmp_path, monkeypatch):
     assert open_upload(new_state(), 1).documents == []
 
 
+def test_the_progress_timer_never_prints_a_date(scratch):
+    """react-moment PRINTS the date it holds. A bare ``rx.moment`` at the top of
+    the flow therefore showed the raw JavaScript date string
+    ("Fri Oct 16 2026 09:32:01 GMT+0530 (India Standard Time)") above the
+    document navigation. The timer is now inside a hidden box: it still ticks,
+    and it is not text."""
+    from setu.views.invoice_review_page import invoice_review_flow
+
+    flow = str(invoice_review_flow())
+    assert "jsx(Moment" in flow, "the idle/running timer must still be wired up"
+    before = flow[: flow.index("jsx(Moment")]
+    assert '["display"] : "none"' in before[-240:], (
+        "the moment timer must be hidden — otherwise it renders a raw JS date"
+    )
+
+
 def test_the_flag_off_leaves_the_services_refusing(tmp_path, monkeypatch):
     """Belt and braces: with the flag OFF the v2 services refuse, so the legacy
     path cannot be reached by accident through a v2 call."""

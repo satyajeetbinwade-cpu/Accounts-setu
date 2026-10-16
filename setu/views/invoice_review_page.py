@@ -88,10 +88,14 @@ def invoice_review_flow() -> rx.Component:
     return _HotkeySurface.create(
         rx.vstack(
             # Poll only while something is genuinely running: the timer is not
-            # rendered otherwise, so an idle screen makes no calls at all.
+            # rendered otherwise, so an idle screen makes no calls at all. The
+            # timer is HIDDEN because react-moment PRINTS the date it holds:
+            # a bare rx.moment here rendered the raw JavaScript date string
+            # ("Fri Oct 16 2026 09:32:01 GMT+0530 (India Standard Time)") above
+            # the document navigation. Hidden, it is only a clock.
             rx.cond(
                 S.any_job_running,
-                rx.moment(interval=3000, on_change=S.poll),
+                rx.box(rx.moment(interval=3000, on_change=S.poll), display="none"),
                 rx.fragment(),
             ),
             rx.cond(
