@@ -27,7 +27,7 @@ from __future__ import annotations
 import base64
 import re
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime
+from datetime import datetime, timezone
 
 import reflex as rx
 
@@ -45,6 +45,18 @@ from src.invoice_extract import service as ie
 from src.invoice_extract import triage as triage_mod
 from setu.foundation import tokens as t
 from setu.state.shared_upload import SharedUploadState, drop_completed
+from setu.state.upload_stage import (
+    STAGE_ATTENTION,
+    STAGE_EXTRACTING,
+    STAGE_FAILED,
+    STAGE_QUEUED,
+    STAGE_READING,
+    STAGE_READY,
+    Stage,
+    StageFacts,
+    derive_stage,
+    progress_banner,
+)
 
 PERM_UPLOAD = "invoice_extract.upload"
 PERM_REVIEW = "invoice_extract.review"
@@ -187,6 +199,113 @@ class JobRow:
     progress_label: str = ""
     summary_label: str = ""
     error: str = ""
+    #: When the upload was queued — the source of the elapsed-time words.
+    created_at: str = ""
+    # --- the derived stage (see setu/state/upload_stage.py) ---------------
+    stage_key: str = ""
+    stage_label: str = ""
+    stage_detail: str = ""
+    stage_running: bool = False
+    stage_needs_action: bool = False
+    stage_done: int = 0
+    stage_total: int = 0
+    stage_show_progress: bool = False
+    stage_pct: int = 0
+    elapsed_label: str = ""
+
+
+@dataclass
+class JobStageRow:
+    """The COMPACT, live row the Files list renders.
+
+    Kept apart from ``JobRow`` on purpose: the 2-second poll rebuilds ONLY this
+    list, so a tick never re-serializes the big state (the shared upload/viewer
+    fields) or the full row model — just one small row per file.
+    """
+
+    upload_id: int = 0
+    filename: str = ""
+    client_label: str = ""
+    stage_key: str = ""
+    stage_label: str = ""
+    stage_detail: str = ""
+    running: bool = False
+    needs_action: bool = False
+    can_resume: bool = False
+    can_retry: bool = False
+    started: bool = False
+    done: int = 0
+    total: int = 0
+    show_progress: bool = False
+    pct: int = 0
+    progress_label: str = ""
+    elapsed_label: str = ""
+    counts_line: str = ""
+    error: str = ""
+
+
+def stage_of_row(row: JobStageRow) -> Stage:
+    """The Stage a rendered row carries — used for the live banner."""
+    return Stage(
+        key=row.stage_key, label=row.stage_label, detail=row.stage_detail,
+        running=row.running, needs_attention=row.needs_action,
+        done=row.done, total=row.total, show_progress=row.show_progress,
+    )
+
+
+def _elapsed_label(created_at: str, *, now: datetime | None = None) -> str:
+    """How long this upload has been going — short and human ("2m 30s").
+
+    Only shown while a stage is RUNNING; a finished file shows its counts
+    instead.
+    """
+    text = str(created_at or "").strip()
+    if not text:
+        return ""
+    try:
+        started = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    seconds = max(0, int(((now or datetime.now(timezone.utc)) - started).total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+def _stage_facts(
+    *, started: bool, run_status: str, chain_state: str, pages_ok: int, pages_total: int,
+    pages_failed: int, extraction: dict,
+) -> StageFacts:
+    """The stage's inputs, from the counts the review API already returns.
+
+    The extraction's own denominator is the number of extraction ROWS: that is
+    the set of documents the extraction actually works through. (Counting the
+    upload's documents instead would leave a supporting or excluded document
+    that has no row waiting for ever, so a finished file could never read as
+    ready.)
+    """
+    counts: dict[str, int] = {}
+    for key in ("queued", "running", "complete", "partial", "failed", "skipped"):
+        try:
+            counts[key] = int((extraction or {}).get(key) or 0)
+        except (TypeError, ValueError):
+            counts[key] = 0
+    try:
+        total = int((extraction or {}).get("total") or sum(counts.values()))
+    except (TypeError, ValueError):
+        total = sum(counts.values())
+    terminal = counts["complete"] + counts["partial"] + counts["failed"] + counts["skipped"]
+    return StageFacts(
+        started=started, run_status=run_status, chain_state=chain_state,
+        pages_ok=pages_ok, pages_total=pages_total, pages_failed=pages_failed,
+        documents=total, documents_terminal=terminal,
+        documents_complete=counts["complete"], documents_failed=counts["failed"],
+        documents_running=counts["running"], documents_queued=counts["queued"],
+    )
 
 
 @dataclass
@@ -403,7 +522,14 @@ class InvoiceReviewState(SharedUploadState):
     client_label_map: dict[str, str] = {}
     upload_client_id: int = 0
     jobs: list[JobRow] = []
+    #: The live rows the list RENDERS — the poll's only write target.
+    job_rows: list[JobStageRow] = []
     poll_active: bool = False
+    #: A tick is executing right now (overlapping ticks are dropped).
+    poll_in_flight: bool = False
+    #: Bumped every time the timer mounts, so a re-entered page can tell its own
+    #: loop from a leftover one.
+    poll_token: int = 0
     upload_error: str = ""
     #: Amendment 5 — WHO reads the files, on the Files view itself.
     models_line: str = ""
@@ -562,7 +688,19 @@ class InvoiceReviewState(SharedUploadState):
 
     @rx.var
     def any_job_running(self) -> bool:
-        return any(job.running for job in self.jobs)
+        """Is any file on the list in a RUNNING stage? Drives the poll."""
+        return any(row.running for row in self.job_rows)
+
+    @rx.var
+    def live_progress_banner(self) -> str:
+        """One live line for the Files list; "" when nothing is running, so the
+        line disappears by itself."""
+        if not self.job_rows:
+            return ""
+        return progress_banner(
+            [stage_of_row(row) for row in self.job_rows],
+            [row.filename for row in self.job_rows],
+        )
 
     @rx.var
     def upload_client_name(self) -> str:
@@ -591,27 +729,84 @@ class InvoiceReviewState(SharedUploadState):
     def _load_jobs(self) -> None:
         if not self.upload_client_id:
             self.jobs = []
+            self.job_rows = []
             self.poll_active = False
             return
         rows: list[JobRow] = []
+        compact: list[JobStageRow] = []
         for upload in ie.list_uploads(client_id=self.upload_client_id, viewer=self._viewer()):
-            rows.append(self._job_row(upload))
-        rows.sort(key=lambda r: (-r.running, not r.started, -r.upload_id))
-        self.jobs = rows
-        self.poll_active = any(r.running for r in rows)
+            row, stage_row = self._job_row(upload)
+            rows.append(row)
+            compact.append(stage_row)
+        order = sorted(
+            range(len(rows)),
+            key=lambda i: (-rows[i].running, not rows[i].started, -rows[i].upload_id),
+        )
+        self.jobs = [rows[i] for i in order]
+        self.job_rows = [compact[i] for i in order]
+        # ONE loop, and only while something genuinely runs: this is what the
+        # rendered timer is gated on.
+        self.poll_active = any(r.running for r in self.job_rows)
 
-    def _job_row(self, upload: dict) -> JobRow:
+    def _stage(self, row: JobRow, extraction: dict) -> Stage:
+        """The row's stage, derived from facts (see upload_stage.derive_stage)."""
+        return derive_stage(_stage_facts(
+            started=row.started, run_status=row.status, chain_state=row.chain_state,
+            pages_ok=row.pages_ok, pages_total=row.pages_total, pages_failed=row.pages_failed,
+            extraction=extraction,
+        ))
+
+    def _stage_row(self, job: JobRow, extraction: dict) -> JobStageRow:
+        stage = self._stage(job, extraction)
+        return JobStageRow(
+            upload_id=job.upload_id, filename=job.filename, client_label=job.client_label,
+            stage_key=stage.key, stage_label=stage.label, stage_detail=stage.detail,
+            running=stage.running, needs_action=stage.needs_attention,
+            can_resume=job.can_resume, can_retry=job.can_retry, started=job.started,
+            done=stage.done, total=stage.total, show_progress=stage.show_progress,
+            pct=stage.percent,
+            progress_label=job.progress_label,
+            elapsed_label=_elapsed_label(job.created_at) if stage.running else "",
+            counts_line=job.summary_label, error=job.error,
+        )
+
+    def _jobs_free_stage_rows(self) -> tuple[list[JobStageRow], bool]:
+        """Rebuild ONLY the compact rows, from a read-only query.
+
+        This is the poll's whole body: it touches ``review_api`` exactly the way
+        the first paint does (so it inherits the app's own connection settings —
+        no new locking behaviour, safe while the pipeline writes), writes ONE
+        small state variable, and never goes near ``jobs`` or the shared
+        upload/viewer state. A row whose read fails keeps the stage it had and
+        is tried again on the next tick (the second value says so).
+        """
+        previous = {row.upload_id: row for row in self.job_rows}
+        out: list[JobStageRow] = []
+        read_failed = False
+        for job in self.jobs:
+            try:
+                progress = review_api.get_upload_progress(job.upload_id)
+            except Exception:  # noqa: BLE001 — keep the last known stage
+                read_failed = True
+                if job.upload_id in previous:
+                    out.append(previous[job.upload_id])
+                continue
+            out.append(self._stage_row(job, progress.get("extraction") or {}))
+        return out, read_failed
+
+    def _job_row(self, upload: dict) -> tuple[JobRow, JobStageRow]:
         upload_id = int(upload["upload_id"])
         row = JobRow(
             upload_id=upload_id,
             filename=str(upload.get("filename") or ""),
             client_label=self._label(upload.get("client_id")),
+            created_at=str(upload.get("created_at") or ""),
         )
         try:
             progress = review_api.get_upload_progress(upload_id)
         except Exception as exc:  # noqa: BLE001 — one bad row must not hide the list
             row.error = str(exc)
-            return row
+            return row, self._stage_row(row, {})
         triage = progress["triage"]
         review = progress["review"]
         extraction = progress["extraction"]
@@ -642,64 +837,50 @@ class InvoiceReviewState(SharedUploadState):
         except Exception:  # noqa: BLE001 — the progress tallies remain as fallback
             pass
         self._label_job(row, extraction)
-        return row
+        return row, self._stage_row(row, extraction)
 
     def _label_job(self, row: JobRow, extraction: dict) -> None:
-        """The job's own words — a state a person can act on, never a colour."""
+        """The job's own words — one stage, derived from FACTS.
+
+        The label used to come from the PERSISTED chain state alone, so a file
+        whose triage run and extraction had both finished still said "Working —
+        31 of 31 pages read" while its chain row was stale. The stage now comes
+        from the triage run row and the extraction rows (see
+        ``upload_stage.derive_stage``); the chain state is only one input.
+        """
         chain = str(row.chain_state or "")
-        running = extraction.get("queued", 0) + extraction.get("running", 0)
-        if chain in ("queued", "triage_running", "extraction_running"):
-            row.running = True
-            row.status_label = "Working"
-            row.progress_label = (
-                f"{row.pages_ok} of {row.pages_total or '?'} pages read"
-                + (f" — {row.fallback_pages} by the fallback model" if row.fallback_pages else "")
-            )
-            return
-        if chain == "triage_done_extraction_pending":
-            # The window that used to look finished: pages are read, the
-            # extraction has not started yet. It is STILL RUNNING.
-            row.running = True
-            row.status_label = "Reading the values"
-            row.progress_label = (
-                f"{row.pages_ok} of {row.pages_total} pages read — the extraction "
-                "is starting. Progress is saved; it is safe to leave this page."
-            )
-            return
-        if chain == "interrupted":
+        if chain == "interrupted" or row.status == triage_mod.RUN_INTERRUPTED:
             row.can_resume = True
-            row.status_label = "Stopped part-way"
-            row.progress_label = "The app restarted while this was running. Resume picks up the rest."
-            return
-        if row.status == triage_mod.RUN_RUNNING or running:
-            row.running = True
-            row.status_label = "Reading the file"
-            row.progress_label = (
-                f"{row.pages_ok} of {row.pages_total or '?'} pages read"
-                + (f" — {row.fallback_pages} by the fallback model" if row.fallback_pages else "")
-            )
-            return
-        if row.status == triage_mod.RUN_INTERRUPTED:
-            row.can_resume = True
-            row.status_label = "Stopped part-way"
-            row.progress_label = (
-                f"the server restarted at page {row.pages_ok + 1} of {row.pages_total}"
-            )
-            return
         if row.status == triage_mod.RUN_PARTIAL or row.pages_failed:
             row.can_resume = True
             row.can_retry = row.pages_failed > 0
-            row.status_label = f"Read {row.pages_ok} of {row.pages_total}, {row.pages_failed} page(s) failed"
-            row.progress_label = "The document is ready to review; the failed pages can be retried."
-            return
-        if not row.started:
-            row.status_label = "Not extracted yet"
-            row.progress_label = "Extract (new pipeline) starts the reading."
-            return
-        row.status_label = "Read"
-        row.progress_label = f"{row.pages_ok} page(s) read"
-        if row.fallback_pages:
-            row.progress_label += f" — {row.fallback_pages} by the fallback model"
+
+        stage = self._stage(row, extraction)
+        row.stage_key = stage.key
+        row.stage_label = stage.label
+        row.stage_detail = stage.detail
+        row.stage_running = stage.running
+        row.stage_needs_action = stage.needs_attention
+        row.stage_done = stage.done
+        row.stage_total = stage.total
+        row.stage_show_progress = stage.show_progress
+        row.stage_pct = stage.percent
+        row.running = stage.running
+        row.status_label = stage.label
+        pages = (
+            f"{row.pages_ok} of {row.pages_total} page(s) read"
+            if row.pages_total else f"{row.pages_ok} page(s) read"
+        )
+        if stage.key in (STAGE_READY, STAGE_ATTENTION):
+            row.progress_label = pages
+            if row.fallback_pages:
+                row.progress_label += f" — {row.fallback_pages} by the fallback model"
+        else:
+            row.progress_label = stage.detail
+        row.elapsed_label = _elapsed_label(row.created_at) if stage.running else ""
+        # The counts line — the numbers a reviewer works from — once the file is
+        # past reading. It is kept for every stage so the row can show it the
+        # moment the stage turns ready.
         row.summary_label = (
             f"{row.documents} document(s) · {row.excluded} excluded · "
             f"{row.to_review} to review · {row.reviewed} reviewed"
@@ -707,10 +888,44 @@ class InvoiceReviewState(SharedUploadState):
         if row.with_needs_you:
             row.summary_label += f" · {row.with_needs_you} need you"
 
+    # ------------------------------------------------------------------
+    # Live progress: ONE poll, and it writes ONE small variable
+    # ------------------------------------------------------------------
+    @rx.event
+    def start_progress_poll(self):
+        """The timer mounted: this page owns one loop.
+
+        Re-entering the page mounts a NEW timer (and unmounts the old one, which
+        calls ``stop_progress_poll``), so a stale loop can never keep ticking.
+        """
+        self.poll_token += 1
+        self.poll_active = any(row.running for row in self.job_rows)
+
+    @rx.event
+    def stop_progress_poll(self):
+        """The timer unmounted (the page was left): stop ticking."""
+        self.poll_active = False
+
     @rx.event
     def poll(self):
-        """Re-read the jobs while something is running."""
-        self._load_jobs()
+        """One tick: re-read ONLY the compact stage rows while something runs.
+
+        It stops by itself when nothing is running, drops overlapping ticks, and
+        shows the last known stage when a read fails (the next tick tries again).
+        """
+        if not self.poll_active or self.poll_in_flight:
+            return
+        self.poll_in_flight = True
+        try:
+            rows, read_failed = self._jobs_free_stage_rows()
+            self.job_rows = rows
+            # Tick again while something runs, or while a read failed (the next
+            # tick tries again); otherwise the loop stops by itself.
+            self.poll_active = read_failed or any(row.running for row in rows)
+        except Exception:  # noqa: BLE001 — a failed read must not blank the list
+            self.poll_active = True
+        finally:
+            self.poll_in_flight = False
 
     # ------------------------------------------------------------------
     # Upload → pipeline (the v2 entry point)
@@ -767,10 +982,9 @@ class InvoiceReviewState(SharedUploadState):
         if errors:
             self.upload_error = " · ".join(errors)
         if queued:
-            self.flash = (
-                f"{len(queued)} file(s) queued — the triage run reads every page, then "
-                "the extraction follows. Progress is saved; it is safe to leave this page."
-            )
+            # Short: the LIVE line above the list carries the running stages now
+            # (and disappears when nothing is running).
+            self.flash = f"{len(queued)} file(s) queued for reading."
         self.upload_progress = drop_completed(self.upload_progress)
         self.clear_pending()
         self.batch_name = ""

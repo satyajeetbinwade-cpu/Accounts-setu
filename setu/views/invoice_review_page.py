@@ -93,9 +93,19 @@ def invoice_review_flow() -> rx.Component:
             # a bare rx.moment here rendered the raw JavaScript date string
             # ("Fri Oct 16 2026 09:32:01 GMT+0530 (India Standard Time)") above
             # the document navigation. Hidden, it is only a clock.
+            #
+            # Two seconds, one loop: mounting bumps the state's poll token and
+            # unmounting stops the loop, so re-entering the page cannot leave a
+            # second one ticking behind it. Each tick re-reads ONLY the compact
+            # job_rows (see InvoiceReviewState.poll).
             rx.cond(
                 S.any_job_running,
-                rx.box(rx.moment(interval=3000, on_change=S.poll), display="none"),
+                rx.box(
+                    rx.moment(interval=2000, on_change=S.poll),
+                    display="none",
+                    on_mount=S.start_progress_poll,
+                    on_unmount=S.stop_progress_poll,
+                ),
                 rx.fragment(),
             ),
             rx.cond(
@@ -246,24 +256,67 @@ def _job_actions(job) -> rx.Component:
 
 
 def _job_row(job) -> rx.Component:
+    """One file: its STAGE chip, a determinate bar while it runs, and its counts.
+
+    The row renders the compact, live ``job_rows`` — the only thing the poll
+    rebuilds — so a tick updates this row without touching the rest of the page.
+    """
     return rx.box(
         rx.hstack(
             rx.vstack(
                 rx.hstack(
                     rx.text(job.filename, style=t.TEXT["body"], font_weight="600"),
-                    rx.cond(job.running, _status_chip("Working", tone="warn"),
-                            rx.cond(job.can_resume | job.can_retry,
-                                    _status_chip(job.status_label, tone="warn"),
-                                    rx.cond(job.started, _status_chip(job.status_label, tone="ok"),
-                                            _status_chip(job.status_label)))),
+                    rx.cond(
+                        job.stage_key == "failed",
+                        _status_chip(job.stage_label, tone="fail"),
+                        rx.cond(
+                            job.running | job.needs_action,
+                            _status_chip(job.stage_label, tone="warn"),
+                            rx.cond(
+                                job.stage_key == "ready",
+                                _status_chip(job.stage_label, tone="ok"),
+                                _status_chip(job.stage_label),
+                            ),
+                        ),
+                    ),
+                    rx.cond(
+                        job.elapsed_label != "",
+                        rx.text(
+                            f"queued {job.elapsed_label} ago",
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                        ),
+                        rx.fragment(),
+                    ),
+                    rx.spacer(),
+                    _job_actions(job),
                     spacing="2",
                     align="center",
                     wrap="wrap",
+                    width="100%",
+                ),
+                # The numbers in words, and a DETERMINATE bar while reading or
+                # extracting (pages read / total, then documents done / total).
+                rx.cond(
+                    job.show_progress,
+                    rx.hstack(
+                        rx.progress(value=job.pct, max=100, width="100%", size="1"),
+                        rx.text(
+                            f"{job.done} / {job.total}",
+                            style=t.TEXT["micro"],
+                            color=t.Color.TEXT_SECONDARY.value,
+                            white_space="nowrap",
+                        ),
+                        spacing="2",
+                        align="center",
+                        width="100%",
+                    ),
+                    rx.fragment(),
                 ),
                 rx.text(job.progress_label, style=t.TEXT["micro"], color=t.Color.TEXT_SECONDARY.value),
                 rx.cond(
-                    job.summary_label != "",
-                    rx.text(job.summary_label, style=t.TEXT["micro"]),
+                    job.counts_line != "",
+                    rx.text(job.counts_line, style=t.TEXT["micro"]),
                     rx.fragment(),
                 ),
                 rx.cond(
@@ -273,9 +326,8 @@ def _job_row(job) -> rx.Component:
                 ),
                 spacing="1",
                 align="start",
+                width="100%",
             ),
-            rx.spacer(),
-            _job_actions(job),
             width="100%",
             align="center",
             spacing="3",
@@ -315,6 +367,13 @@ def invoice_files_view() -> rx.Component:
             ),
         ),
         rx.cond(S.flash != "", c.info_banner(S.flash), rx.fragment()),
+        # The LIVE line: it reflects the running stages and disappears by itself
+        # when nothing is running (the static banner it replaced never did).
+        rx.cond(
+            S.live_progress_banner != "",
+            c.info_banner(S.live_progress_banner),
+            rx.fragment(),
+        ),
         rx.cond(S.error != "", c.inline_reason(S.error), rx.fragment()),
         rx.cond(S.v2_reason != "", c.warning_banner(S.v2_reason), rx.fragment()),
         _upload_bar(),
@@ -326,7 +385,7 @@ def invoice_files_view() -> rx.Component:
                     c.empty_state("Choose a client to see their files.", icon="users"),
                     rx.cond(
                         S.jobs.length() > 0,
-                        rx.vstack(rx.foreach(S.jobs, _job_row), width="100%", spacing="2"),
+                        rx.vstack(rx.foreach(S.job_rows, _job_row), width="100%", spacing="2"),
                         c.empty_state("No files for this client yet.", icon="file-text"),
                     ),
                 ),
