@@ -129,6 +129,31 @@ def _log(
     )
 
 
+def append_log(
+    conn: sqlite3.Connection,
+    *,
+    action: str,
+    actor: str,
+    document_id: Optional[int] = None,
+    upload_id: Optional[int] = None,
+    reason: Optional[str] = None,
+    before: Optional[dict[str, Any]] = None,
+    after: Optional[dict[str, Any]] = None,
+    field_key: Optional[str] = None,
+) -> None:
+    """Append one log row on the CALLER's connection — its own transaction.
+
+    The extraction uses this to record what its post-read rule dropped, so the
+    log row and the fields it describes commit together: an extraction can
+    remove a false line, but never silently.
+    """
+    _log(
+        conn, action=action, actor=actor, document_id=document_id,
+        upload_id=upload_id, reason=reason, before=before, after=after,
+        field_key=field_key,
+    )
+
+
 def _mark_extraction_needs_run(conn: sqlite3.Connection, document_id: int) -> int:
     """Put the document's ACTIVE extraction back to ``queued``.
 

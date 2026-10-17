@@ -184,6 +184,8 @@ def prompt_field_list() -> str:
     lines = [f"  - {f.key} ({f.kind}): {f.label}" for f in INVOICE_FIELDS]
     lines.append(
         "  - line.N.description / line.N.hsn_sac / line.N.quantity / "
-        "line.N.rate / line.N.amount — one group per printed line, N starting at 1"
+        "line.N.rate / line.N.amount — one group per printed line, N starting at 1; "
+        "a tax, round-off, subtotal/total or past-bill/history row is not a line "
+        "(its amount belongs to the tax, round-off or total field)"
     )
     return "\n".join(lines)

@@ -1745,3 +1745,208 @@ def test_triage_prompt_keeps_one_document_per_issuer():
     # statement rewrite took it to 2863, and the bill-versus-statement-versus-
     # receipt rewrite brings it to 3138 — the current approved ceiling.
     assert len(prompt) <= 3138, f"system prompt grew to {len(prompt)} chars"
+
+
+# ===========================================================================
+# The post-read rule: a tax-ledger row under the items is not a line item
+# ===========================================================================
+
+
+def _doc185_reads(*, with_tax_row: bool = True, amount: str = "180.00") -> dict:
+    """The doc-185 shape: one real line, and the tax ledger printed under it."""
+    fields = {
+        "invoice_number": "KMAP/2026-27/003",
+        "invoice_date": "03-04-2026",
+        "issuer_name": "Kumar Associates",
+        "issuer_gstin": "07AAECK9054D1ZK",
+        "place_of_supply": "Uttar Pradesh",
+        "taxable_value": "1,000.00",
+        "igst_amount": "180.00",
+        "invoice_total": "1,180.00",
+        "line.1.description": "Professional Fee",
+        "line.1.hsn_sac": "998212",
+        "line.1.quantity": "1",
+        "line.1.rate": "1,000.00",
+        "line.1.amount": "1,000.00",
+    }
+    if with_tax_row:
+        fields["line.2.description"] = "IGST Payable Account"
+        fields["line.2.amount"] = amount
+    return fields
+
+
+def test_a_tax_ledger_row_under_the_items_is_not_a_line_item(tmp_path, monkeypatch, v2_on):
+    pdf = _mk_pdf(tmp_path / "ledger.pdf", 1)
+    read = _reply(_doc185_reads())
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    keys = {row["field_key"] for row in outcome.fields}
+    assert "line.2.description" not in keys
+    assert "line.2.amount" not in keys
+    assert {key for key in keys if key.startswith("line.1.")}
+    # One drop per READ — both reads produced the false row.
+    assert sorted(letter for letter, _row in outcome.dropped_lines) == ["A", "B"]
+    assert all(row.matched_head == "igst_amount" for _letter, row in outcome.dropped_lines)
+    # The document ends with ONE line, and the real line is untouched.
+    row = {r["field_key"]: r for r in outcome.fields}["line.1.description"]
+    assert row["value_a"] == "Professional Fee"
+
+
+def test_a_kept_line_under_a_dropped_one_keeps_its_own_box(tmp_path, monkeypatch, v2_on):
+    """Renumbering re-keys a row; it never rebuilds it, so a position can never
+    slide onto a different line."""
+    pdf = _mk_pdf(tmp_path / "renumber.pdf", 1)
+    read = {
+        "fields": [
+            {"key": "igst_amount", "value": "180.00", "handwritten": False, "region": 1,
+             "box": {"x": 0.70, "y": 0.80, "w": 0.10, "h": 0.04}},
+            {"key": "line.1.description", "value": "Professional Fee", "handwritten": False,
+             "region": 1, "box": {"x": 0.10, "y": 0.20, "w": 0.30, "h": 0.04}},
+            {"key": "line.1.amount", "value": "1,000.00", "handwritten": False,
+             "region": 1, "box": {"x": 0.60, "y": 0.20, "w": 0.10, "h": 0.04}},
+            {"key": "line.2.description", "value": "IGST Payable Account", "handwritten": False,
+             "region": 1, "box": {"x": 0.10, "y": 0.30, "w": 0.30, "h": 0.04}},
+            {"key": "line.2.amount", "value": "180.00", "handwritten": False,
+             "region": 1, "box": {"x": 0.60, "y": 0.30, "w": 0.10, "h": 0.04}},
+            {"key": "line.3.description", "value": "Retainer Fee", "handwritten": False,
+             "region": 1, "box": {"x": 0.10, "y": 0.40, "w": 0.30, "h": 0.04}},
+        ],
+    }
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    rows = {r["field_key"]: r for r in outcome.fields}
+    assert "line.3.description" not in rows
+    # The ex-line.3 is now line.2, with ITS OWN y (0.40), not the ledger row's.
+    assert rows["line.2.description"]["value_a"] == "Retainer Fee"
+    assert rows["line.2.description"]["y"] > rows["line.1.description"]["y"]
+
+
+def test_both_reads_agree_on_the_line_count_when_only_one_kept_the_tax_row(
+        tmp_path, monkeypatch, v2_on):
+    pdf = _mk_pdf(tmp_path / "split.pdf", 1)
+    read_a = _reply(_doc185_reads(with_tax_row=True))
+    read_b = _reply(_doc185_reads(with_tax_row=False))
+    _stub_reads(monkeypatch, read_a, read_b)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    rows = {r["field_key"]: r for r in outcome.fields}
+    assert not [key for key in rows if key.startswith("line.2.")]
+    assert rows["line.1.amount"]["reads_agree"] == nz.AGREE_EXACT
+    # Only read A had a row to drop.
+    assert [letter for letter, _row in outcome.dropped_lines] == ["A"]
+
+
+def test_a_ledger_row_whose_amount_matches_nothing_printed_is_kept(
+        tmp_path, monkeypatch, v2_on):
+    pdf = _mk_pdf(tmp_path / "freight.pdf", 1)
+    fields = _doc185_reads(with_tax_row=False)
+    fields["line.2.description"] = "Freight IGST charges"
+    fields["line.2.amount"] = "500.00"
+    read = _reply(fields)
+    _stub_reads(monkeypatch, read, read)
+    outcome = ex.extract_document(
+        _document(), pdf.read_bytes(), "pdf", rotations={}, text_layer_chars=0,
+        cfg=ex.ExtractConfig(enabled=True), actor="t", db_path=None,
+    )
+    rows = {r["field_key"]: r for r in outcome.fields}
+    assert rows["line.2.description"]["value_a"] == "Freight IGST charges"
+    assert outcome.dropped_lines == []
+
+
+def test_one_change_log_entry_per_dropped_row(tmp_path, monkeypatch, scratch_db):
+    """The drop is written to the document's own change log, never silently."""
+    pdf = _mk_pdf(tmp_path / "log.pdf", 1)
+    upload_id, doc_ids = _seed_upload(scratch_db, documents=1, pages=1)
+    _set_upload_bytes(scratch_db, upload_id, pdf.read_bytes())
+    read = _reply(_doc185_reads())
+    _stub_reads(monkeypatch, read, read)
+    ex.start_extraction(upload_id, actor="test", db_path=scratch_db, force=True)
+    ex.wait_for_extraction(upload_id, db_path=scratch_db, timeout=60)
+    state = ex.job_state(upload_id)
+    assert state is not None and state["event"].wait(timeout=60)
+
+    from src.invoice_extract import doc_actions
+
+    entries = [
+        row for row in doc_actions.list_document_log(int(doc_ids[0]), db_path=scratch_db)
+        if row["action"] == "dropped_line_item"
+    ]
+    assert len(entries) == 2      # one per read
+    payloads = [json.loads(row["before_json"]) for row in entries]
+    assert {p["read"] for p in payloads} == {"A", "B"}
+    for payload in payloads:
+        assert payload["line_no"] == 2
+        assert payload["description"] == "IGST Payable Account"
+        assert payload["amount"] == "180.00"
+        assert payload["matched_head"] == "igst_amount"
+        assert payload["head_value"] == "180.00"
+    assert "IGST Payable Account" in entries[0]["reason"]
+    assert entries[0]["actor"] == "extract:post-read"
+
+
+def test_a_document_with_a_tax_ledger_row_has_no_second_line_card_and_can_be_reviewed(
+        tmp_path, monkeypatch, scratch_db):
+    """End to end: the false line is gone, so nothing demands its HSN/SAC — and
+    once the rest is settled the document can be marked reviewed."""
+    from src.settings import service as settings
+
+    settings.set_setting_str(ex.KEY_ENABLED, "true", actor="test", db_path=scratch_db)
+    pdf = _mk_pdf(tmp_path / "reviewable.pdf", 1)
+    upload_id, doc_ids = _seed_upload(scratch_db, documents=1, pages=1)
+    _set_upload_bytes(scratch_db, upload_id, pdf.read_bytes())
+    read = _reply(_doc185_reads())
+    _stub_reads(monkeypatch, read, read)
+    ex.start_extraction(upload_id, actor="test", db_path=scratch_db, force=True)
+    ex.wait_for_extraction(upload_id, db_path=scratch_db, timeout=60)
+    state = ex.job_state(upload_id)
+    assert state is not None and state["event"].wait(timeout=60)
+
+    from src.invoice_extract import doc_actions, review_api
+    from src.invoice_extract import rules as rules_mod
+
+    document_id = int(doc_ids[0])
+    model = rules_mod.get_review_model(document_id, db_path=scratch_db)
+    assert not [
+        item for item in model["needs_you"]
+        if str(item.get("field_key") or "").startswith("line.2")
+    ], "the false line must not ask for anything"
+    assert not [
+        key for key in {f["field_key"] for f in ex.get_extraction(
+            upload_id, db_path=scratch_db)["extractions"][0]["fields"]}
+        if key.startswith("line.2")
+    ]
+
+    # Settle whatever else the document asks — the screen's own services.
+    for _ in range(12):
+        model = rules_mod.get_review_model(document_id, db_path=scratch_db)
+        if not model["needs_you"]:
+            break
+        for item in model["needs_you"]:
+            kind = str(item.get("kind"))
+            if kind == "direction_unsettled":
+                review_api.confirm_direction(document_id, "purchase", actor="test",
+                                             db_path=scratch_db)
+            elif kind == "check_failed":
+                doc_actions.accept_check(document_id, str(item["check_key"]),
+                                         actor="test", db_path=scratch_db)
+            elif item.get("value"):
+                doc_actions.apply_field_decision(
+                    document_id, str(item["field_key"]), action="confirmed_as_is",
+                    value=str(item["value"]), actor="test", db_path=scratch_db,
+                )
+            else:
+                doc_actions.apply_field_decision(
+                    document_id, str(item["field_key"]), action="marked_not_printed",
+                    value=None, actor="test", db_path=scratch_db,
+                )
+    assert rules_mod.get_review_model(document_id, db_path=scratch_db)["needs_you"] == []
+    doc_actions.mark_reviewed(document_id, actor="test", db_path=scratch_db)
+    assert doc_actions.is_reviewed(document_id, db_path=scratch_db) is True

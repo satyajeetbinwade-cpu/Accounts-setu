@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait as futures_wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,6 +46,7 @@ from typing import Any, Optional
 from src import db as recon_db
 from src.invoice_extract import crops as crops_mod
 from src.invoice_extract import fields_v2 as fv2
+from src.invoice_extract import line_items
 from src.invoice_extract import normalisers as nz
 from src.invoice_extract.doc_extract_schema import (
     EXTRACTION_UNFINISHED,
@@ -234,7 +235,13 @@ _SYSTEM_PROMPT = (
     "5. The invoice total, tax amounts and taxable value come from the "
     "PRINTED summary block, even when a handwritten amount sits beside it.\n"
     "6. Read the line items in printed order as line.1, line.2, ... Give each "
-    "printed line its own description, HSN/SAC, quantity, rate and amount.\n"
+    "printed line its own description, HSN/SAC, quantity, rate and amount. A "
+    "tax row printed under the items (IGST, CGST, SGST or UTGST payable or "
+    "output account, cess), a round-off or \"short and excess\" row, a subtotal "
+    "or a total row is NOT a line item — read its amount into the matching tax, "
+    "round-off or total field instead. A table of past bills, usage history, "
+    "payment history or earlier periods on the page is not a line item either: "
+    "lines are only the charges of THIS document.\n"
     "7. For EVERY value, also give its box: x, y (top-left) and w, h (size) as "
     "FRACTIONS of the CROP you are looking at (0 to 1, top-left origin), and "
     "the 1-based index of the region the value came from (\"region\": 1 for "
@@ -413,6 +420,55 @@ def _parse_read(reply: dict[str, Any]) -> ReadResult:
                 "crop_box": crops_mod.parse_crop_box(item.get("box")),
             })
     return ReadResult(fields=fields, annotations=annotations)
+
+
+def _printed_tax_heads(read_a: ReadResult, read_b: ReadResult) -> dict[str, Optional[str]]:
+    """The tax heads and round-off PRINTED on this document, from both reads.
+
+    A read that did not capture a head falls back to the OTHER read's value for
+    the same document: one model missing the IGST line must not make the ledger
+    row that repeats it look like a real charge.
+    """
+    heads: dict[str, Optional[str]] = {}
+    for head in line_items.TAX_HEADS:
+        value: Optional[str] = None
+        for read in (read_a, read_b):
+            found = read.fields.get(head)
+            candidate = found.value_a if found is not None else None
+            if candidate not in (None, ""):
+                value = candidate
+                break
+        heads[head] = value
+    return heads
+
+
+def _prune_false_lines(
+    read: ReadResult, heads: dict[str, Optional[str]],
+) -> tuple[ReadResult, list[line_items.DroppedLine]]:
+    """Drop tax-ledger rows from ONE read and renumber the lines that are left.
+
+    The kept rows are RE-KEYED, never rebuilt, so each keeps its own box, region
+    and handwriting flag — a position can never slide onto a different line.
+    """
+    line_values = {
+        key: found.value_a for key, found in read.fields.items()
+        if fv2.parse_line_key(key) is not None
+    }
+    if not line_values:
+        return read, []
+    result = line_items.filter_lines(line_values, heads)
+    if not result.dropped:
+        return read, []
+    fields: dict[str, ReadField] = {}
+    for key, found in read.fields.items():
+        if fv2.parse_line_key(key) is not None:
+            new_key = result.renumber.get(key)
+            if new_key is None:
+                continue          # this field belonged to a DROPPED line
+        else:
+            new_key = key
+        fields[new_key] = found if new_key == key else replace(found, key=new_key)
+    return ReadResult(fields=fields, annotations=read.annotations), list(result.dropped)
 
 
 def _region_crop(crops: list[crops_mod.Crop], index: Optional[int]) -> Optional[crops_mod.Crop]:
@@ -660,6 +716,10 @@ class DocOutcome:
     attempts: int = 0
     elapsed_ms: int = 0
     crops: int = 0
+    #: (read letter, the row) for every tax-ledger/round-off row this document's
+    #: reads produced and the post-read rule dropped. Logged on the document's
+    #: own change log — a drop is never silent.
+    dropped_lines: list[tuple[str, line_items.DroppedLine]] = field(default_factory=list)
 
 
 def _usage_of(meta: dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
@@ -909,6 +969,16 @@ def extract_document(
             )
             outcome.elapsed_ms = int((time.monotonic() - started) * 1000)
             return outcome
+
+    # ---- 3b. a tax-ledger or round-off row under the items is NOT a line item
+    # (see line_items). Applied to BOTH reads' own output, before the two reads
+    # are compared, before the rows are stored and before the checks and the
+    # applicability rules read them — so a false line cannot demand an HSN/SAC
+    # and block the reviewer, and both reads count the same lines afterwards.
+    heads = _printed_tax_heads(read_a, read_b)
+    read_a, dropped_a = _prune_false_lines(read_a, heads)
+    read_b, dropped_b = _prune_false_lines(read_b, heads)
+    outcome.dropped_lines = [("A", row) for row in dropped_a] + [("B", row) for row in dropped_b]
 
     # ---- 4. annotations (page coords + placement) BEFORE the guard needs them
     annotations: list[dict[str, Any]] = []
@@ -1277,14 +1347,55 @@ def init_extract(db_path=None) -> int:
         conn.close()
 
 
+def _log_dropped_lines(
+    conn: sqlite3.Connection, document_id: int, outcome: DocOutcome, *, upload_id: Optional[int],
+) -> None:
+    """One change-log row per row the post-read rule dropped.
+
+    The entry names the read it came from, the line number it had THERE, the
+    description and amount exactly as that read printed them, and the head whose
+    printed value it repeated — enough for a reviewer to see what was removed
+    and why, without re-reading the page.
+    """
+    if not outcome.dropped_lines:
+        return
+    from src.invoice_extract import doc_actions
+
+    for read_letter, drop in outcome.dropped_lines:
+        doc_actions.append_log(
+            conn,
+            action="dropped_line_item",
+            actor="extract:post-read",
+            document_id=document_id,
+            upload_id=upload_id,
+            field_key=fv2.line_key(drop.line_no, "description"),
+            reason=(
+                f"read {read_letter}: line {drop.line_no} was not a line item — "
+                f"\"{drop.description}\" reads like a tax-ledger or round-off row and its "
+                f"amount {drop.amount} is the printed {drop.matched_head} "
+                f"({drop.head_value}); dropped and the remaining lines renumbered"
+            ),
+            before={
+                "read": read_letter,
+                "line_no": drop.line_no,
+                "description": drop.description,
+                "amount": drop.amount,
+                "matched_head": drop.matched_head,
+                "head_value": drop.head_value,
+            },
+        )
+
+
 def _persist_outcome(
     conn: sqlite3.Connection, extraction_id: int, document_id: int, outcome: DocOutcome,
+    *, upload_id: Optional[int] = None,
 ) -> None:
     """Write one document's outcome. All-or-nothing per document."""
     for row in outcome.fields:
         _insert_field(conn, extraction_id=extraction_id, document_id=document_id, row=row)
     for ann in outcome.annotations:
         _insert_annotation(conn, extraction_id=extraction_id, document_id=document_id, ann=ann)
+    _log_dropped_lines(conn, document_id, outcome, upload_id=upload_id)
     _update_extraction(
         conn, extraction_id,
         status=outcome.status,
@@ -1431,7 +1542,7 @@ def _execute_extraction(upload_id: int, *, actor: str, db_path=None) -> dict[str
                     conn, extraction_id, status=STATUS_QUEUED, error=outcome.error,
                 )
                 continue
-            _persist_outcome(conn, extraction_id, document_id, outcome)
+            _persist_outcome(conn, extraction_id, document_id, outcome, upload_id=upload_id)
         conn.commit()
     finally:
         conn.close()
