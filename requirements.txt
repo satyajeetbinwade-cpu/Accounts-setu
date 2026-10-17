@@ -4,6 +4,14 @@ rapidfuzz
 openpyxl
 cryptography
 pymupdf
+# Pillow is a RUNTIME dependency, not an extra: the page pipeline rasterises
+# every page into a PIL image for rotation, crop and blank detection
+# (src/invoice_extract/crops.py, triage.py), the review screen renders page
+# images with it (review_api.py) and the model catalogue draws its capability
+# badges with it (ai_models/service.py). A developer machine had it as a
+# transitive install, so its absence only showed up in the container — where
+# every triage run failed with "No module named 'PIL'" and each page was lost.
+pillow
 # Password hashing (F1 auth). bcrypt over PBKDF2: a deliberately slow KDF with
 # a per-hash salt, so a stolen db/poc.db cannot be turned back into passwords
 # at speed. Legacy PBKDF2 rows still verify and upgrade on next sign-in.
